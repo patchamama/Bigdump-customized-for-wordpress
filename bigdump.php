@@ -17,6 +17,10 @@ define('DATA_CHUNK_LENGTH',  16384);
 define('TESTMODE',           false);
 define('BIGDUMP_DIR',        dirname(__FILE__));
 define('CONFIG_FILE',        BIGDUMP_DIR . '/bigdump.config.json');
+define('BACKUP_DIR',         BIGDUMP_DIR . '/backups');
+
+// Create backup directory if it doesn't exist
+if (!is_dir(BACKUP_DIR)) @mkdir(BACKUP_DIR, 0775);
 
 // ============================================================
 // CONFIGURATION — load / save
@@ -176,13 +180,22 @@ function validate_wp_url(string $url): array {
 function run_backup(string $db_server, string $db_username, string $db_password, string $db_name, string $upload_dir): array {
     $ts       = date('Ymd_His');
     $filename = "backup_{$db_name}_{$ts}.sql";
-    $filepath = $upload_dir . '/' . $filename;
+    $filepath = BACKUP_DIR . '/' . $filename;
 
-    // Try mysqldump
+    // Try mysqldump — check absolute paths first (Apache may not have the user PATH)
     $mysqldump = null;
-    foreach (['mysqldump', '/usr/bin/mysqldump', '/usr/local/bin/mysqldump',
-              '/Applications/XAMPP/xamppfiles/bin/mysqldump'] as $bin) {
-        $test = shell_exec(escapeshellcmd($bin) . ' --version 2>&1');
+    $mysqldump_candidates = [
+        '/Applications/XAMPP/xamppfiles/bin/mysqldump',  // XAMPP macOS
+        '/opt/lampp/bin/mysqldump',                       // XAMPP Linux
+        '/usr/local/bin/mysqldump',                       // Homebrew / custom
+        '/usr/bin/mysqldump',                             // system package
+        '/opt/homebrew/bin/mysqldump',                    // Homebrew Apple Silicon
+        'mysqldump',                                      // in PATH (works if Apache inherits it)
+    ];
+    foreach ($mysqldump_candidates as $bin) {
+        // For absolute paths: check existence + executable bit before shelling out
+        if (str_starts_with($bin, '/') && (!file_exists($bin) || !is_executable($bin))) continue;
+        $test = @shell_exec(escapeshellarg($bin) . ' --version 2>&1');
         if ($test && stripos($test, 'mysqldump') !== false) {
             $mysqldump = $bin;
             break;
@@ -332,16 +345,26 @@ function ftp_upload_files(array $ftp_cfg, array $local_files): array {
 
 function find_dump_files(string $dir): array {
     $sql = []; $gz = []; $zip = []; $backup = [];
+    // Scan main dir for importable dumps
     if ($dh = opendir($dir)) {
         while (($f = readdir($dh)) !== false) {
             if (!is_file($dir . '/' . $f)) continue;
-            if (preg_match('/^backup_.*\.sql$/i', $f))       $backup[] = $f;
-            elseif (preg_match('/\.sql$/i', $f))             $sql[]    = $f;
-            elseif (preg_match('/\.(sql\.gz|gz)$/i', $f))   $gz[]     = $f;
-            elseif (preg_match('/\.zip$/i', $f))             $zip[]    = $f;
+            if      (preg_match('/\.sql$/i', $f))            $sql[] = $f;
+            elseif  (preg_match('/\.(sql\.gz|gz)$/i', $f))  $gz[]  = $f;
+            elseif  (preg_match('/\.zip$/i', $f))            $zip[] = $f;
         }
         closedir($dh);
     }
+    // Scan BACKUP_DIR for backup files
+    $backup_dir = BACKUP_DIR;
+    if (is_dir($backup_dir) && ($dh = opendir($backup_dir))) {
+        while (($f = readdir($dh)) !== false) {
+            if (is_file($backup_dir . '/' . $f) && preg_match('/^backup_.*\.sql$/i', $f))
+                $backup[] = $f;
+        }
+        closedir($dh);
+    }
+    rsort($backup); // most recent first
     return ['sql' => $sql, 'gz' => $gz, 'zip' => $zip, 'backup' => $backup];
 }
 
@@ -415,6 +438,24 @@ $upload_dir      = BIGDUMP_DIR;
 // ============================================================
 
 $_early_action = $_POST['action'] ?? $_GET['action'] ?? '';
+
+// ---- Backup download handler (GET ?download=filename) ----
+if (isset($_GET['download'])) {
+    $dl_file = basename($_GET['download']);
+    $dl_path = BACKUP_DIR . '/' . $dl_file;
+    // Security: only allow backup files from BACKUP_DIR
+    if (preg_match('/^backup_.*\.sql$/i', $dl_file) && file_exists($dl_path)) {
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . $dl_file . '"');
+        header('Content-Length: ' . filesize($dl_path));
+        header('Cache-Control: no-cache');
+        readfile($dl_path);
+    } else {
+        http_response_code(404);
+        echo 'File not found.';
+    }
+    exit;
+}
 
 $_early_actions = [
     'wp_list_users', 'wp_change_pass', 'wp_change_email', 'wp_delete_user',
@@ -1064,14 +1105,25 @@ echo '</form>';
 // List existing backups
 $found_all = find_dump_files($upload_dir);
 if (!empty($found_all['backup'])) {
-    echo '<h2 style="margin-top:14px">Existing Backups</h2>';
-    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th></th></tr>';
+    echo '<h2 style="margin-top:14px">Existing Backups &nbsp;<span class="badge badge-info">'.count($found_all['backup']).' file(s)</span></h2>';
+    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Actions</th></tr>';
     foreach ($found_all['backup'] as $bf) {
-        $bp = $upload_dir.'/'.$bf;
-        echo '<tr><td><code>'.h($bf).'</code></td><td>'.fmt_bytes(filesize($bp)).'</td><td>'.date('Y-m-d H:i',filemtime($bp)).'</td>';
-        echo '<td><a href="?delete='.urlencode($bf).'" onclick="return confirm(\'Delete this backup?\')">Delete</a></td></tr>';
+        $bp = BACKUP_DIR . '/' . $bf;
+        $sz = file_exists($bp) ? fmt_bytes(filesize($bp)) : '?';
+        $dt = file_exists($bp) ? date('Y-m-d H:i', filemtime($bp)) : '?';
+        echo '<tr>';
+        echo '<td><code>' . h($bf) . '</code></td>';
+        echo '<td>' . $sz . '</td>';
+        echo '<td>' . $dt . '</td>';
+        echo '<td style="white-space:nowrap">';
+        echo '<a href="?download=' . urlencode($bf) . '" class="btn btn-success btn-sm" title="Download backup">⬇ Download</a> ';
+        echo '<a href="?delete=' . urlencode($bf) . '" class="btn btn-danger btn-sm" onclick="return confirm(\'Permanently delete ' . h($bf) . '?\')" title="Delete backup">✕ Delete</a>';
+        echo '</td>';
+        echo '</tr>';
     }
     echo '</table>';
+} else {
+    echo '<p class="msg-info" style="margin-top:10px">No backup files yet. Click "Generate backup now" to create one.</p>';
 }
 echo '</div></details>';
 
@@ -1358,10 +1410,14 @@ if (!$error && isset($_POST['uploadbutton'])) {
 // Handle delete
 if (!$error && isset($_GET['delete']) && $_GET['delete'] != basename(__FILE__)) {
     $del = basename($_GET['delete']);
-    if (preg_match('/\.(sql|gz|zip|csv)$/i', $del) && @unlink($upload_dir.'/'.$del))
-        echo '<p class="msg-success">✓ '.h($del).' deleted.</p>';
+    // Check backup dir first, then upload dir
+    $del_path = preg_match('/^backup_/i', $del)
+        ? BACKUP_DIR . '/' . $del
+        : $upload_dir . '/' . $del;
+    if (preg_match('/\.(sql|gz|zip|csv)$/i', $del) && @unlink($del_path))
+        echo '<p class="msg-success">✓ ' . h($del) . ' deleted.</p>';
     else
-        echo '<p class="msg-error">Could not delete '.h($del).'</p>';
+        echo '<p class="msg-error">Could not delete ' . h($del) . '</p>';
 }
 
 // Auto-extract ZIP

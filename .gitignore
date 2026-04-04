@@ -1,0 +1,18 @@
+# Backup files — never commit database dumps
+backups/*.sql
+backups/*.gz
+backups/*.zip
+
+# Dump files in root (imported/exported)
+*.sql
+*.gz
+*.zip
+
+# BigDump config — contains FTP credentials and URLs
+bigdump.config.json
+
+# WordPress config — contains DB credentials
+wp-config.php
+
+# Temporary files
+*.tmp
