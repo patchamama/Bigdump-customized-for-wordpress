@@ -1142,9 +1142,11 @@ if (!empty($found_all['backup'])) {
         echo '<td><code>' . h($bf) . '</code></td>';
         echo '<td>' . $sz . '</td>';
         echo '<td>' . $dt . '</td>';
+        $restore_url = '?start=1&fn='.urlencode($bf).'&from_backup=1&foffset=0&totalqueries=0&delimiter=;';
         echo '<td style="white-space:nowrap">';
+        echo '<a href="'.h($restore_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($bf).'? This will DROP all current tables.\')" title="Restore this backup">↩ Restore</a> ';
         echo '<a href="?download=' . urlencode($bf) . '" class="btn btn-success btn-sm" title="Download backup">⬇ Download</a> ';
-        echo '<a href="?delete=' . urlencode($bf) . '" class="btn btn-danger btn-sm" onclick="return confirm(\'Permanently delete ' . h($bf) . '?\')" title="Delete backup">✕ Delete</a>';
+        echo '<a href="?delete_backup=' . urlencode($bf) . '" class="btn btn-danger btn-sm" onclick="return confirm(\'Permanently delete ' . h($bf) . '?\')" title="Delete backup">✕ Delete</a>';
         echo '</td>';
         echo '</tr>';
     }
@@ -1231,21 +1233,25 @@ $cfg_url_remote = $cfg['url_remote'] ?? '';
 $wp_siteurl = '';
 if ($cfg_url_local === '' && $mysqli && !$mysqli->connect_error) {
     $tbl_opts = $wp_table_prefix . 'options';
-    $su_res = $mysqli->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
-    if ($su_res && $su_row = $su_res->fetch_assoc()) {
-        $wp_siteurl = rtrim($su_row['option_value'], '/');
-        $su_res->free();
-    }
+    try {
+        $su_res = $mysqli->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
+        if ($su_res && $su_row = $su_res->fetch_assoc()) {
+            $wp_siteurl = rtrim($su_row['option_value'], '/');
+            $su_res->free();
+        }
+    } catch (\Throwable $e) { /* table may not exist yet */ }
 }
 // Fallback: try a fresh connection if $mysqli not yet available at this point
 if ($wp_siteurl === '') {
     $tmp_conn = @new mysqli($db_server, $db_username, $db_password, $db_name);
     if (!$tmp_conn->connect_error) {
         $tbl_opts = $wp_table_prefix . 'options';
-        $su_res = $tmp_conn->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
-        if ($su_res && $su_row = $su_res->fetch_assoc()) {
-            $wp_siteurl = rtrim($su_row['option_value'], '/');
-        }
+        try {
+            $su_res = $tmp_conn->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
+            if ($su_res && $su_row = $su_res->fetch_assoc()) {
+                $wp_siteurl = rtrim($su_row['option_value'], '/');
+            }
+        } catch (\Throwable $e) { /* table may not exist yet */ }
         $tmp_conn->close();
     }
 }
