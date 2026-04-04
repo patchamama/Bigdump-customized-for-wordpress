@@ -1025,404 +1025,7 @@ if ($action === 'apply_url_replace') {
 }
 
 // ============================================================
-// SECTION 1 — PHP params check
-// ============================================================
-$upload_max = ini_bytes('upload_max_filesize');
-$post_max   = ini_bytes('post_max_size');
-$mem_limit  = ini_bytes('memory_limit');
-$time_limit = (int) ini_get('max_execution_time');
-
-echo '<details' . ($action === '' ? ' open' : '') . '>';
-echo '<summary>⚙ PHP Server Parameters</summary>';
-echo '<div class="details-body">';
-// Tooltip content for each adjustable ini param
-$ini_howto = <<<'TIP'
-<div class="ini-tooltip">
-  <strong>How to increase these limits:</strong><br><br>
-  <b>Option 1 — php.ini</b> (preferred, applies globally):<br>
-  <code>upload_max_filesize = 256M<br>post_max_size = 256M<br>memory_limit = 256M<br>max_execution_time = 300</code><br>
-  Find your php.ini: run <code>php --ini</code> or check <code>phpinfo()</code>.<br><br>
-  <b>Option 2 — .htaccess</b> (Apache only, in your site root):<br>
-  <code>php_value upload_max_filesize 256M<br>php_value post_max_size 256M<br>php_value memory_limit 256M<br>php_value max_execution_time 300</code><br><br>
-  <b>Option 3 — .user.ini</b> (most shared hosts / Nginx / PHP-FPM):<br>
-  Place this file in your web root:<br>
-  <code>upload_max_filesize=256M<br>post_max_size=256M<br>memory_limit=256M<br>max_execution_time=300</code><br>
-  PHP-FPM reads it every 5 min by default (<code>user_ini.cache_ttl</code>).<br><br>
-  <b>Option 4 — ini_set() in script</b> (runtime only, some hosts block it):<br>
-  <code>ini_set('memory_limit','256M');</code><br><br>
-  <em>After editing, restart Apache/Nginx or PHP-FPM for changes to take effect.</em>
-</div>
-TIP;
-
-echo '<style>
-.ini-help{display:inline-block;margin-left:6px;cursor:help;color:#3182ce;font-weight:bold;font-size:13px;
-  position:relative;vertical-align:middle}
-.ini-help .ini-tooltip{display:none;position:absolute;left:26px;top:-8px;z-index:999;background:#2d3748;
-  color:#e2e8f0;padding:14px 16px;border-radius:8px;width:380px;font-size:12px;line-height:1.6;
-  box-shadow:0 4px 20px rgba(0,0,0,.4);white-space:normal}
-.ini-help .ini-tooltip code{background:#4a5568;color:#f6e05e;padding:1px 4px;border-radius:3px;
-  display:block;margin:2px 0;font-family:monospace}
-.ini-help:hover .ini-tooltip{display:block}
-</style>';
-
-$help_icon = '<span class="ini-help">ⓘ' . $ini_howto . '</span>';
-
-echo '<table class="data"><tr><th>Parameter</th><th>Value</th><th>Status</th></tr>';
-$php_params = [
-    ['upload_max_filesize', fmt_bytes($upload_max), $upload_max >= 64*1048576, true],
-    ['post_max_size',       fmt_bytes($post_max),   $post_max   >= 64*1048576, true],
-    ['memory_limit',        fmt_bytes($mem_limit),  $mem_limit  >= 128*1048576 || $mem_limit <= 0, true],
-    ['max_execution_time',  $time_limit === 0 ? '∞' : $time_limit.'s', $time_limit === 0 || $time_limit >= 120, true],
-    ['curl',                function_exists('curl_init') ? 'enabled' : 'not available', function_exists('curl_init'), false],
-    ['zip',                 extension_loaded('zip')      ? 'enabled' : 'not available', extension_loaded('zip'), false],
-    ['ftp',                 function_exists('ftp_connect') ? 'enabled' : 'not available', function_exists('ftp_connect'), false],
-    ['ssh2/sftp',           function_exists('ssh2_connect') ? 'enabled' : 'not available', function_exists('ssh2_connect'), false],
-];
-foreach ($php_params as [$name, $val, $ok, $adjustable]) {
-    $badge = $ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-warn">Review</span>';
-    $hint  = (!$ok && $adjustable) ? $help_icon : '';
-    echo "<tr><td><code>$name</code>$hint</td><td>$val</td><td>$badge</td></tr>";
-}
-echo '</table></div></details>';
-
-// ============================================================
-// SECTION 2 — DB connection
-// ============================================================
-echo '<details open>';
-echo '<summary>🗄 Database Connection</summary>';
-echo '<div class="details-body">';
-
-if ($wp_config_loaded) {
-    echo '<p><span class="badge badge-ok">wp-config.php</span> &nbsp;<code>' . h($wp_config_path) . '</code></p>';
-} else {
-    echo '<p><span class="badge badge-warn">wp-config.php not found</span> — using default values.</p>';
-}
-
-echo '<table class="data" style="margin-top:10px">';
-echo '<tr><th>Parameter</th><th>Value</th></tr>';
-echo '<tr><td>Server</td><td><code>'.h($db_server).'</code></td></tr>';
-echo '<tr><td>Database</td><td><code>'.h($db_name).'</code></td></tr>';
-echo '<tr><td>User</td><td><code>'.h($db_username).'</code></td></tr>';
-echo '<tr><td>Charset</td><td><code>'.h($db_connection_charset).'</code></td></tr>';
-echo '<tr><td>Table prefix</td><td><code>'.h($wp_table_prefix).'</code></td></tr>';
-echo '</table>';
-
-$test_conn = @new mysqli($db_server, $db_username, $db_password, $db_name);
-if ($test_conn->connect_error) {
-    echo '<p class="msg-error" style="margin-top:10px">✗ Connection failed: '.h($test_conn->connect_error).'</p>';
-    $error = true;
-} else {
-    echo '<p class="msg-success" style="margin-top:10px">✓ Successfully connected to <strong>'.h($db_name).'</strong> on <strong>'.h($db_server).'</strong></p>';
-    $test_conn->close();
-}
-echo '</div></details>';
-
-// ============================================================
-// SECTION 3 — Backup
-// ============================================================
-echo '<details>';
-echo '<summary>💾 Database Backup</summary>';
-echo '<div class="details-body">';
-echo '<p>Creates a full dump of the current database <strong>before</strong> importing. The file is saved in the same directory.</p>';
-echo '<form method="POST">';
-echo '<input type="hidden" name="action" value="run_backup">';
-echo '<p style="margin-top:10px"><button type="submit" class="btn btn-warn">▶ Generate backup now</button></p>';
-echo '</form>';
-
-// List existing backups
-$found_all = find_dump_files($upload_dir);
-if (!empty($found_all['backup'])) {
-    echo '<h2 style="margin-top:14px">Existing Backups &nbsp;<span class="badge badge-info">'.count($found_all['backup']).' file(s)</span></h2>';
-    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Actions</th></tr>';
-    foreach ($found_all['backup'] as $bf) {
-        $bp = BACKUP_DIR . '/' . $bf;
-        $sz = file_exists($bp) ? fmt_bytes(filesize($bp)) : '?';
-        $dt = file_exists($bp) ? date('Y-m-d H:i', filemtime($bp)) : '?';
-        echo '<tr>';
-        echo '<td><code>' . h($bf) . '</code></td>';
-        echo '<td>' . $sz . '</td>';
-        echo '<td>' . $dt . '</td>';
-        $restore_url = '?start=1&fn='.urlencode($bf).'&from_backup=1&foffset=0&totalqueries=0&delimiter=;';
-        echo '<td style="white-space:nowrap">';
-        echo '<a href="'.h($restore_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($bf).'? This will DROP all current tables.\')" title="Restore this backup">↩ Restore</a> ';
-        echo '<a href="?download=' . urlencode($bf) . '" class="btn btn-success btn-sm" title="Download backup">⬇ Download</a> ';
-        echo '<a href="?delete_backup=' . urlencode($bf) . '" class="btn btn-danger btn-sm" onclick="return confirm(\'Permanently delete ' . h($bf) . '?\')" title="Delete backup">✕ Delete</a>';
-        echo '</td>';
-        echo '</tr>';
-    }
-    echo '</table>';
-} else {
-    echo '<p class="msg-info" style="margin-top:10px">No backup files yet. Click "Generate backup now" to create one.</p>';
-}
-echo '</div></details>';
-
-// ============================================================
-// SECTION 3b — WordPress User Management
-// ============================================================
-echo '<details>';
-echo '<summary>👤 WordPress User Management</summary>';
-echo '<div class="details-body">';
-echo '<p>Manage WordPress users directly in the database. Password changes use the phpass algorithm (compatible with WP).</p>';
-
-// User table
-echo '<div id="wp-users-wrap">';
-echo '<p><button type="button" class="btn btn-primary btn-sm" onclick="wpLoadUsers()">↺ Load / Refresh list</button></p>';
-echo '<div id="wp-users-table" style="margin-top:10px"></div>';
-echo '</div>';
-
-// Add user form
-echo '<details style="margin-top:14px;border:1px solid #e2e8f0;border-radius:6px;background:#f7fafc">';
-echo '<summary style="padding:10px 14px;cursor:pointer;font-weight:600;color:#2d3748">➕ Add new user</summary>';
-echo '<div style="padding:0 14px 14px">';
-echo '<form id="addUserForm" style="margin-top:10px">';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>Login (username)</label><input type="text" id="nu_login" placeholder="johnsmith" required></div>';
-echo '<div class="form-row"><label>Display name</label><input type="text" id="nu_name" placeholder="John Smith"></div>';
-echo '<div class="form-row"><label>Email</label><input type="text" id="nu_email" placeholder="john@example.com" required autocomplete="email"></div>';
-echo '<div class="form-row"><label>Password</label><input type="password" id="nu_pass" placeholder="minimum 6 characters" required autocomplete="new-password"></div>';
-echo '<div class="form-row"><label>Role</label>';
-echo '<select id="nu_role">';
-foreach (['administrator' => 'Administrator', 'editor' => 'Editor', 'author' => 'Author', 'contributor' => 'Contributor', 'subscriber' => 'Subscriber'] as $v => $l)
-    echo "<option value=\"$v\">$l</option>";
-echo '</select></div>';
-echo '</div>';
-echo '<p><button type="button" class="btn btn-success" onclick="wpAddUser()">➕ Create user</button></p>';
-echo '</form>';
-echo '<div id="add-user-result" style="margin-top:8px"></div>';
-echo '</div></details>';
-
-// Inline modal for edit operations
-echo <<<'HTML'
-<div id="wp-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:#fff;border-radius:10px;padding:28px;min-width:340px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.25)">
-    <h2 id="wp-modal-title" style="margin-bottom:16px;font-size:16px;color:#2d3748"></h2>
-    <div id="wp-modal-body"></div>
-    <div style="margin-top:16px;display:flex;gap:10px">
-      <button id="wp-modal-confirm" class="btn btn-success" onclick="wpModalConfirm()">Confirm</button>
-      <button class="btn" style="background:#e2e8f0;color:#4a5568" onclick="wpModalClose()">Cancel</button>
-    </div>
-    <div id="wp-modal-result" style="margin-top:10px"></div>
-  </div>
-</div>
-HTML;
-
-echo '</div></details>';
-
-// ============================================================
-// SECTION 3c — WordPress Plugins
-// ============================================================
-echo '<details>';
-echo '<summary>🔌 WordPress Plugins</summary>';
-echo '<div class="details-body">';
-echo '<p>Manage active WordPress plugins directly in the database. This reads and writes the <code>active_plugins</code> option.</p>';
-
-echo '<p style="margin-top:10px">';
-echo '<button type="button" class="btn btn-primary btn-sm" onclick="wpLoadPlugins()">↺ Load plugins</button> ';
-echo '<button type="button" class="btn btn-danger btn-sm" style="margin-left:6px" onclick="wpDeactivateAll()">✕ Deactivate all</button>';
-echo '</p>';
-echo '<div id="wp-plugins-table" style="margin-top:12px"></div>';
-echo '</div></details>';
-
-// ============================================================
-// SECTION 4 — URL replacement
-// ============================================================
-$cfg_url_local  = $cfg['url_local']  ?? '';
-$cfg_url_remote = $cfg['url_remote'] ?? '';
-
-// Auto-read siteurl from wp_options if source URL not yet configured
-$wp_siteurl = '';
-if ($cfg_url_local === '' && $mysqli && !$mysqli->connect_error) {
-    $tbl_opts = $wp_table_prefix . 'options';
-    try {
-        $su_res = $mysqli->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
-        if ($su_res && $su_row = $su_res->fetch_assoc()) {
-            $wp_siteurl = rtrim($su_row['option_value'], '/');
-            $su_res->free();
-        }
-    } catch (\Throwable $e) { /* table may not exist yet */ }
-}
-// Fallback: try a fresh connection if $mysqli not yet available at this point
-if ($wp_siteurl === '') {
-    $tmp_conn = @new mysqli($db_server, $db_username, $db_password, $db_name);
-    if (!$tmp_conn->connect_error) {
-        $tbl_opts = $wp_table_prefix . 'options';
-        try {
-            $su_res = $tmp_conn->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
-            if ($su_res && $su_row = $su_res->fetch_assoc()) {
-                $wp_siteurl = rtrim($su_row['option_value'], '/');
-            }
-        } catch (\Throwable $e) { /* table may not exist yet */ }
-        $tmp_conn->close();
-    }
-}
-// Use siteurl as default for source URL field if no config saved
-if ($cfg_url_local === '' && $wp_siteurl !== '') {
-    $cfg_url_local = $wp_siteurl;
-}
-
-echo '<details>';
-echo '<summary>🔗 WordPress URL Replacement</summary>';
-echo '<div class="details-body">';
-echo '<p>Replace image, upload, and document URLs in the SQL file before importing. URLs are validated against a live WordPress installation.</p>';
-
-// Validation result placeholders
-echo '<div id="val-local"></div><div id="val-remote"></div>';
-
-echo '<form method="POST" id="urlReplaceForm">';
-echo '<input type="hidden" name="action" value="url_preview">';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>🏠 Source URL (old)</label>';
-echo '<input type="url" name="url_old" id="url_old" value="'.h($cfg_url_local).'" placeholder="https://old-site.com" onblur="validateUrl(this.value,\'val-local\',\'local\')"></div>';
-echo '<div class="form-row"><label>🌐 Target URL (new)</label>';
-echo '<input type="url" name="url_new" id="url_new" value="'.h($cfg_url_remote).'" placeholder="https://new-site.com" onblur="validateUrl(this.value,\'val-remote\',\'remote\')"></div>';
-echo '</div>';
-
-// File selection for replacement
-$sql_available = array_merge($found_all['sql'], $found_all['gz']);
-if (!empty($sql_available)) {
-    echo '<div class="form-row"><label>SQL file to process</label>';
-    echo '<select name="sql_file" id="sql_file_replace">';
-    foreach ($sql_available as $sf) {
-        echo '<option value="'.h($sf).'">'.h($sf).'</option>';
-    }
-    echo '</select></div>';
-}
-
-echo '<p><button type="button" class="btn btn-primary" onclick="previewReplace()">🔍 Preview replacement</button></p>';
-echo '</form>';
-
-// Preview result
-echo '<div id="replace-preview"></div>';
-
-// Apply form (hidden until preview)
-echo '<form method="POST" id="applyReplaceForm" style="display:none;margin-top:12px">';
-echo '<input type="hidden" name="action" value="apply_url_replace">';
-echo '<input type="hidden" name="url_old" id="apply_url_old">';
-echo '<input type="hidden" name="url_new" id="apply_url_new">';
-echo '<input type="hidden" name="sql_file" id="apply_sql_file">';
-echo '<button type="submit" class="btn btn-success">✓ Apply replacement in SQL file</button>';
-echo '</form>';
-
-echo '</div></details>';
-
-// ============================================================
-// SECTION 5 — FTP/SFTP deploy
-// ============================================================
-$found_all_deploy = find_dump_files($upload_dir);
-$all_sql_files    = array_merge($found_all_deploy['sql'], $found_all_deploy['gz'], $found_all_deploy['zip']);
-
-echo '<details>';
-echo '<summary>🚀 FTP / SFTP Deploy</summary>';
-echo '<div class="details-body">';
-echo '<p>Upload <code>bigdump.php</code> and your SQL files to a remote server. Supports FTP, FTPS, and SFTP. Credentials can be saved in the configuration for reuse.</p>';
-
-echo '<form method="POST">';
-echo '<input type="hidden" name="action" value="ftp_upload">';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>Host / IP</label>';
-echo '<input type="text" name="ftp_host" value="'.h($cfg['ftp_host']??'').'" placeholder="ftp.mydomain.com"></div>';
-echo '<div class="form-row"><label>Protocol</label>';
-echo '<select name="ftp_protocol">';
-foreach (['ftp' => 'FTP', 'ftps' => 'FTPS (Secure FTP)', 'sftp' => 'SFTP (SSH)'] as $val => $label) {
-    $sel = ($cfg['ftp_protocol'] ?? 'ftp') === $val ? ' selected' : '';
-    echo "<option value=\"$val\"$sel>$label</option>";
-}
-echo '</select></div>';
-echo '<div class="form-row"><label>Username</label>';
-echo '<input type="text" name="ftp_user" value="'.h($cfg['ftp_user']??'').'" placeholder="ftp_user" autocomplete="username"></div>';
-echo '<div class="form-row"><label>Password</label>';
-echo '<input type="password" name="ftp_pass" value="'.h($cfg['ftp_pass']??'').'" placeholder="••••••••" autocomplete="current-password"></div>';
-echo '<div class="form-row"><label>Port</label>';
-echo '<input type="number" name="ftp_port" value="'.h($cfg['ftp_port']??'21').'" placeholder="21"></div>';
-echo '<div class="form-row"><label>Remote path</label>';
-echo '<input type="text" name="ftp_path" value="'.h($cfg['ftp_path']??'/').'" placeholder="/public_html/bigdump/"></div>';
-echo '</div>';
-
-if (!empty($all_sql_files)) {
-    echo '<div class="form-row"><label>SQL files to upload (optional)</label>';
-    echo '<div style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;padding:10px">';
-    foreach ($all_sql_files as $sf) {
-        $fp = $upload_dir.'/'.$sf;
-        $sz = file_exists($fp) ? ' ('.fmt_bytes(filesize($fp)).')' : '';
-        echo '<label style="font-weight:normal;display:flex;align-items:center;gap:6px;margin:4px 0">';
-        echo '<input type="checkbox" name="ftp_files[]" value="'.h($sf).'"> '.h($sf).$sz.'</label>';
-    }
-    echo '</div></div>';
-}
-
-echo '<p><button type="submit" class="btn btn-purple">📤 Upload selected files</button></p>';
-echo '</form>';
-
-// Zip whole directory + upload
-echo '<hr style="margin:18px 0;border:none;border-top:1px solid #e2e8f0">';
-echo '<h2>📦 Compress &amp; Upload working directory</h2>';
-echo '<p>Creates a <code>.zip</code> of the entire directory where this script lives and uploads it via FTP/SFTP. Useful for a full site backup or migration. Uses the same credentials above.</p>';
-echo '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
-echo '<button type="button" class="btn btn-warn" onclick="ftpZipUpload()">🗜 Compress &amp; Upload directory</button>';
-echo '<span id="zip-upload-result" style="font-size:13px"></span>';
-echo '</div>';
-
-echo '</div></details>';
-
-// ============================================================
-// SECTION 6 — Configuration
-// ============================================================
-echo '<details>';
-echo '<summary>⚙ Configuration &amp; Migration Profiles</summary>';
-echo '<div class="details-body">';
-echo '<p>Save FTP credentials, URLs, and preferences to <code>bigdump.config.json</code> for reuse. Supports bidirectional migration (local → hosting or hosting → local).</p>';
-
-if (file_exists(CONFIG_FILE)) {
-    echo '<p><span class="badge badge-ok">Config loaded</span> &nbsp; Last saved: <strong>' . h($cfg['saved_at'] ?? '—') . '</strong></p>';
-}
-
-echo '<form method="POST">';
-echo '<input type="hidden" name="action" value="save_config">';
-
-echo '<div class="form-row"><label>Profile name (e.g. "My site — local to production")</label>';
-echo '<input type="text" name="profile_name" value="'.h($cfg['profile_name']??'').'" placeholder="My WordPress migration"></div>';
-
-echo '<h2>Migration URLs</h2>';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>🏠 Local environment URL</label>';
-echo '<input type="url" name="url_local" value="'.h($cfg['url_local']??'').'" placeholder="http://localhost/mysite"></div>';
-echo '<div class="form-row"><label>🌐 Hosting / production URL</label>';
-echo '<input type="url" name="url_remote" value="'.h($cfg['url_remote']??'').'" placeholder="https://mydomain.com"></div>';
-echo '</div>';
-
-echo '<h2>FTP / SFTP Credentials</h2>';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>Host</label><input type="text" name="ftp_host" value="'.h($cfg['ftp_host']??'').'" placeholder="ftp.mydomain.com"></div>';
-echo '<div class="form-row"><label>Protocol</label><select name="ftp_protocol">';
-foreach (['ftp' => 'FTP', 'ftps' => 'FTPS', 'sftp' => 'SFTP'] as $v => $l) {
-    echo '<option value="'.$v.'"'.(($cfg['ftp_protocol']??'ftp')===$v?' selected':'').">$l</option>";
-}
-echo '</select></div>';
-echo '<div class="form-row"><label>Username</label><input type="text" name="ftp_user" value="'.h($cfg['ftp_user']??'').'" placeholder="username" autocomplete="username"></div>';
-echo '<div class="form-row"><label>Password</label><input type="password" name="ftp_pass" value="'.h($cfg['ftp_pass']??'').'" placeholder="••••••••" autocomplete="current-password"></div>';
-echo '<div class="form-row"><label>Port</label><input type="number" name="ftp_port" value="'.h($cfg['ftp_port']??'21').'"></div>';
-echo '<div class="form-row"><label>Remote path</label><input type="text" name="ftp_path" value="'.h($cfg['ftp_path']??'/').'" placeholder="/public_html/bigdump/"></div>';
-echo '</div>';
-
-echo '<h2>Import Preferences</h2>';
-echo '<div class="grid-2">';
-echo '<div class="form-row"><label>Lines per session</label>';
-echo '<input type="number" name="linespersession" value="'.h($cfg['linespersession']??'3000').'" min="100" max="100000">';
-echo '<small style="color:#718096;font-size:12px">Lower = safer on slow servers. Default: 3000.</small></div>';
-echo '<div class="form-row"><label>Delay between sessions (ms)</label>';
-echo '<input type="number" name="delaypersession" value="'.h($cfg['delaypersession']??'0').'" min="0" max="5000">';
-echo '<small style="color:#718096;font-size:12px">Add delay if MySQL is overloaded. Default: 0.</small></div>';
-echo '<div class="form-row"><label>Max lines per query</label>';
-echo '<input type="number" name="max_query_lines" value="'.h($cfg['max_query_lines']??'50000').'" min="300" max="500000">';
-echo '<small style="color:#718096;font-size:12px">Raise this for dumps with extended inserts (phpMyAdmin default). Default: 50000.</small></div>';
-echo '</div>';
-
-echo '<p style="margin-top:12px"><button type="submit" class="btn btn-success">💾 Save configuration</button></p>';
-echo '</form>';
-echo '</div></details>';
-
-// ============================================================
-// SECTION 7 — File list + upload + import
+// SECTION 7 (shown first) — File list + upload + import
 // ============================================================
 
 // Handle file upload
@@ -1458,7 +1061,6 @@ if (!$error && isset($_GET['delete_backup'])) {
 // Handle delete
 if (!$error && isset($_GET['delete']) && $_GET['delete'] != basename(__FILE__)) {
     $del = basename($_GET['delete']);
-    // Check backup dir first, then upload dir
     $del_path = preg_match('/^backup_/i', $del)
         ? BACKUP_DIR . '/' . $del
         : $upload_dir . '/' . $del;
@@ -1496,68 +1098,6 @@ if (!$error && !TESTMODE) {
         $mysqli->query("SET foreign_key_checks = 0");
     }
 }
-
-echo '<details open>';
-echo '<summary>📂 Import Files</summary>';
-echo '<div class="details-body">';
-
-$all_importable = array_merge($found['sql'], $found['gz'], $found['zip']);
-$all_backups    = $found['backup'];
-if (!empty($all_importable) || !empty($all_backups)) {
-    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Type</th><th>Actions</th></tr>';
-    foreach ($all_importable as $f) {
-        $fp   = $upload_dir.'/'.$f;
-        $type = preg_match('/\.sql$/i', $f) ? 'SQL' : (preg_match('/\.gz$/i', $f) ? 'GZip' : 'ZIP');
-        $can  = preg_match('/\.(sql|gz)$/i', $f);
-        $start_url = '?start=1&fn='.urlencode($f).'&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
-        echo '<tr>';
-        echo '<td><code>'.h($f).'</code></td>';
-        echo '<td>'.fmt_bytes(filesize($fp)).'</td>';
-        echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
-        echo '<td>'.$type.'</td>';
-        echo '<td>';
-        if ($can) echo '<a href="'.h($start_url).'" class="btn btn-primary btn-sm">▶ Import</a> &nbsp;';
-        echo '<a href="?delete='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete '.h($f).'?\')">✕</a>';
-        echo '</td></tr>';
-    }
-    foreach ($all_backups as $f) {
-        $fp   = BACKUP_DIR.'/'.$f;
-        $type = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
-        $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
-        echo '<tr style="background:#fff9e6">';
-        echo '<td><code>'.h($f).'</code> <span class="badge badge-info">backup</span></td>';
-        echo '<td>'.fmt_bytes(filesize($fp)).'</td>';
-        echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
-        echo '<td>'.$type.'</td>';
-        echo '<td>';
-        echo '<a href="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($f).'? This will DROP all current tables.\')">↩ Restore</a> &nbsp;';
-        echo '<a href="?download='.urlencode($f).'" class="btn btn-secondary btn-sm">⬇</a> &nbsp;';
-        echo '<a href="?delete_backup='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete backup '.h($f).'?\')">✕</a>';
-        echo '</td></tr>';
-    }
-    echo '</table>';
-} else {
-    echo '<p class="msg-warn">No .sql, .gz or .zip files found. Upload your dump below or via FTP.</p>';
-}
-
-// Upload form
-echo '<h2 style="margin-top:14px">Upload dump from browser</h2>';
-do { $tmpf = $upload_dir.'/'.time().'.tmp'; } while (file_exists($tmpf));
-if (!($tf = @fopen($tmpf, 'w'))) {
-    echo '<p class="msg-warn">Upload disabled — directory is not writable. Use FTP.</p>';
-} else {
-    fclose($tf); unlink($tmpf);
-    $umax = ini_bytes('upload_max_filesize');
-    echo '<p>Upload limit: <strong>'.fmt_bytes($umax).'</strong>. For larger files use FTP/SFTP.</p>';
-    echo '<form method="POST" enctype="multipart/form-data" style="margin-top:8px">';
-    echo '<input type="hidden" name="MAX_FILE_SIZE" value="'.$umax.'">';
-    echo '<div style="display:flex;gap:10px;align-items:flex-end">';
-    echo '<div style="flex:1"><label>File (.sql, .gz, .zip)</label>';
-    echo '<input type="file" name="dumpfile" accept=".sql,.gz,.zip,.csv"></div>';
-    echo '<div><button type="submit" name="uploadbutton" class="btn btn-primary">⬆ Upload</button></div>';
-    echo '</div></form>';
-}
-echo '</div></details>';
 
 // ============================================================
 // OPEN FILE + DROP TABLES + IMPORT SESSION
@@ -1766,6 +1306,465 @@ if ($error && isset($_GET['start']))
 if ($mysqli) { $mysqli->query("SET foreign_key_checks = 1"); $mysqli->close(); }
 if ($file && !$gzipmode) fclose($file);
 elseif ($file && $gzipmode) gzclose($file);
+
+// Import Files table (always shown)
+echo '<details open>';
+echo '<summary>📂 Import Files</summary>';
+echo '<div class="details-body">';
+
+$all_importable = array_merge($found['sql'], $found['gz'], $found['zip']);
+$all_backups    = $found['backup'];
+if (!empty($all_importable) || !empty($all_backups)) {
+    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Type</th><th>Actions</th></tr>';
+    foreach ($all_importable as $f) {
+        $fp   = $upload_dir.'/'.$f;
+        $type = preg_match('/\.sql$/i', $f) ? 'SQL' : (preg_match('/\.gz$/i', $f) ? 'GZip' : 'ZIP');
+        $can  = preg_match('/\.(sql|gz)$/i', $f);
+        $start_url = '?start=1&fn='.urlencode($f).'&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
+        echo '<tr>';
+        echo '<td><code>'.h($f).'</code></td>';
+        echo '<td>'.fmt_bytes(filesize($fp)).'</td>';
+        echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
+        echo '<td>'.$type.'</td>';
+        echo '<td>';
+        if ($can) echo '<a href="'.h($start_url).'" class="btn btn-primary btn-sm">▶ Import</a> &nbsp;';
+        echo '<a href="?delete='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete '.h($f).'?\')">✕</a>';
+        echo '</td></tr>';
+    }
+    foreach ($all_backups as $f) {
+        $fp   = BACKUP_DIR.'/'.$f;
+        $type = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
+        $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
+        echo '<tr style="background:#fff9e6">';
+        echo '<td><code>'.h($f).'</code> <span class="badge badge-info">backup</span></td>';
+        echo '<td>'.fmt_bytes(filesize($fp)).'</td>';
+        echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
+        echo '<td>'.$type.'</td>';
+        echo '<td>';
+        echo '<a href="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($f).'? This will DROP all current tables.\')">↩ Restore</a> &nbsp;';
+        echo '<a href="?download='.urlencode($f).'" class="btn btn-secondary btn-sm">⬇</a> &nbsp;';
+        echo '<a href="?delete_backup='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete backup '.h($f).'?\')">✕</a>';
+        echo '</td></tr>';
+    }
+    echo '</table>';
+} else {
+    echo '<p class="msg-warn">No .sql, .gz or .zip files found. Upload your dump below or via FTP.</p>';
+}
+
+// Upload form
+echo '<h2 style="margin-top:14px">Upload dump from browser</h2>';
+do { $tmpf = $upload_dir.'/'.time().'.tmp'; } while (file_exists($tmpf));
+if (!($tf = @fopen($tmpf, 'w'))) {
+    echo '<p class="msg-warn">Upload disabled — directory is not writable. Use FTP.</p>';
+} else {
+    fclose($tf); unlink($tmpf);
+    $umax = ini_bytes('upload_max_filesize');
+    echo '<p>Upload limit: <strong>'.fmt_bytes($umax).'</strong>. For larger files use FTP/SFTP.</p>';
+    echo '<form method="POST" enctype="multipart/form-data" style="margin-top:8px">';
+    echo '<input type="hidden" name="MAX_FILE_SIZE" value="'.$umax.'">';
+    echo '<div style="display:flex;gap:10px;align-items:flex-end">';
+    echo '<div style="flex:1"><label>File (.sql, .gz, .zip)</label>';
+    echo '<input type="file" name="dumpfile" accept=".sql,.gz,.zip,.csv"></div>';
+    echo '<div><button type="submit" name="uploadbutton" class="btn btn-primary">⬆ Upload</button></div>';
+    echo '</div></form>';
+}
+echo '</div></details>';
+
+// ============================================================
+// SECTION 1 — PHP params check
+// ============================================================
+$upload_max = ini_bytes('upload_max_filesize');
+$post_max   = ini_bytes('post_max_size');
+$mem_limit  = ini_bytes('memory_limit');
+$time_limit = (int) ini_get('max_execution_time');
+
+echo '<details' . ($action === '' ? ' open' : '') . '>';
+echo '<summary>⚙ PHP Server Parameters</summary>';
+echo '<div class="details-body">';
+// Tooltip content for each adjustable ini param
+$ini_howto = <<<'TIP'
+<div class="ini-tooltip">
+  <strong>How to increase these limits:</strong><br><br>
+  <b>Option 1 — php.ini</b> (preferred, applies globally):<br>
+  <code>upload_max_filesize = 256M<br>post_max_size = 256M<br>memory_limit = 256M<br>max_execution_time = 300</code><br>
+  Find your php.ini: run <code>php --ini</code> or check <code>phpinfo()</code>.<br><br>
+  <b>Option 2 — .htaccess</b> (Apache only, in your site root):<br>
+  <code>php_value upload_max_filesize 256M<br>php_value post_max_size 256M<br>php_value memory_limit 256M<br>php_value max_execution_time 300</code><br><br>
+  <b>Option 3 — .user.ini</b> (most shared hosts / Nginx / PHP-FPM):<br>
+  Place this file in your web root:<br>
+  <code>upload_max_filesize=256M<br>post_max_size=256M<br>memory_limit=256M<br>max_execution_time=300</code><br>
+  PHP-FPM reads it every 5 min by default (<code>user_ini.cache_ttl</code>).<br><br>
+  <b>Option 4 — ini_set() in script</b> (runtime only, some hosts block it):<br>
+  <code>ini_set('memory_limit','256M');</code><br><br>
+  <em>After editing, restart Apache/Nginx or PHP-FPM for changes to take effect.</em>
+</div>
+TIP;
+
+echo '<style>
+.ini-help{display:inline-block;margin-left:6px;cursor:help;color:#3182ce;font-weight:bold;font-size:13px;
+  position:relative;vertical-align:middle}
+.ini-help .ini-tooltip{display:none;position:absolute;left:26px;top:-8px;z-index:999;background:#2d3748;
+  color:#e2e8f0;padding:14px 16px;border-radius:8px;width:380px;font-size:12px;line-height:1.6;
+  box-shadow:0 4px 20px rgba(0,0,0,.4);white-space:normal}
+.ini-help .ini-tooltip code{background:#4a5568;color:#f6e05e;padding:1px 4px;border-radius:3px;
+  display:block;margin:2px 0;font-family:monospace}
+.ini-help:hover .ini-tooltip{display:block}
+</style>';
+
+$help_icon = '<span class="ini-help">ⓘ' . $ini_howto . '</span>';
+
+echo '<table class="data"><tr><th>Parameter</th><th>Value</th><th>Status</th></tr>';
+$php_params = [
+    ['upload_max_filesize', fmt_bytes($upload_max), $upload_max >= 64*1048576, true],
+    ['post_max_size',       fmt_bytes($post_max),   $post_max   >= 64*1048576, true],
+    ['memory_limit',        fmt_bytes($mem_limit),  $mem_limit  >= 128*1048576 || $mem_limit <= 0, true],
+    ['max_execution_time',  $time_limit === 0 ? '∞' : $time_limit.'s', $time_limit === 0 || $time_limit >= 120, true],
+    ['curl',                function_exists('curl_init') ? 'enabled' : 'not available', function_exists('curl_init'), false],
+    ['zip',                 extension_loaded('zip')      ? 'enabled' : 'not available', extension_loaded('zip'), false],
+    ['ftp',                 function_exists('ftp_connect') ? 'enabled' : 'not available', function_exists('ftp_connect'), false],
+    ['ssh2/sftp',           function_exists('ssh2_connect') ? 'enabled' : 'not available', function_exists('ssh2_connect'), false],
+];
+foreach ($php_params as [$name, $val, $ok, $adjustable]) {
+    $badge = $ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-warn">Review</span>';
+    $hint  = (!$ok && $adjustable) ? $help_icon : '';
+    echo "<tr><td><code>$name</code>$hint</td><td>$val</td><td>$badge</td></tr>";
+}
+echo '</table></div></details>';
+
+// ============================================================
+// SECTION 2 — DB connection
+// ============================================================
+echo '<details open>';
+echo '<summary>🗄 Database Connection</summary>';
+echo '<div class="details-body">';
+
+if ($wp_config_loaded) {
+    echo '<p><span class="badge badge-ok">wp-config.php</span> &nbsp;<code>' . h($wp_config_path) . '</code></p>';
+} else {
+    echo '<p><span class="badge badge-warn">wp-config.php not found</span> — using default values.</p>';
+}
+
+echo '<table class="data" style="margin-top:10px">';
+echo '<tr><th>Parameter</th><th>Value</th></tr>';
+echo '<tr><td>Server</td><td><code>'.h($db_server).'</code></td></tr>';
+echo '<tr><td>Database</td><td><code>'.h($db_name).'</code></td></tr>';
+echo '<tr><td>User</td><td><code>'.h($db_username).'</code></td></tr>';
+echo '<tr><td>Charset</td><td><code>'.h($db_connection_charset).'</code></td></tr>';
+echo '<tr><td>Table prefix</td><td><code>'.h($wp_table_prefix).'</code></td></tr>';
+echo '</table>';
+
+$test_conn = @new mysqli($db_server, $db_username, $db_password, $db_name);
+if ($test_conn->connect_error) {
+    echo '<p class="msg-error" style="margin-top:10px">✗ Connection failed: '.h($test_conn->connect_error).'</p>';
+    $error = true;
+} else {
+    echo '<p class="msg-success" style="margin-top:10px">✓ Successfully connected to <strong>'.h($db_name).'</strong> on <strong>'.h($db_server).'</strong></p>';
+    $test_conn->close();
+}
+echo '</div></details>';
+
+// ============================================================
+// SECTION 3 — Backup
+// ============================================================
+echo '<details>';
+echo '<summary>💾 Database Backup</summary>';
+echo '<div class="details-body">';
+echo '<p>Creates a full dump of the current database <strong>before</strong> importing. The file is saved in the same directory.</p>';
+echo '<form method="POST">';
+echo '<input type="hidden" name="action" value="run_backup">';
+echo '<p style="margin-top:10px"><button type="submit" class="btn btn-warn">▶ Generate backup now</button></p>';
+echo '</form>';
+
+// List existing backups
+if (!empty($found['backup'])) {
+    echo '<h2 style="margin-top:14px">Existing Backups &nbsp;<span class="badge badge-info">'.count($found['backup']).' file(s)</span></h2>';
+    echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Actions</th></tr>';
+    foreach ($found['backup'] as $bf) {
+        $bp = BACKUP_DIR . '/' . $bf;
+        $sz = file_exists($bp) ? fmt_bytes(filesize($bp)) : '?';
+        $dt = file_exists($bp) ? date('Y-m-d H:i', filemtime($bp)) : '?';
+        echo '<tr>';
+        echo '<td><code>' . h($bf) . '</code></td>';
+        echo '<td>' . $sz . '</td>';
+        echo '<td>' . $dt . '</td>';
+        $restore_url = '?start=1&fn='.urlencode($bf).'&from_backup=1&foffset=0&totalqueries=0&delimiter=;';
+        echo '<td style="white-space:nowrap">';
+        echo '<a href="'.h($restore_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($bf).'? This will DROP all current tables.\')" title="Restore this backup">↩ Restore</a> ';
+        echo '<a href="?download=' . urlencode($bf) . '" class="btn btn-success btn-sm" title="Download backup">⬇ Download</a> ';
+        echo '<a href="?delete_backup=' . urlencode($bf) . '" class="btn btn-danger btn-sm" onclick="return confirm(\'Permanently delete ' . h($bf) . '?\')" title="Delete backup">✕ Delete</a>';
+        echo '</td>';
+        echo '</tr>';
+    }
+    echo '</table>';
+} else {
+    echo '<p class="msg-info" style="margin-top:10px">No backup files yet. Click "Generate backup now" to create one.</p>';
+}
+echo '</div></details>';
+
+// ============================================================
+// SECTION 3b — WordPress User Management
+// ============================================================
+echo '<details>';
+echo '<summary>👤 WordPress User Management</summary>';
+echo '<div class="details-body">';
+echo '<p>Manage WordPress users directly in the database. Password changes use the phpass algorithm (compatible with WP).</p>';
+
+// User table
+echo '<div id="wp-users-wrap">';
+echo '<p><button type="button" class="btn btn-primary btn-sm" onclick="wpLoadUsers()">↺ Load / Refresh list</button></p>';
+echo '<div id="wp-users-table" style="margin-top:10px"></div>';
+echo '</div>';
+
+// Add user form
+echo '<details style="margin-top:14px;border:1px solid #e2e8f0;border-radius:6px;background:#f7fafc">';
+echo '<summary style="padding:10px 14px;cursor:pointer;font-weight:600;color:#2d3748">➕ Add new user</summary>';
+echo '<div style="padding:0 14px 14px">';
+echo '<form id="addUserForm" style="margin-top:10px">';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>Login (username)</label><input type="text" id="nu_login" placeholder="johnsmith" required></div>';
+echo '<div class="form-row"><label>Display name</label><input type="text" id="nu_name" placeholder="John Smith"></div>';
+echo '<div class="form-row"><label>Email</label><input type="text" id="nu_email" placeholder="john@example.com" required autocomplete="email"></div>';
+echo '<div class="form-row"><label>Password</label><input type="password" id="nu_pass" placeholder="minimum 6 characters" required autocomplete="new-password"></div>';
+echo '<div class="form-row"><label>Role</label>';
+echo '<select id="nu_role">';
+foreach (['administrator' => 'Administrator', 'editor' => 'Editor', 'author' => 'Author', 'contributor' => 'Contributor', 'subscriber' => 'Subscriber'] as $v => $l)
+    echo "<option value=\"$v\">$l</option>";
+echo '</select></div>';
+echo '</div>';
+echo '<p><button type="button" class="btn btn-success" onclick="wpAddUser()">➕ Create user</button></p>';
+echo '</form>';
+echo '<div id="add-user-result" style="margin-top:8px"></div>';
+echo '</div></details>';
+
+// Inline modal for edit operations
+echo <<<'HTML'
+<div id="wp-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:10px;padding:28px;min-width:340px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.25)">
+    <h2 id="wp-modal-title" style="margin-bottom:16px;font-size:16px;color:#2d3748"></h2>
+    <div id="wp-modal-body"></div>
+    <div style="margin-top:16px;display:flex;gap:10px">
+      <button id="wp-modal-confirm" class="btn btn-success" onclick="wpModalConfirm()">Confirm</button>
+      <button class="btn" style="background:#e2e8f0;color:#4a5568" onclick="wpModalClose()">Cancel</button>
+    </div>
+    <div id="wp-modal-result" style="margin-top:10px"></div>
+  </div>
+</div>
+HTML;
+
+echo '</div></details>';
+
+// ============================================================
+// SECTION 3c — WordPress Plugins
+// ============================================================
+echo '<details>';
+echo '<summary>🔌 WordPress Plugins</summary>';
+echo '<div class="details-body">';
+echo '<p>Manage active WordPress plugins directly in the database. This reads and writes the <code>active_plugins</code> option.</p>';
+
+echo '<p style="margin-top:10px">';
+echo '<button type="button" class="btn btn-primary btn-sm" onclick="wpLoadPlugins()">↺ Load plugins</button> ';
+echo '<button type="button" class="btn btn-danger btn-sm" style="margin-left:6px" onclick="wpDeactivateAll()">✕ Deactivate all</button>';
+echo '</p>';
+echo '<div id="wp-plugins-table" style="margin-top:12px"></div>';
+echo '</div></details>';
+
+// ============================================================
+// SECTION 4 — URL replacement
+// ============================================================
+$cfg_url_local  = $cfg['url_local']  ?? '';
+$cfg_url_remote = $cfg['url_remote'] ?? '';
+
+// Auto-read siteurl from wp_options if source URL not yet configured
+$wp_siteurl = '';
+if ($cfg_url_local === '' && $mysqli && !$mysqli->connect_error) {
+    $tbl_opts = $wp_table_prefix . 'options';
+    try {
+        $su_res = $mysqli->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
+        if ($su_res && $su_row = $su_res->fetch_assoc()) {
+            $wp_siteurl = rtrim($su_row['option_value'], '/');
+            $su_res->free();
+        }
+    } catch (\Throwable $e) { /* table may not exist yet */ }
+}
+// Fallback: try a fresh connection if $mysqli not yet available at this point
+if ($wp_siteurl === '') {
+    $tmp_conn = @new mysqli($db_server, $db_username, $db_password, $db_name);
+    if (!$tmp_conn->connect_error) {
+        $tbl_opts = $wp_table_prefix . 'options';
+        try {
+            $su_res = $tmp_conn->query("SELECT option_value FROM `$tbl_opts` WHERE option_name='siteurl' LIMIT 1");
+            if ($su_res && $su_row = $su_res->fetch_assoc()) {
+                $wp_siteurl = rtrim($su_row['option_value'], '/');
+            }
+        } catch (\Throwable $e) { /* table may not exist yet */ }
+        $tmp_conn->close();
+    }
+}
+// Use siteurl as default for source URL field if no config saved
+if ($cfg_url_local === '' && $wp_siteurl !== '') {
+    $cfg_url_local = $wp_siteurl;
+}
+
+echo '<details>';
+echo '<summary>🔗 WordPress URL Replacement</summary>';
+echo '<div class="details-body">';
+echo '<p>Replace image, upload, and document URLs in the SQL file before importing. URLs are validated against a live WordPress installation.</p>';
+
+// Validation result placeholders
+echo '<div id="val-local"></div><div id="val-remote"></div>';
+
+echo '<form method="POST" id="urlReplaceForm">';
+echo '<input type="hidden" name="action" value="url_preview">';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>🏠 Source URL (old)</label>';
+echo '<input type="url" name="url_old" id="url_old" value="'.h($cfg_url_local).'" placeholder="https://old-site.com" onblur="validateUrl(this.value,\'val-local\',\'local\')"></div>';
+echo '<div class="form-row"><label>🌐 Target URL (new)</label>';
+echo '<input type="url" name="url_new" id="url_new" value="'.h($cfg_url_remote).'" placeholder="https://new-site.com" onblur="validateUrl(this.value,\'val-remote\',\'remote\')"></div>';
+echo '</div>';
+
+// File selection for replacement
+$sql_available = array_merge($found['sql'], $found['gz']);
+if (!empty($sql_available)) {
+    echo '<div class="form-row"><label>SQL file to process</label>';
+    echo '<select name="sql_file" id="sql_file_replace">';
+    foreach ($sql_available as $sf) {
+        echo '<option value="'.h($sf).'">'.h($sf).'</option>';
+    }
+    echo '</select></div>';
+}
+
+echo '<p><button type="button" class="btn btn-primary" onclick="previewReplace()">🔍 Preview replacement</button></p>';
+echo '</form>';
+
+// Preview result
+echo '<div id="replace-preview"></div>';
+
+// Apply form (hidden until preview)
+echo '<form method="POST" id="applyReplaceForm" style="display:none;margin-top:12px">';
+echo '<input type="hidden" name="action" value="apply_url_replace">';
+echo '<input type="hidden" name="url_old" id="apply_url_old">';
+echo '<input type="hidden" name="url_new" id="apply_url_new">';
+echo '<input type="hidden" name="sql_file" id="apply_sql_file">';
+echo '<button type="submit" class="btn btn-success">✓ Apply replacement in SQL file</button>';
+echo '</form>';
+
+echo '</div></details>';
+
+// ============================================================
+// SECTION 5 — FTP/SFTP deploy
+// ============================================================
+$all_sql_files = array_merge($found['sql'], $found['gz'], $found['zip']);
+
+echo '<details>';
+echo '<summary>🚀 FTP / SFTP Deploy</summary>';
+echo '<div class="details-body">';
+echo '<p>Upload <code>bigdump.php</code> and your SQL files to a remote server. Supports FTP, FTPS, and SFTP. Credentials can be saved in the configuration for reuse.</p>';
+
+echo '<form method="POST">';
+echo '<input type="hidden" name="action" value="ftp_upload">';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>Host / IP</label>';
+echo '<input type="text" name="ftp_host" value="'.h($cfg['ftp_host']??'').'" placeholder="ftp.mydomain.com"></div>';
+echo '<div class="form-row"><label>Protocol</label>';
+echo '<select name="ftp_protocol">';
+foreach (['ftp' => 'FTP', 'ftps' => 'FTPS (Secure FTP)', 'sftp' => 'SFTP (SSH)'] as $val => $label) {
+    $sel = ($cfg['ftp_protocol'] ?? 'ftp') === $val ? ' selected' : '';
+    echo "<option value=\"$val\"$sel>$label</option>";
+}
+echo '</select></div>';
+echo '<div class="form-row"><label>Username</label>';
+echo '<input type="text" name="ftp_user" value="'.h($cfg['ftp_user']??'').'" placeholder="ftp_user" autocomplete="username"></div>';
+echo '<div class="form-row"><label>Password</label>';
+echo '<input type="password" name="ftp_pass" value="'.h($cfg['ftp_pass']??'').'" placeholder="••••••••" autocomplete="current-password"></div>';
+echo '<div class="form-row"><label>Port</label>';
+echo '<input type="number" name="ftp_port" value="'.h($cfg['ftp_port']??'21').'" placeholder="21"></div>';
+echo '<div class="form-row"><label>Remote path</label>';
+echo '<input type="text" name="ftp_path" value="'.h($cfg['ftp_path']??'/').'" placeholder="/public_html/bigdump/"></div>';
+echo '</div>';
+
+if (!empty($all_sql_files)) {
+    echo '<div class="form-row"><label>SQL files to upload (optional)</label>';
+    echo '<div style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;padding:10px">';
+    foreach ($all_sql_files as $sf) {
+        $fp = $upload_dir.'/'.$sf;
+        $sz = file_exists($fp) ? ' ('.fmt_bytes(filesize($fp)).')' : '';
+        echo '<label style="font-weight:normal;display:flex;align-items:center;gap:6px;margin:4px 0">';
+        echo '<input type="checkbox" name="ftp_files[]" value="'.h($sf).'"> '.h($sf).$sz.'</label>';
+    }
+    echo '</div></div>';
+}
+
+echo '<p><button type="submit" class="btn btn-purple">📤 Upload selected files</button></p>';
+echo '</form>';
+
+// Zip whole directory + upload
+echo '<hr style="margin:18px 0;border:none;border-top:1px solid #e2e8f0">';
+echo '<h2>📦 Compress &amp; Upload working directory</h2>';
+echo '<p>Creates a <code>.zip</code> of the entire directory where this script lives and uploads it via FTP/SFTP. Useful for a full site backup or migration. Uses the same credentials above.</p>';
+echo '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
+echo '<button type="button" class="btn btn-warn" onclick="ftpZipUpload()">🗜 Compress &amp; Upload directory</button>';
+echo '<span id="zip-upload-result" style="font-size:13px"></span>';
+echo '</div>';
+
+echo '</div></details>';
+
+// ============================================================
+// SECTION 6 — Configuration
+// ============================================================
+echo '<details>';
+echo '<summary>⚙ Configuration &amp; Migration Profiles</summary>';
+echo '<div class="details-body">';
+echo '<p>Save FTP credentials, URLs, and preferences to <code>bigdump.config.json</code> for reuse. Supports bidirectional migration (local → hosting or hosting → local).</p>';
+
+if (file_exists(CONFIG_FILE)) {
+    echo '<p><span class="badge badge-ok">Config loaded</span> &nbsp; Last saved: <strong>' . h($cfg['saved_at'] ?? '—') . '</strong></p>';
+}
+
+echo '<form method="POST">';
+echo '<input type="hidden" name="action" value="save_config">';
+
+echo '<div class="form-row"><label>Profile name (e.g. "My site — local to production")</label>';
+echo '<input type="text" name="profile_name" value="'.h($cfg['profile_name']??'').'" placeholder="My WordPress migration"></div>';
+
+echo '<h2>Migration URLs</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>🏠 Local environment URL</label>';
+echo '<input type="url" name="url_local" value="'.h($cfg['url_local']??'').'" placeholder="http://localhost/mysite"></div>';
+echo '<div class="form-row"><label>🌐 Hosting / production URL</label>';
+echo '<input type="url" name="url_remote" value="'.h($cfg['url_remote']??'').'" placeholder="https://mydomain.com"></div>';
+echo '</div>';
+
+echo '<h2>FTP / SFTP Credentials</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>Host</label><input type="text" name="ftp_host" value="'.h($cfg['ftp_host']??'').'" placeholder="ftp.mydomain.com"></div>';
+echo '<div class="form-row"><label>Protocol</label><select name="ftp_protocol">';
+foreach (['ftp' => 'FTP', 'ftps' => 'FTPS', 'sftp' => 'SFTP'] as $v => $l) {
+    echo '<option value="'.$v.'"'.(($cfg['ftp_protocol']??'ftp')===$v?' selected':'').">$l</option>";
+}
+echo '</select></div>';
+echo '<div class="form-row"><label>Username</label><input type="text" name="ftp_user" value="'.h($cfg['ftp_user']??'').'" placeholder="username" autocomplete="username"></div>';
+echo '<div class="form-row"><label>Password</label><input type="password" name="ftp_pass" value="'.h($cfg['ftp_pass']??'').'" placeholder="••••••••" autocomplete="current-password"></div>';
+echo '<div class="form-row"><label>Port</label><input type="number" name="ftp_port" value="'.h($cfg['ftp_port']??'21').'"></div>';
+echo '<div class="form-row"><label>Remote path</label><input type="text" name="ftp_path" value="'.h($cfg['ftp_path']??'/').'" placeholder="/public_html/bigdump/"></div>';
+echo '</div>';
+
+echo '<h2>Import Preferences</h2>';
+echo '<div class="grid-2">';
+echo '<div class="form-row"><label>Lines per session</label>';
+echo '<input type="number" name="linespersession" value="'.h($cfg['linespersession']??'3000').'" min="100" max="100000">';
+echo '<small style="color:#718096;font-size:12px">Lower = safer on slow servers. Default: 3000.</small></div>';
+echo '<div class="form-row"><label>Delay between sessions (ms)</label>';
+echo '<input type="number" name="delaypersession" value="'.h($cfg['delaypersession']??'0').'" min="0" max="5000">';
+echo '<small style="color:#718096;font-size:12px">Add delay if MySQL is overloaded. Default: 0.</small></div>';
+echo '<div class="form-row"><label>Max lines per query</label>';
+echo '<input type="number" name="max_query_lines" value="'.h($cfg['max_query_lines']??'50000').'" min="300" max="500000">';
+echo '<small style="color:#718096;font-size:12px">Raise this for dumps with extended inserts (phpMyAdmin default). Default: 50000.</small></div>';
+echo '</div>';
+
+echo '<p style="margin-top:12px"><button type="submit" class="btn btn-success">💾 Save configuration</button></p>';
+echo '</form>';
+echo '</div></details>';
+
 
 ?>
 
