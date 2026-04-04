@@ -844,6 +844,17 @@ input:focus,select:focus{outline:none;border-color:#3182ce;box-shadow:0 0 0 3px 
 .btn-secondary{background:#718096;color:#fff}.btn-secondary:hover{background:#4a5568}
 .btn-purple {background:#553c9a;color:#fff}.btn-purple:hover{background:#44337a}
 .btn-sm{padding:4px 12px;font-size:12px}
+/* Tabs */
+.tab-nav{display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin:-18px -18px 16px;padding:0 18px}
+.tab-btn{background:none;border:none;padding:10px 20px;font-size:13px;font-weight:600;cursor:pointer;color:#718096;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s}
+.tab-btn:hover{color:#3182ce}
+.tab-btn.tab-active{color:#3182ce;border-bottom-color:#3182ce}
+.tab-pane{padding:4px 0}
+/* Simple file list */
+.simple-file-list{display:flex;flex-direction:column;gap:8px}
+.simple-file-item{display:flex;align-items:center;gap:12px;padding:10px 14px;background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px}
+.simple-file-name{flex:1;font-family:monospace;font-size:13px;color:#2d3748;word-break:break-all}
+.simple-file-size{font-size:12px;color:#718096;white-space:nowrap}
 
 /* Collapsible sections */
 details{border:1px solid #e2e8f0;border-radius:8px;margin:12px 0;background:#fff}
@@ -1307,19 +1318,76 @@ if ($mysqli) { $mysqli->query("SET foreign_key_checks = 1"); $mysqli->close(); }
 if ($file && !$gzipmode) fclose($file);
 elseif ($file && $gzipmode) gzclose($file);
 
-// Import Files table (always shown)
-echo '<details open>';
-echo '<summary>📂 Import Files</summary>';
-echo '<div class="details-body">';
-
+// Import Files — tabbed UI (Simple default, Advanced full)
 $all_importable = array_merge($found['sql'], $found['gz'], $found['zip']);
 $all_backups    = $found['backup'];
+
+echo '<div class="card" style="margin-bottom:14px">';
+echo '<div class="card-header">📂 Import Files</div>';
+
+// Tab nav
+echo '<div class="tab-nav">';
+echo '<button class="tab-btn tab-active" onclick="bdTab(\'simple\',this)">⚡ Simple</button>';
+echo '<button class="tab-btn" onclick="bdTab(\'advanced\',this)">⚙ Advanced</button>';
+echo '</div>';
+
+// ── SIMPLE TAB ──────────────────────────────────────────────
+echo '<div id="tab-simple" class="tab-pane">';
+if (!empty($all_importable) || !empty($all_backups)) {
+    echo '<p style="margin-bottom:10px;color:#555">Select a file to import. <strong>All existing tables will be dropped</strong> before import.</p>';
+    echo '<div class="simple-file-list">';
+    foreach ($all_importable as $f) {
+        $fp        = $upload_dir.'/'.$f;
+        $start_url = '?start=1&fn='.urlencode($f).'&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
+        $can       = preg_match('/\.(sql|gz)$/i', $f);
+        echo '<div class="simple-file-item">';
+        echo '<span class="simple-file-name">'.h($f).'</span>';
+        echo '<span class="simple-file-size">'.fmt_bytes(filesize($fp)).'</span>';
+        if ($can) {
+            echo '<a href="'.h($start_url).'" class="btn btn-primary btn-sm"';
+            echo ' onclick="return confirm(\'Import '.h($f).'?\\nThis will DROP all current tables. Continue?\')">▶ Import</a>';
+        } else {
+            echo '<span class="badge badge-warn">ZIP — extract first</span>';
+        }
+        echo '</div>';
+    }
+    foreach ($all_backups as $f) {
+        $fp        = BACKUP_DIR.'/'.$f;
+        $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
+        echo '<div class="simple-file-item" style="background:#fffbea">';
+        echo '<span class="simple-file-name">'.h($f).' <span class="badge badge-info" style="font-size:10px">backup</span></span>';
+        echo '<span class="simple-file-size">'.fmt_bytes(filesize($fp)).'</span>';
+        echo '<a href="'.h($start_url).'" class="btn btn-warning btn-sm"';
+        echo ' onclick="return confirm(\'Restore '.h($f).'?\\nThis will DROP all current tables. Continue?\')">↩ Restore</a>';
+        echo '</div>';
+    }
+    echo '</div>';
+} else {
+    echo '<p class="msg-warn" style="margin:12px 0">No .sql, .gz or .zip files found in this directory.</p>';
+}
+// Simple upload
+do { $tmpf = $upload_dir.'/'.time().'.tmp'; } while (file_exists($tmpf));
+if ($tf = @fopen($tmpf, 'w')) {
+    fclose($tf); unlink($tmpf);
+    $umax = ini_bytes('upload_max_filesize');
+    echo '<div style="margin-top:14px;padding-top:12px;border-top:1px solid #e2e8f0">';
+    echo '<form method="POST" enctype="multipart/form-data" style="display:flex;gap:10px;align-items:flex-end">';
+    echo '<input type="hidden" name="MAX_FILE_SIZE" value="'.$umax.'">';
+    echo '<div style="flex:1"><label style="font-size:12px;color:#666">Upload a dump file (max '.fmt_bytes($umax).')</label>';
+    echo '<input type="file" name="dumpfile" accept=".sql,.gz,.zip,.csv" style="margin-top:4px"></div>';
+    echo '<div><button type="submit" name="uploadbutton" class="btn btn-primary btn-sm">⬆ Upload</button></div>';
+    echo '</form></div>';
+}
+echo '</div>'; // end tab-simple
+
+// ── ADVANCED TAB ─────────────────────────────────────────────
+echo '<div id="tab-advanced" class="tab-pane" style="display:none">';
 if (!empty($all_importable) || !empty($all_backups)) {
     echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Type</th><th>Actions</th></tr>';
     foreach ($all_importable as $f) {
-        $fp   = $upload_dir.'/'.$f;
-        $type = preg_match('/\.sql$/i', $f) ? 'SQL' : (preg_match('/\.gz$/i', $f) ? 'GZip' : 'ZIP');
-        $can  = preg_match('/\.(sql|gz)$/i', $f);
+        $fp        = $upload_dir.'/'.$f;
+        $type      = preg_match('/\.sql$/i', $f) ? 'SQL' : (preg_match('/\.gz$/i', $f) ? 'GZip' : 'ZIP');
+        $can       = preg_match('/\.(sql|gz)$/i', $f);
         $start_url = '?start=1&fn='.urlencode($f).'&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
         echo '<tr>';
         echo '<td><code>'.h($f).'</code></td>';
@@ -1332,8 +1400,8 @@ if (!empty($all_importable) || !empty($all_backups)) {
         echo '</td></tr>';
     }
     foreach ($all_backups as $f) {
-        $fp   = BACKUP_DIR.'/'.$f;
-        $type = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
+        $fp        = BACKUP_DIR.'/'.$f;
+        $type      = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
         $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
         echo '<tr style="background:#fff9e6">';
         echo '<td><code>'.h($f).'</code> <span class="badge badge-info">backup</span></td>';
@@ -1350,15 +1418,12 @@ if (!empty($all_importable) || !empty($all_backups)) {
 } else {
     echo '<p class="msg-warn">No .sql, .gz or .zip files found. Upload your dump below or via FTP.</p>';
 }
-
-// Upload form
-echo '<h2 style="margin-top:14px">Upload dump from browser</h2>';
+// Advanced upload
 do { $tmpf = $upload_dir.'/'.time().'.tmp'; } while (file_exists($tmpf));
-if (!($tf = @fopen($tmpf, 'w'))) {
-    echo '<p class="msg-warn">Upload disabled — directory is not writable. Use FTP.</p>';
-} else {
+if ($tf = @fopen($tmpf, 'w')) {
     fclose($tf); unlink($tmpf);
     $umax = ini_bytes('upload_max_filesize');
+    echo '<h2 style="margin-top:14px">Upload dump from browser</h2>';
     echo '<p>Upload limit: <strong>'.fmt_bytes($umax).'</strong>. For larger files use FTP/SFTP.</p>';
     echo '<form method="POST" enctype="multipart/form-data" style="margin-top:8px">';
     echo '<input type="hidden" name="MAX_FILE_SIZE" value="'.$umax.'">';
@@ -1367,8 +1432,12 @@ if (!($tf = @fopen($tmpf, 'w'))) {
     echo '<input type="file" name="dumpfile" accept=".sql,.gz,.zip,.csv"></div>';
     echo '<div><button type="submit" name="uploadbutton" class="btn btn-primary">⬆ Upload</button></div>';
     echo '</div></form>';
+} else {
+    echo '<p class="msg-warn" style="margin-top:10px">Upload disabled — directory is not writable. Use FTP.</p>';
 }
-echo '</div></details>';
+echo '</div>'; // end tab-advanced
+
+echo '</div>'; // end card
 
 // ============================================================
 // SECTION 1 — PHP params check
@@ -1773,6 +1842,16 @@ echo '</div></details>';
 
 <script>
 // BigDump WP v<?php echo VERSION; ?>
+
+// ============================================================
+// Tab switching
+// ============================================================
+function bdTab(name, btn) {
+    document.querySelectorAll('.tab-pane').forEach(function(p){ p.style.display = 'none'; });
+    document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('tab-active'); });
+    document.getElementById('tab-' + name).style.display = 'block';
+    btn.classList.add('tab-active');
+}
 
 // ============================================================
 // Self-delete
