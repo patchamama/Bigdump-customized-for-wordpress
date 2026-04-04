@@ -163,6 +163,7 @@ backup_db_YYYYMMDD.sql ← Auto-generated backups
 
 | Version | Changes |
 |---------|---------|
+| `0.40-wp` | FTP deploy renames script to `bigdump_<random>.php` on remote server; backup files in `backups/` subfolder now appear in import table with ↩ Restore button; backup listing now shows all `.sql`/`.gz` files regardless of name prefix |
 | `0.39-wp` | Security warning banner with self-delete; WordPress plugin management (list, activate, deactivate all); full English translation; fixed AJAX JSON empty response bug (missing function definitions before early router) |
 | `0.38-wp` | URL validation against live WP installs; pre-import backup (mysqldump + PHP fallback); FTP/SFTP deployment; persistent `bigdump.config.json` config; WordPress user management (list, add, edit password/email, delete) |
 | `0.37-wp` | wp-config.php auto-load; PHP parameter audit; auto-drop tables before import; ignore CREATE DATABASE; ZIP auto-extract; URL find & replace with preview; modern UI |

@@ -12,7 +12,7 @@ error_reporting(E_ALL);
 @set_time_limit(0);
 @ini_set('auto_detect_line_endings', true);
 
-define('VERSION',           '0.39-wp');
+define('VERSION',           '0.40-wp');
 define('DATA_CHUNK_LENGTH',  1048576); // 1MB per fgets() read — handles long extended-insert lines
 define('TESTMODE',           false);
 define('BIGDUMP_DIR',        dirname(__FILE__));
@@ -287,7 +287,8 @@ function run_backup(string $db_server, string $db_username, string $db_password,
 // FTP / SFTP upload
 // ============================================================
 
-function ftp_upload_files(array $ftp_cfg, array $local_files): array {
+// $rename_map: ['local_basename' => 'remote_name'] — used to rename bigdump.php on upload
+function ftp_upload_files(array $ftp_cfg, array $local_files, array $rename_map = []): array {
     $host     = $ftp_cfg['host']     ?? '';
     $user     = $ftp_cfg['user']     ?? '';
     $pass     = $ftp_cfg['pass']     ?? '';
@@ -309,9 +310,10 @@ function ftp_upload_files(array $ftp_cfg, array $local_files): array {
         $sftp = ssh2_sftp($conn);
         foreach ($local_files as $lf) {
             if (!file_exists($lf)) { $results[] = ['ok' => false, 'file' => basename($lf), 'msg' => 'Local file not found.']; continue; }
-            $remote = "ssh2.sftp://" . intval($sftp) . $path . basename($lf);
+            $rname  = $rename_map[basename($lf)] ?? basename($lf);
+            $remote = "ssh2.sftp://" . intval($sftp) . $path . $rname;
             $ok = copy($lf, $remote);
-            $results[] = ['ok' => $ok, 'file' => basename($lf), 'msg' => $ok ? 'Uploaded successfully.' : 'Error copying via SFTP.'];
+            $results[] = ['ok' => $ok, 'file' => $rname, 'msg' => $ok ? 'Uploaded successfully.' : 'Error copying via SFTP.'];
         }
         return $results;
     }
@@ -331,9 +333,10 @@ function ftp_upload_files(array $ftp_cfg, array $local_files): array {
 
     foreach ($local_files as $lf) {
         if (!file_exists($lf)) { $results[] = ['ok' => false, 'file' => basename($lf), 'msg' => 'Local file not found.']; continue; }
-        $remote = $path . basename($lf);
+        $rname  = $rename_map[basename($lf)] ?? basename($lf);
+        $remote = $path . $rname;
         $ok = @ftp_put($conn, $remote, $lf, FTP_BINARY);
-        $results[] = ['ok' => $ok, 'file' => basename($lf), 'msg' => $ok ? 'Uploaded successfully.' : 'FTP error uploading: ' . basename($lf)];
+        $results[] = ['ok' => $ok, 'file' => $rname, 'msg' => $ok ? 'Uploaded successfully.' : 'FTP error uploading: ' . $rname];
     }
     ftp_close($conn);
     return $results;
@@ -355,11 +358,11 @@ function find_dump_files(string $dir): array {
         }
         closedir($dh);
     }
-    // Scan BACKUP_DIR for backup files
+    // Scan BACKUP_DIR for all SQL/GZ files (any name)
     $backup_dir = BACKUP_DIR;
     if (is_dir($backup_dir) && ($dh = opendir($backup_dir))) {
         while (($f = readdir($dh)) !== false) {
-            if (is_file($backup_dir . '/' . $f) && preg_match('/^backup_.*\.sql$/i', $f))
+            if (is_file($backup_dir . '/' . $f) && preg_match('/\.(sql|gz)$/i', $f))
                 $backup[] = $f;
         }
         closedir($dh);
@@ -974,7 +977,11 @@ if ($action === 'ftp_upload') {
         }
     }
 
-    $results = ftp_upload_files($ftp_cfg, $files_to_send);
+    // Rename bigdump.php to bigdump_<random>.php on the remote server for security
+    $remote_script_name = 'bigdump_' . rand(100000, 999999) . '.php';
+    $rename_map = [basename(__FILE__) => $remote_script_name];
+
+    $results = ftp_upload_files($ftp_cfg, $files_to_send, $rename_map);
 
     echo '<div class="card"><div class="card-header">FTP/SFTP Deploy Result</div>';
     echo '<table class="data"><tr><th>File</th><th>Status</th><th>Detail</th></tr>';
@@ -982,7 +989,9 @@ if ($action === 'ftp_upload') {
         $badge = $r['ok'] ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-error">Error</span>';
         echo '<tr><td><code>' . h($r['file'] ?? '—') . '</code></td><td>' . $badge . '</td><td>' . h($r['msg'] ?? '') . '</td></tr>';
     }
-    echo '</table></div>';
+    echo '</table>';
+    echo '<p class="msg-info" style="margin:10px 0 4px">Script deployed as: <strong>' . h($remote_script_name) . '</strong> — use this name in the URL on the remote server.</p>';
+    echo '</div>';
 }
 
 // ============================================================
@@ -1422,6 +1431,16 @@ if (!$error && isset($_POST['uploadbutton'])) {
     }
 }
 
+// Handle backup delete
+if (!$error && isset($_GET['delete_backup'])) {
+    $del = basename($_GET['delete_backup']);
+    $del_path = BACKUP_DIR . '/' . $del;
+    if (preg_match('/\.(sql|gz)$/i', $del) && @unlink($del_path))
+        echo '<p class="msg-success">✓ Backup ' . h($del) . ' deleted.</p>';
+    else
+        echo '<p class="msg-error">Could not delete backup ' . h($del) . '</p>';
+}
+
 // Handle delete
 if (!$error && isset($_GET['delete']) && $_GET['delete'] != basename(__FILE__)) {
     $del = basename($_GET['delete']);
@@ -1469,7 +1488,8 @@ echo '<summary>📂 Import Files</summary>';
 echo '<div class="details-body">';
 
 $all_importable = array_merge($found['sql'], $found['gz'], $found['zip']);
-if (!empty($all_importable)) {
+$all_backups    = $found['backup'];
+if (!empty($all_importable) || !empty($all_backups)) {
     echo '<table class="data"><tr><th>File</th><th>Size</th><th>Date</th><th>Type</th><th>Actions</th></tr>';
     foreach ($all_importable as $f) {
         $fp   = $upload_dir.'/'.$f;
@@ -1484,6 +1504,21 @@ if (!empty($all_importable)) {
         echo '<td>';
         if ($can) echo '<a href="'.h($start_url).'" class="btn btn-primary btn-sm">▶ Import</a> &nbsp;';
         echo '<a href="?delete='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete '.h($f).'?\')">✕</a>';
+        echo '</td></tr>';
+    }
+    foreach ($all_backups as $f) {
+        $fp   = BACKUP_DIR.'/'.$f;
+        $type = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
+        $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
+        echo '<tr style="background:#fff9e6">';
+        echo '<td><code>'.h($f).'</code> <span class="badge badge-info">backup</span></td>';
+        echo '<td>'.fmt_bytes(filesize($fp)).'</td>';
+        echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
+        echo '<td>'.$type.'</td>';
+        echo '<td>';
+        echo '<a href="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($f).'? This will DROP all current tables.\')">↩ Restore</a> &nbsp;';
+        echo '<a href="?download='.urlencode($f).'" class="btn btn-secondary btn-sm">⬇</a> &nbsp;';
+        echo '<a href="?delete_backup='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete backup '.h($f).'?\')">✕</a>';
         echo '</td></tr>';
     }
     echo '</table>';
@@ -1539,7 +1574,8 @@ if (!$error && isset($_GET['start'])) {
     }
 
     if (!$error) {
-        $fp = $upload_dir.'/'.$curfilename;
+        $from_backup = isset($_GET['from_backup']) && $_GET['from_backup'];
+        $fp = ($from_backup ? BACKUP_DIR : $upload_dir).'/'.$curfilename;
         if ((!$gzipmode && !$file = @fopen($fp, 'r')) || ($gzipmode && !$file = @gzopen($fp, 'r'))) {
             echo '<p class="msg-error">Cannot open '.h($curfilename).' for import.</p>';
             $error = true;
@@ -1696,7 +1732,7 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
             echo '<p class="msg-warn"><strong>IMPORTANT:</strong> Delete the dump file and this script from the server when you no longer need them.</p>';
             $error = true;
         } else {
-            $next = '?start='.$linenumber.'&fn='.urlencode($curfilename).'&foffset='.$foffset.'&totalqueries='.$totalqueries.'&delimiter='.urlencode($delimiter);
+            $next = '?start='.$linenumber.'&fn='.urlencode($curfilename).($from_backup ? '&from_backup=1' : '').'&foffset='.$foffset.'&totalqueries='.$totalqueries.'&delimiter='.urlencode($delimiter);
             if ($delaypersession != 0)
                 echo '<p class="msg-info">Waiting '.$delaypersession.' ms...</p>';
             if (!$ajax)
@@ -2035,8 +2071,10 @@ function wpDeactivateAll() {
 <?php if ($ajax && isset($_GET['start']) && !$error): ?>
 (function(){
   var delay = <?php echo (int)$delaypersession; ?>;
+  var fromBackup = <?php echo (isset($_GET['from_backup']) && $_GET['from_backup']) ? 'true' : 'false'; ?>;
   function nextUrl(ln,fn,fo,tq,dl){
-    return '?start='+ln+'&fn='+fn+'&foffset='+fo+'&totalqueries='+tq+'&delimiter='+dl+'&ajaxrequest=true';
+    return '?start='+ln+'&fn='+fn+(fromBackup?'&from_backup=1':'')+
+           '&foffset='+fo+'&totalqueries='+tq+'&delimiter='+dl+'&ajaxrequest=true';
   }
   function doRequest(url){
     var xhr = new XMLHttpRequest();
@@ -2084,6 +2122,7 @@ if ($ajax && isset($_GET['start']) && !$error) {
             'tq'  => $totalqueries ?? 0,
             'dl'  => urlencode($delimiter),
             'pct' => $pct,
+            'from_backup' => $from_backup ?? false,
         ]);
         exit;
     }
