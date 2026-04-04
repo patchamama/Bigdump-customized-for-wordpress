@@ -840,7 +840,8 @@ input:focus,select:focus{outline:none;border-color:#3182ce;box-shadow:0 0 0 3px 
 .btn-primary{background:#3182ce;color:#fff}.btn-primary:hover{background:#2c5282}
 .btn-success{background:#276749;color:#fff}.btn-success:hover{background:#1d4f34}
 .btn-danger {background:#c53030;color:#fff}.btn-danger:hover{background:#9b2c2c}
-.btn-warn   {background:#c05621;color:#fff}.btn-warn:hover{background:#9c4221}
+.btn-warn,.btn-warning{background:#c05621;color:#fff}.btn-warn:hover,.btn-warning:hover{background:#9c4221}
+.btn-secondary{background:#718096;color:#fff}.btn-secondary:hover{background:#4a5568}
 .btn-purple {background:#553c9a;color:#fff}.btn-purple:hover{background:#44337a}
 .btn-sm{padding:4px 12px;font-size:12px}
 
@@ -863,7 +864,13 @@ details .details-body{padding:0 16px 16px}
 <body>
 <div id="wrap">
 
-<!-- SECURITY WARNING BANNER -->
+<!-- SECURITY WARNING BANNER — only shown on non-localhost -->
+<?php
+$_remote_ip = $_SERVER['REMOTE_ADDR'] ?? '';
+$_is_local  = in_array($_remote_ip, ['127.0.0.1', '::1', 'localhost'], true)
+              || strpos($_remote_ip, '127.') === 0;
+if (!$_is_local):
+?>
 <div class="card-security">
   <div class="card-header">⚠ SECURITY WARNING — This script is dangerous</div>
   <p><strong>This tool should NEVER be left on a production server.</strong> It poses serious security risks:</p>
@@ -878,6 +885,7 @@ details .details-body{padding:0 16px 16px}
   <button class="delete-btn" onclick="wpSelfDelete()">🗑 Delete this script now</button>
   <div id="self-delete-result" style="margin-top:10px"></div>
 </div>
+<?php endif; ?>
 
 <div class="card card-blue">
   <div class="card-header">🗄 BigDump WordPress Importer v<?php echo VERSION; ?></div>
@@ -1759,6 +1767,8 @@ elseif ($file && $gzipmode) gzclose($file);
 </div>
 
 <script>
+// BigDump WP v<?php echo VERSION; ?>
+
 // ============================================================
 // Self-delete
 // ============================================================
