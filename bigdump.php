@@ -13,7 +13,7 @@ error_reporting(E_ALL);
 @ini_set('auto_detect_line_endings', true);
 
 define('VERSION',           '0.39-wp');
-define('DATA_CHUNK_LENGTH',  16384);
+define('DATA_CHUNK_LENGTH',  1048576); // 1MB per fgets() read — handles long extended-insert lines
 define('TESTMODE',           false);
 define('BIGDUMP_DIR',        dirname(__FILE__));
 define('CONFIG_FILE',        BIGDUMP_DIR . '/bigdump.config.json');
@@ -418,6 +418,8 @@ $wp_table_prefix       = $wp_config['table_prefix'] ?? 'wp_';
 
 $filename        = '';
 $ajax            = true;
+// Lines processed per import session. Lower = safer on slow servers.
+// Modern WP dumps with extended inserts can have single queries > 1000 lines.
 $linespersession = 3000;
 $delaypersession = 0;
 
@@ -430,7 +432,11 @@ $csv_add_slashes    = true;
 $comment         = ['#', '-- ', 'DELIMITER', '/*!', 'CREATE DATABASE', 'USE `'];
 $delimiter       = ';';
 $string_quotes   = '\'';
-$max_query_lines = 300;
+// Max lines allowed in a single query. phpMyAdmin exports with extended inserts
+// can produce INSERT blocks with thousands of lines. Setting this too low causes
+// "Stopped at line N — query exceeds X lines" errors.
+// 50000 covers virtually all real-world dumps including large WP sites.
+$max_query_lines = 50000;
 $upload_dir      = BIGDUMP_DIR;
 
 // ============================================================
@@ -906,8 +912,9 @@ if ($action === 'save_config') {
     $new_cfg['ftp_path']       = $_POST['ftp_path']     ?? '/';
     $new_cfg['ftp_protocol']   = $_POST['ftp_protocol'] ?? 'ftp';
     // Import prefs
-    $new_cfg['linespersession'] = (int)($_POST['linespersession'] ?? 3000);
-    $new_cfg['delaypersession'] = (int)($_POST['delaypersession'] ?? 0);
+    $new_cfg['linespersession']  = (int)($_POST['linespersession']  ?? 3000);
+    $new_cfg['delaypersession']  = (int)($_POST['delaypersession']  ?? 0);
+    $new_cfg['max_query_lines']  = (int)($_POST['max_query_lines']  ?? 50000);
     // Saved timestamp
     $new_cfg['saved_at']       = date('Y-m-d H:i:s');
     cfg_save($new_cfg);
@@ -919,6 +926,9 @@ if ($action === 'save_config') {
 // Apply config to import settings
 $linespersession = (int)($cfg['linespersession'] ?? 3000);
 $delaypersession = (int)($cfg['delaypersession'] ?? 0);
+// Override $max_query_lines with saved config if present
+if (isset($cfg['max_query_lines']) && $cfg['max_query_lines'] > 0)
+    $max_query_lines = (int)$cfg['max_query_lines'];
 
 // ============================================================
 // ACTION: run backup
@@ -1374,9 +1384,14 @@ echo '</div>';
 echo '<h2>Import Preferences</h2>';
 echo '<div class="grid-2">';
 echo '<div class="form-row"><label>Lines per session</label>';
-echo '<input type="number" name="linespersession" value="'.h($cfg['linespersession']??'3000').'"></div>';
+echo '<input type="number" name="linespersession" value="'.h($cfg['linespersession']??'3000').'" min="100" max="100000">';
+echo '<small style="color:#718096;font-size:12px">Lower = safer on slow servers. Default: 3000.</small></div>';
 echo '<div class="form-row"><label>Delay between sessions (ms)</label>';
-echo '<input type="number" name="delaypersession" value="'.h($cfg['delaypersession']??'0').'"></div>';
+echo '<input type="number" name="delaypersession" value="'.h($cfg['delaypersession']??'0').'" min="0" max="5000">';
+echo '<small style="color:#718096;font-size:12px">Add delay if MySQL is overloaded. Default: 0.</small></div>';
+echo '<div class="form-row"><label>Max lines per query</label>';
+echo '<input type="number" name="max_query_lines" value="'.h($cfg['max_query_lines']??'50000').'" min="300" max="500000">';
+echo '<small style="color:#718096;font-size:12px">Raise this for dumps with extended inserts (phpMyAdmin default). Default: 50000.</small></div>';
 echo '</div>';
 
 echo '<p style="margin-top:12px"><button type="submit" class="btn btn-success">💾 Save configuration</button></p>';
