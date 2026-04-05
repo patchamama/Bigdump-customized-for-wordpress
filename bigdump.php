@@ -1440,8 +1440,10 @@ echo '</div>'; // end tab-advanced
 echo '</div>'; // end card
 
 // ============================================================
-// SECTION 1 — PHP params check
+// SECTION 1 — PHP params check  (wrapped in #advanced-sections, hidden in Simple tab)
 // ============================================================
+echo '<div id="advanced-sections" style="display:none">';
+
 $upload_max = ini_bytes('upload_max_filesize');
 $post_max   = ini_bytes('post_max_size');
 $mem_limit  = ini_bytes('memory_limit');
@@ -1833,6 +1835,7 @@ echo '</div>';
 echo '<p style="margin-top:12px"><button type="submit" class="btn btn-success">💾 Save configuration</button></p>';
 echo '</form>';
 echo '</div></details>';
+echo '</div>'; // end #advanced-sections
 
 
 ?>
@@ -1851,6 +1854,8 @@ function bdTab(name, btn) {
     document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('tab-active'); });
     document.getElementById('tab-' + name).style.display = 'block';
     btn.classList.add('tab-active');
+    var adv = document.getElementById('advanced-sections');
+    if (adv) adv.style.display = (name === 'advanced') ? 'block' : 'none';
 }
 
 // ============================================================
