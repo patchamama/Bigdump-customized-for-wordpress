@@ -12,7 +12,7 @@ error_reporting(E_ALL);
 @set_time_limit(0);
 @ini_set('auto_detect_line_endings', true);
 
-define('VERSION',           '0.41-wp');
+define('VERSION',           '0.42-wp');
 define('DATA_CHUNK_LENGTH',  1048576); // 1MB per fgets() read — handles long extended-insert lines
 define('TESTMODE',           false);
 define('BIGDUMP_DIR',        dirname(__FILE__));
@@ -96,6 +96,30 @@ function safe_create_table_query(string $query): string {
         $query,
         1
     );
+}
+
+/**
+ * Removes a leading SQL block comment while retaining a statement that follows
+ * it on the same line. Line comments are handled by the import loop.
+ */
+function strip_leading_sql_block_comment(string $line, bool &$in_block_comment): string {
+    while (true) {
+        $trimmed = ltrim($line);
+        if ($in_block_comment) {
+            $end = strpos($trimmed, '*/');
+            if ($end === false) return '';
+            $in_block_comment = false;
+            $line = substr($trimmed, $end + 2);
+            continue;
+        }
+        if (!str_starts_with($trimmed, '/*')) return $line;
+        $end = strpos($trimmed, '*/', 2);
+        if ($end === false) {
+            $in_block_comment = true;
+            return '';
+        }
+        $line = substr($trimmed, $end + 2);
+    }
 }
 
 function import_line_preview(string $filepath, bool $gzipmode, int $offset): string {
@@ -487,7 +511,7 @@ $csv_delimiter      = ',';
 $csv_add_quotes     = true;
 $csv_add_slashes    = true;
 
-$comment         = ['#', '-- ', 'DELIMITER', '/*!', 'CREATE DATABASE', 'USE `'];
+$comment         = ['#', '--', '//', 'DELIMITER', 'CREATE DATABASE', 'USE `'];
 $delimiter       = ';';
 $string_quotes   = '\'';
 // Max lines allowed in a single query. phpMyAdmin exports with extended inserts
@@ -1309,7 +1333,7 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
 
     if (!$error) {
         $query = ''; $queries = 0; $totalqueries = (int)$_GET['totalqueries'];
-        $linenumber = $_GET['start']; $querylines = 0; $inparents = false;
+        $linenumber = $_GET['start']; $querylines = 0; $inparents = false; $in_block_comment = false;
 
         while ($linenumber < $_GET['start'] + $linespersession || $query !== '') {
             $dumpline = '';
@@ -1329,13 +1353,15 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
 
             $dumpline = str_replace(["\r\n", "\r"], "\n", $dumpline);
 
+            if (!$inparents) $dumpline = strip_leading_sql_block_comment($dumpline, $in_block_comment);
+
             if (!$inparents && strpos($dumpline, 'DELIMITER ') === 0)
                 $delimiter = str_replace('DELIMITER ', '', trim($dumpline));
 
             if (!$inparents) {
                 $skip = false;
                 foreach ($comment as $cv) {
-                    if (trim($dumpline) === '' || strpos(trim($dumpline), $cv) === 0) { $skip = true; break; }
+                    if (trim($dumpline) === '' || trim($dumpline) === ';' || strpos(trim($dumpline), $cv) === 0) { $skip = true; break; }
                 }
                 if ($skip) { $linenumber++; continue; }
             }
