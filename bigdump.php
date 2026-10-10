@@ -85,6 +85,10 @@ function safe_drop_table_query(string $query): string {
     );
 }
 
+function is_drop_query(string $query): bool {
+    return preg_match('/^\s*DROP\b/i', $query) === 1;
+}
+
 // ============================================================
 // WORDPRESS DB HELPERS
 // ============================================================
@@ -438,6 +442,8 @@ $wp_table_prefix       = $wp_config['table_prefix'] ?? 'wp_';
 
 $filename        = '';
 $ajax            = true;
+// Enabled by default to preserve existing imports; Advanced can disable it per file.
+$drop_tables     = !isset($_GET['drop']) || $_GET['drop'] !== '0';
 // Lines processed per import session. Lower = safer on slow servers.
 // Modern WP dumps with extended inserts can have single queries > 1000 lines.
 $linespersession = 3000;
@@ -1175,7 +1181,7 @@ if (!$error && isset($_GET['start'])) {
     }
 
     // DROP tables on first session
-    if (!$error && $mysqli && (int)$_GET['start'] === 1) {
+    if (!$error && $drop_tables && $mysqli && (int)$_GET['start'] === 1) {
         $tr = $mysqli->query("SHOW TABLES");
         $dropped = [];
         if ($tr) {
@@ -1273,11 +1279,14 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
 
             if ((preg_match('/'.preg_quote($delimiter, '/').'$/', trim($dumpline)) || $delimiter === '') && !$inparents) {
                 $query = substr(trim($query), 0, -strlen($delimiter));
-                $query = safe_drop_table_query($query);
-                if (!TESTMODE && !$mysqli->query($query)) {
-                    echo '<p class="msg-error">Error on line '.$linenumber.': '.h(trim($dumpline)).'</p>';
-                    echo '<p>MySQL: '.h($mysqli->error).'</p>';
-                    $error = true; break;
+                // With Drop disabled, preserve the current database and ignore every DROP command in the dump.
+                if ($drop_tables || !is_drop_query($query)) {
+                    if ($drop_tables) $query = safe_drop_table_query($query);
+                    if (!TESTMODE && !$mysqli->query($query)) {
+                        echo '<p class="msg-error">Error on line '.$linenumber.': '.h(trim($dumpline)).'</p>';
+                        echo '<p>MySQL: '.h($mysqli->error).'</p>';
+                        $error = true; break;
+                    }
                 }
                 $totalqueries++; $queries++; $query = ''; $querylines = 0;
             }
@@ -1315,7 +1324,7 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
             echo '<p class="msg-warn"><strong>IMPORTANT:</strong> Delete the dump file and this script from the server when you no longer need them.</p>';
             $error = true;
         } else {
-            $next = '?start='.$linenumber.'&fn='.urlencode($curfilename).($from_backup ? '&from_backup=1' : '').'&foffset='.$foffset.'&totalqueries='.$totalqueries.'&delimiter='.urlencode($delimiter);
+            $next = '?start='.$linenumber.'&fn='.urlencode($curfilename).($from_backup ? '&from_backup=1' : '').'&drop='.($drop_tables ? '1' : '0').'&foffset='.$foffset.'&totalqueries='.$totalqueries.'&delimiter='.urlencode($delimiter);
             if ($delaypersession != 0)
                 echo '<p class="msg-info">Waiting '.$delaypersession.' ms...</p>';
             if (!$ajax)
@@ -1406,6 +1415,7 @@ if (!empty($all_importable) || !empty($all_backups)) {
         $fp        = $upload_dir.'/'.$f;
         $type      = preg_match('/\.sql$/i', $f) ? 'SQL' : (preg_match('/\.gz$/i', $f) ? 'GZip' : 'ZIP');
         $can       = preg_match('/\.(sql|gz)$/i', $f);
+        $drop_id   = 'drop-import-'.md5($f);
         $start_url = '?start=1&fn='.urlencode($f).'&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
         echo '<tr>';
         echo '<td><code>'.h($f).'</code></td>';
@@ -1413,13 +1423,17 @@ if (!empty($all_importable) || !empty($all_backups)) {
         echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
         echo '<td>'.$type.'</td>';
         echo '<td>';
-        if ($can) echo '<a href="'.h($start_url).'" class="btn btn-primary btn-sm">▶ Import</a> &nbsp;';
+        if ($can) {
+            echo '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" checked> Drop tables</label>';
+            echo '<a href="'.h($start_url).'&drop=1" data-start-url="'.h($start_url).'" class="btn btn-primary btn-sm" onclick="this.href=this.dataset.startUrl+\'&drop=\'+(document.getElementById(\''.h($drop_id).'\').checked?\'1\':\'0\')">▶ Import</a> &nbsp;';
+        }
         echo '<a href="?delete='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete '.h($f).'?\')">✕</a>';
         echo '</td></tr>';
     }
     foreach ($all_backups as $f) {
         $fp        = BACKUP_DIR.'/'.$f;
         $type      = preg_match('/\.gz$/i', $f) ? 'GZip Backup' : 'SQL Backup';
+        $drop_id   = 'drop-backup-'.md5($f);
         $start_url = '?start=1&fn='.urlencode($f).'&from_backup=1&foffset=0&totalqueries=0&delimiter='.urlencode($delimiter);
         echo '<tr style="background:#fff9e6">';
         echo '<td><code>'.h($f).'</code> <span class="badge badge-info">backup</span></td>';
@@ -1427,7 +1441,8 @@ if (!empty($all_importable) || !empty($all_backups)) {
         echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
         echo '<td>'.$type.'</td>';
         echo '<td>';
-        echo '<a href="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="return confirm(\'Restore '.h($f).'? This will DROP all current tables.\')">↩ Restore</a> &nbsp;';
+        echo '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" checked> Drop tables</label>';
+        echo '<a href="'.h($start_url).'&drop=1" data-start-url="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="this.href=this.dataset.startUrl+\'&drop=\'+(document.getElementById(\''.h($drop_id).'\').checked?\'1\':\'0\'); return confirm(\'Restore '.h($f).'?\')">↩ Restore</a> &nbsp;';
         echo '<a href="?download='.urlencode($f).'" class="btn btn-secondary btn-sm">⬇</a> &nbsp;';
         echo '<a href="?delete_backup='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete backup '.h($f).'?\')">✕</a>';
         echo '</td></tr>';
@@ -2189,9 +2204,10 @@ function wpDeactivateAll() {
 (function(){
   var delay = <?php echo (int)$delaypersession; ?>;
   var fromBackup = <?php echo (isset($_GET['from_backup']) && $_GET['from_backup']) ? 'true' : 'false'; ?>;
+  var dropTables = <?php echo $drop_tables ? 'true' : 'false'; ?>;
   function nextUrl(ln,fn,fo,tq,dl){
     return '?start='+ln+'&fn='+fn+(fromBackup?'&from_backup=1':'')+
-           '&foffset='+fo+'&totalqueries='+tq+'&delimiter='+dl+'&ajaxrequest=true';
+           '&drop='+(dropTables?'1':'0')+'&foffset='+fo+'&totalqueries='+tq+'&delimiter='+dl+'&ajaxrequest=true';
   }
   function doRequest(url){
     var xhr = new XMLHttpRequest();
