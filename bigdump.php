@@ -68,6 +68,23 @@ function fmt_bytes(int $bytes): string {
 
 function h(string $s): string { return htmlspecialchars($s, ENT_QUOTES, 'UTF-8'); }
 
+/**
+ * Make DROP TABLE statements embedded in SQL dumps idempotent.
+ *
+ * The importer clears the target database before processing the dump, while
+ * many dumps also start with DROP TABLE statements. Adding IF EXISTS makes
+ * MySQL skip a table that has already been removed instead of aborting the
+ * import with a "table doesn't exist" error.
+ */
+function safe_drop_table_query(string $query): string {
+    return preg_replace(
+        '/^(\s*DROP\s+(?:TEMPORARY\s+)?TABLE\s+)(?!IF\s+EXISTS\b)/i',
+        '$1IF EXISTS ',
+        $query,
+        1
+    );
+}
+
 // ============================================================
 // WORDPRESS DB HELPERS
 // ============================================================
@@ -1256,6 +1273,7 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
 
             if ((preg_match('/'.preg_quote($delimiter, '/').'$/', trim($dumpline)) || $delimiter === '') && !$inparents) {
                 $query = substr(trim($query), 0, -strlen($delimiter));
+                $query = safe_drop_table_query($query);
                 if (!TESTMODE && !$mysqli->query($query)) {
                     echo '<p class="msg-error">Error on line '.$linenumber.': '.h(trim($dumpline)).'</p>';
                     echo '<p>MySQL: '.h($mysqli->error).'</p>';
