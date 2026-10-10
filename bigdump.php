@@ -12,7 +12,7 @@ error_reporting(E_ALL);
 @set_time_limit(0);
 @ini_set('auto_detect_line_endings', true);
 
-define('VERSION',           '0.40-wp');
+define('VERSION',           '0.41-wp');
 define('DATA_CHUNK_LENGTH',  1048576); // 1MB per fgets() read — handles long extended-insert lines
 define('TESTMODE',           false);
 define('BIGDUMP_DIR',        dirname(__FILE__));
@@ -87,6 +87,38 @@ function safe_drop_table_query(string $query): string {
 
 function is_drop_query(string $query): bool {
     return preg_match('/^\s*DROP\b/i', $query) === 1;
+}
+
+function safe_create_table_query(string $query): string {
+    return preg_replace(
+        '/^(\s*CREATE\s+(?:TEMPORARY\s+)?TABLE\s+)(?!IF\s+NOT\s+EXISTS\b)/i',
+        '$1IF NOT EXISTS ',
+        $query,
+        1
+    );
+}
+
+function import_line_preview(string $filepath, bool $gzipmode, int $offset): string {
+    $handle = $gzipmode ? @gzopen($filepath, 'r') : @fopen($filepath, 'r');
+    if (!$handle) return 'Could not open the dump to preview this line.';
+
+    $seek_ok = $gzipmode ? gzseek($handle, $offset) === 0 : fseek($handle, $offset, SEEK_SET) === 0;
+    if (!$seek_ok) {
+        if ($gzipmode) gzclose($handle); else fclose($handle);
+        return 'Could not seek to this position in the dump.';
+    }
+
+    $line = '';
+    while (strlen($line) < 4096) {
+        $chunk = $gzipmode ? gzgets($handle, DATA_CHUNK_LENGTH) : fgets($handle, DATA_CHUNK_LENGTH);
+        if ($chunk === false) break;
+        $line .= $chunk;
+        if (str_ends_with($chunk, "\n") || str_ends_with($chunk, "\r")) break;
+    }
+    if ($gzipmode) gzclose($handle); else fclose($handle);
+
+    $line = trim($line);
+    return $line === '' ? '(blank line)' : (strlen($line) >= 4096 ? $line . ' … [truncated]' : $line);
 }
 
 // ============================================================
@@ -802,6 +834,7 @@ foreach ($_REQUEST as $key => $val) {
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222}
 #wrap{max-width:900px;margin:20px auto;padding:0 12px}
+.version-indicator{position:fixed;top:12px;right:14px;z-index:1000;background:#1a365d;color:#fff;padding:6px 10px;border-radius:999px;box-shadow:0 2px 6px rgba(0,0,0,.2);font-size:12px;font-weight:700}
 h2{font-size:15px;margin:14px 0 8px;color:#2d3748}
 p{margin:5px 0;line-height:1.55}
 code{background:#edf2f7;padding:1px 5px;border-radius:3px;font-size:13px}
@@ -866,6 +899,8 @@ input:focus,select:focus{outline:none;border-color:#3182ce;box-shadow:0 0 0 3px 
 .btn-warn,.btn-warning{background:#c05621;color:#fff}.btn-warn:hover,.btn-warning:hover{background:#9c4221}
 .btn-secondary{background:#718096;color:#fff}.btn-secondary:hover{background:#4a5568}
 .btn-purple {background:#553c9a;color:#fff}.btn-purple:hover{background:#44337a}
+.line-preview-toggle{border:0;background:none;padding:0;color:inherit;text-decoration:underline;cursor:pointer;font:inherit;font-weight:700}
+.import-line-preview{max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:10px;background:#1a202c;color:#edf2f7;border-radius:4px;font-size:12px}
 .btn-sm{padding:4px 12px;font-size:12px}
 /* Tabs */
 .tab-nav{display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin:-18px -18px 16px;padding:0 18px}
@@ -896,6 +931,7 @@ details .details-body{padding:0 16px 16px}
 </style>
 </head>
 <body>
+<div class="version-indicator" aria-label="Running version">BigDump WP v<?php echo VERSION; ?></div>
 <div id="wrap">
 
 <!-- SECURITY WARNING BANNER — only shown on non-localhost -->
@@ -974,6 +1010,40 @@ $delaypersession = (int)($cfg['delaypersession'] ?? 0);
 // Override $max_query_lines with saved config if present
 if (isset($cfg['max_query_lines']) && $cfg['max_query_lines'] > 0)
     $max_query_lines = (int)$cfg['max_query_lines'];
+
+// ============================================================
+// ACTION: database connection and write-permission test
+// ============================================================
+if ($action === 'test_db_permissions') {
+    $test_db = @new mysqli($db_server, $db_username, $db_password, $db_name);
+    echo '<div class="card '.($test_db->connect_error ? 'card-red' : 'card-green').'">';
+    echo '<div class="card-header">'.($test_db->connect_error ? '✗ Database connection test failed' : '✓ Database connection test').'</div>';
+    if ($test_db->connect_error) {
+        echo '<p class="msg-error">'.h($test_db->connect_error).'</p>';
+    } else {
+        $test_table = 'bigdump_permission_test_'.bin2hex(random_bytes(4));
+        $quoted_table = '`'.$test_db->real_escape_string($test_table).'`';
+        $created = $test_db->query("CREATE TABLE $quoted_table (id INT NOT NULL PRIMARY KEY, test_value VARCHAR(32) NOT NULL)");
+        if (!$created) {
+            echo '<p class="msg-error">Connected, but CREATE TABLE was denied: '.h($test_db->error).'</p>';
+        } else {
+            $inserted = $test_db->query("INSERT INTO $quoted_table (id, test_value) VALUES (1, 'BigDump permission test')");
+            $readable = $inserted && ($result = $test_db->query("SELECT test_value FROM $quoted_table WHERE id = 1"));
+            if ($result instanceof mysqli_result) $result->free();
+            $dropped = $test_db->query("DROP TABLE $quoted_table");
+
+            if ($inserted && $readable && $dropped) {
+                echo '<p class="msg-success">Connection, CREATE, INSERT, SELECT, and DROP permissions are available. This user can import tables.</p>';
+            } else {
+                $failed_step = !$inserted ? 'INSERT' : (!$readable ? 'SELECT' : 'DROP');
+                echo '<p class="msg-error">CREATE TABLE works, but '.$failed_step.' failed: '.h($test_db->error).'</p>';
+                if (!$dropped) echo '<p class="msg-warn">Temporary test table left behind: <code>'.h($test_table).'</code>.</p>';
+            }
+        }
+        $test_db->close();
+    }
+    echo '</div>';
+}
 
 // ============================================================
 // ACTION: run backup
@@ -1221,7 +1291,12 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
     if (!$error) {
         echo '<div class="card"><div class="card-header">📥 Importing: '.h($curfilename).'</div>';
         if (TESTMODE) echo '<p class="msg-warn">TEST MODE — queries will not be executed</p>';
-        echo '<p class="msg-info">Starting line: '.(int)$_GET['start'].'</p></div>';
+        if (!$drop_tables) echo '<p class="msg-warn">Drop tables is disabled. Existing tables are preserved and CREATE TABLE statements are skipped when the table already exists; incompatible schemas or duplicate data can still stop the import.</p>';
+        $preview_path = ($from_backup ? BACKUP_DIR : $upload_dir).'/'.$curfilename;
+        $line_preview = import_line_preview($preview_path, $gzipmode, (int)$_GET['foffset']);
+        $line_preview_id = 'import-line-preview';
+        echo '<p class="msg-info">Starting line: <button type="button" class="line-preview-toggle" aria-expanded="false" aria-controls="'.$line_preview_id.'" onclick="var p=document.getElementById(\''.$line_preview_id.'\'); var open=p.style.display!==\'none\'; p.style.display=open?\'none\':\'block\'; this.setAttribute(\'aria-expanded\', open?\'false\':\'true\')">'.(int)$_GET['start'].' ⌄</button></p>';
+        echo '<pre id="'.$line_preview_id.'" class="import-line-preview" style="display:none">'.h($line_preview).'</pre></div>';
     }
 
     if (!$error && !$gzipmode && $_GET['foffset'] > $filesize) {
@@ -1279,9 +1354,13 @@ if (!$error && isset($_GET['start']) && isset($_GET['foffset']) && preg_match('/
 
             if ((preg_match('/'.preg_quote($delimiter, '/').'$/', trim($dumpline)) || $delimiter === '') && !$inparents) {
                 $query = substr(trim($query), 0, -strlen($delimiter));
-                // With Drop disabled, preserve the current database and ignore every DROP command in the dump.
+                // With Drop disabled, preserve existing tables and continue with the dump's later statements.
                 if ($drop_tables || !is_drop_query($query)) {
-                    if ($drop_tables) $query = safe_drop_table_query($query);
+                    if ($drop_tables) {
+                        $query = safe_drop_table_query($query);
+                    } elseif (!is_drop_query($query)) {
+                        $query = safe_create_table_query($query);
+                    }
                     if (!TESTMODE && !$mysqli->query($query)) {
                         echo '<p class="msg-error">Error on line '.$linenumber.': '.h(trim($dumpline)).'</p>';
                         echo '<p>MySQL: '.h($mysqli->error).'</p>';
@@ -1424,8 +1503,11 @@ if (!empty($all_importable) || !empty($all_backups)) {
         echo '<td>'.$type.'</td>';
         echo '<td>';
         if ($can) {
-            echo '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" checked> Drop tables</label>';
-            echo '<a href="'.h($start_url).'&drop=1" data-start-url="'.h($start_url).'" class="btn btn-primary btn-sm" onclick="this.href=this.dataset.startUrl+\'&drop=\'+(document.getElementById(\''.h($drop_id).'\').checked?\'1\':\'0\')">▶ Import</a> &nbsp;';
+            echo '<form method="GET" style="display:inline-flex;align-items:center;gap:7px;margin:0">';
+            echo '<input type="hidden" name="start" value="1"><input type="hidden" name="fn" value="'.h($f).'"><input type="hidden" name="foffset" value="0"><input type="hidden" name="totalqueries" value="0"><input type="hidden" name="delimiter" value="'.h($delimiter).'">';
+            echo '<input type="hidden" name="drop" value="0"><label style="display:inline-flex;align-items:center;gap:4px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" name="drop" value="1" checked> Drop tables</label>';
+            echo '<button type="submit" class="btn btn-primary btn-sm">▶ Import</button></form> ';
+            echo '<form method="POST" style="display:inline"><input type="hidden" name="action" value="test_db_permissions"><button type="submit" class="btn btn-success btn-sm">✓ Test DB</button></form> &nbsp;';
         }
         echo '<a href="?delete='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete '.h($f).'?\')">✕</a>';
         echo '</td></tr>';
@@ -1441,8 +1523,11 @@ if (!empty($all_importable) || !empty($all_backups)) {
         echo '<td>'.date('Y-m-d H:i', filemtime($fp)).'</td>';
         echo '<td>'.$type.'</td>';
         echo '<td>';
-        echo '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" checked> Drop tables</label>';
-        echo '<a href="'.h($start_url).'&drop=1" data-start-url="'.h($start_url).'" class="btn btn-warning btn-sm" onclick="this.href=this.dataset.startUrl+\'&drop=\'+(document.getElementById(\''.h($drop_id).'\').checked?\'1\':\'0\'); return confirm(\'Restore '.h($f).'?\')">↩ Restore</a> &nbsp;';
+        echo '<form method="GET" style="display:inline-flex;align-items:center;gap:7px;margin:0">';
+        echo '<input type="hidden" name="start" value="1"><input type="hidden" name="fn" value="'.h($f).'"><input type="hidden" name="from_backup" value="1"><input type="hidden" name="foffset" value="0"><input type="hidden" name="totalqueries" value="0"><input type="hidden" name="delimiter" value="'.h($delimiter).'">';
+        echo '<input type="hidden" name="drop" value="0"><label style="display:inline-flex;align-items:center;gap:4px;font-size:12px"><input type="checkbox" id="'.h($drop_id).'" name="drop" value="1" checked> Drop tables</label>';
+        echo '<button type="submit" class="btn btn-warning btn-sm">↩ Restore</button></form> ';
+        echo '<form method="POST" style="display:inline"><input type="hidden" name="action" value="test_db_permissions"><button type="submit" class="btn btn-success btn-sm">✓ Test DB</button></form> &nbsp;';
         echo '<a href="?download='.urlencode($f).'" class="btn btn-secondary btn-sm">⬇</a> &nbsp;';
         echo '<a href="?delete_backup='.urlencode($f).'" class="btn btn-danger btn-sm" onclick="return confirm(\'Delete backup '.h($f).'?\')">✕</a>';
         echo '</td></tr>';
