@@ -26,6 +26,14 @@ Delivered in phases, one commit per phase. Release at the end.
       Verify button runs a fast HEAD (new verify_url endpoint, curl/get_headers, 5s timeout,
       capped at 25) on both the final internal URL and the existing link, showing the HTTP code.
       Also fixed deprecated curl_close() (PHP 8.5) in verify_url and wp_install. -> 1.6.0
+- [x] P3c: PHP Configuration safe testing. New test_php_config endpoint writes the proposed
+      .htaccess / .user.ini into a throwaway subfolder with a probe, requests it over HTTP, and
+      reports breaks (HTTP 500) vs safe (200) + whether values applied (ini_get). Methods: .htaccess,
+      .user.ini, auto-detect. Apply is disabled until a test passes and sends only the validated
+      method. Fixed the old bug writing 'user.ini' instead of '.user.ini'. Fixed PHP 8.5 deprecations
+      ($http_response_header). -> 1.7.0
+      NOTE: PHP built-in server does not process .htaccess/.user.ini; real 500-detection only on the
+      target host (Apache/PHP-FPM), which is exactly where it matters. Mechanism verified locally.
 - [ ] P4: Security Audit (DB + files: weak passwords, admin default, WP version,
       default SALTs, file perms, XML-RPC, REST users, debug, prefix). -> 1.7.0
 - [ ] P5: phpMyAdmin installer (download+extract to /phpmyadmin) + WP extras. -> 1.8.0

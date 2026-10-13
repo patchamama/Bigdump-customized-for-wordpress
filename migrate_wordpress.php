@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.6.0');
+define('TOOL_VERSION',  '1.7.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -126,6 +126,13 @@ $GLOBALS['__I18N'] = [
         'existing'                            => 'existente',
         'final'                               => 'final',
         'checking…'                           => 'verificando…',
+        // PHP Configuration
+        'Method'                              => 'Método',
+        'Auto-detect (test both)'             => 'Autodetectar (probar ambos)',
+        'Test runs the proposed config in an isolated temporary subfolder and loads it over HTTP. If it would break the site (HTTP 500) you are warned and Apply stays disabled; the test folder only affects itself, never the live site.'
+            => 'La prueba aplica la configuración propuesta en una subcarpeta temporal aislada y la carga por HTTP. Si rompería el sitio (HTTP 500) se te avisa y Aplicar queda deshabilitado; la carpeta de prueba solo se afecta a sí misma, nunca al sitio en producción.',
+        'Test safely'                         => 'Probar sin riesgo',
+        'Apply'                               => 'Aplicar',
     ],
 ];
 
@@ -2127,6 +2134,108 @@ if ($authenticated && isset($_GET['action'])) {
     }
 
     // --- UPDATE PHP CONFIG ---
+    // --- TEST PHP CONFIG IN AN ISOLATED SUBFOLDER ---
+    // Writes the proposed .htaccess / .user.ini into a throwaway subfolder with a
+    // probe script, requests the probe over HTTP, and reports whether the config
+    // loads (HTTP 200) or would break the site (HTTP 500), plus the effective
+    // values. The subfolder only affects itself, so the live site is never at risk.
+    if ($action === 'test_php_config') {
+        $root    = rtrim($abspath, '/');
+        $allowed = ['memory_limit', 'upload_max_filesize', 'post_max_size', 'max_execution_time', 'max_input_vars'];
+        $method  = in_array($_POST['method'] ?? '', ['htaccess', 'user_ini', 'auto'], true) ? $_POST['method'] : 'auto';
+
+        $settings = [];
+        foreach ($allowed as $k) {
+            $v = trim($_POST[$k] ?? '');
+            if ($v === '') continue;
+            if (!preg_match('/^\d+[KMGkmg]?$/', $v)) { echo json_encode(['ok' => false, 'error' => "Invalid value for $k: $v"]); exit; }
+            $settings[$k] = $v;
+        }
+        if (empty($settings)) { echo json_encode(['ok' => false, 'error' => 'No values provided']); exit; }
+
+        if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root is not writable; cannot create a test folder.']); exit; }
+
+        // Probe script: reports the effective ini values as JSON.
+        $probe = "<?php header('Content-Type: application/json'); \$k=" . var_export($allowed, true) . "; \$o=[]; foreach(\$k as \$x)\$o[\$x]=ini_get(\$x); echo json_encode(['probe_ok'=>true,'values'=>\$o]);";
+
+        // Base URL of the current script's directory, to reach the test folder over HTTP.
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $base  = rtrim(dirname($proto . '://' . $host . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+
+        $build_htaccess = function () use ($settings) {
+            $b = "# WP-Migrate PHP Config test\n";
+            foreach ($settings as $k => $v) { if ($k === 'max_input_vars') continue; $b .= "php_value $k $v\n"; }
+            return $b;
+        };
+        $build_userini = function () use ($settings) {
+            $b = "; WP-Migrate PHP Config test\n";
+            foreach ($settings as $k => $v) $b .= "$k = $v\n";
+            return $b;
+        };
+
+        // Run one isolated test for a given method; returns status + effective values.
+        $run_test = function ($use_htaccess, $use_userini) use ($root, $base, $probe, $build_htaccess, $build_userini, $settings) {
+            $dir = $root . '/_phpcfg_test_' . bin2hex(random_bytes(4));
+            if (!@mkdir($dir, 0755)) return ['ok' => false, 'error' => 'Could not create test folder'];
+            $cleanup = function () use ($dir) {
+                foreach (glob($dir . '/*') ?: [] as $f) @unlink($f);
+                foreach (glob($dir . '/.*') ?: [] as $f) { if (basename($f) !== '.' && basename($f) !== '..') @unlink($f); }
+                @rmdir($dir);
+            };
+            file_put_contents($dir . '/probe.php', $probe);
+            if ($use_htaccess) file_put_contents($dir . '/.htaccess', $build_htaccess());
+            if ($use_userini)  file_put_contents($dir . '/.user.ini', $build_userini());
+
+            $url = $base . '/' . basename($dir) . '/probe.php';
+            $status = 0; $body = '';
+            if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8, CURLOPT_CONNECTTIMEOUT => 5,
+                    CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false, CURLOPT_FOLLOWLOCATION => true]);
+                $body = (string)curl_exec($ch);
+                $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                unset($ch);
+            } else {
+                $ctx = stream_context_create(['http' => ['timeout' => 8, 'ignore_errors' => true]]);
+                $body = (string)@file_get_contents($url, false, $ctx);
+                // PHP 8.5 deprecates the $http_response_header global; prefer the function.
+                $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+                if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+            }
+            $cleanup();
+
+            $breaks = ($status >= 500);
+            $values = null; $applied = null;
+            $decoded = json_decode($body, true);
+            if (is_array($decoded) && !empty($decoded['probe_ok'])) {
+                $values = $decoded['values'];
+                // Did the proposed values actually take effect in that folder?
+                $applied = [];
+                foreach ($settings as $k => $want) {
+                    $got = $values[$k] ?? '';
+                    $applied[$k] = ['want' => $want, 'got' => $got,
+                        'ok' => (strcasecmp(rtrim((string)$got, 'Bb'), rtrim((string)$want, 'Bb')) === 0)
+                             || ((int)$got === (int)$want && (int)$want > 0)];
+                }
+            }
+            return ['ok' => true, 'status' => $status, 'breaks' => $breaks,
+                    'loaded' => ($status >= 200 && $status < 400), 'values' => $values, 'applied' => $applied];
+        };
+
+        $report = [];
+        if ($method === 'htaccess' || $method === 'auto') $report['htaccess'] = $run_test(true, false);
+        if ($method === 'user_ini' || $method === 'auto') $report['user_ini'] = $run_test(false, true);
+
+        // Recommend a method: a loaded, non-breaking one (prefer the explicit choice).
+        $recommended = null;
+        foreach (['htaccess', 'user_ini'] as $mth) {
+            if (isset($report[$mth]) && $report[$mth]['loaded'] && !$report[$mth]['breaks']) { $recommended = $mth; break; }
+        }
+        echo json_encode(['ok' => true, 'method' => $method, 'report' => $report, 'recommended' => $recommended]);
+        exit;
+    }
+
     if ($action === 'update_php_config') {
         $root    = rtrim($abspath, '/');
         $allowed = ['memory_limit', 'upload_max_filesize', 'post_max_size', 'max_execution_time', 'max_input_vars'];
@@ -2141,39 +2250,48 @@ if ($authenticated && isset($_GET['action'])) {
         }
         if (empty($settings)) { echo json_encode(['ok' => false, 'error' => 'No values provided']); exit; }
 
+        // Which methods to write. Defaults to both for backward compatibility; the
+        // UI passes the method the isolated test validated so we don't write a
+        // config that would 500 the site.
+        $method = in_array($_POST['method'] ?? '', ['htaccess', 'user_ini', 'both'], true) ? $_POST['method'] : 'both';
+
         $written = []; $skipped = [];
         $ms = '# BEGIN WP-Migrate PHP Config'; $me = '# END WP-Migrate PHP Config';
 
         // .htaccess — all settings except max_input_vars
-        $htaccess = $root . '/.htaccess';
-        $ht_block = "$ms\n";
-        foreach ($settings as $k => $v) {
-            if ($k === 'max_input_vars') continue;
-            $ht_block .= "php_value $k $v\n";
+        if ($method === 'htaccess' || $method === 'both') {
+            $htaccess = $root . '/.htaccess';
+            $ht_block = "$ms\n";
+            foreach ($settings as $k => $v) {
+                if ($k === 'max_input_vars') continue;
+                $ht_block .= "php_value $k $v\n";
+            }
+            $ht_block .= "$me";
+            $ht_writable = (file_exists($htaccess) && is_writable($htaccess)) || (!file_exists($htaccess) && is_writable($root));
+            if ($ht_writable) {
+                $content = file_exists($htaccess) ? file_get_contents($htaccess) : '';
+                $content = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $content));
+                $content = $ht_block . ($content ? "\n\n" . $content : '');
+                file_put_contents($htaccess, $content);
+                $written[] = '.htaccess';
+            } else { $skipped[] = '.htaccess (not writable)'; }
         }
-        $ht_block .= "$me";
-        $ht_writable = (file_exists($htaccess) && is_writable($htaccess)) || (!file_exists($htaccess) && is_writable($root));
-        if ($ht_writable) {
-            $content = file_exists($htaccess) ? file_get_contents($htaccess) : '';
-            $content = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $content));
-            $content = $ht_block . ($content ? "\n\n" . $content : '');
-            file_put_contents($htaccess, $content);
-            $written[] = '.htaccess';
-        } else { $skipped[] = '.htaccess (not writable)'; }
 
-        // user.ini — all settings (PHP-FPM)
-        $user_ini = $root . '/user.ini';
-        $ini_block = "; WP-Migrate PHP Config\n";
-        foreach ($settings as $k => $v) $ini_block .= "$k = $v\n";
-        $ini_block .= "; END WP-Migrate PHP Config";
-        $ini_writable = (file_exists($user_ini) && is_writable($user_ini)) || (!file_exists($user_ini) && is_writable($root));
-        if ($ini_writable) {
-            $content = file_exists($user_ini) ? file_get_contents($user_ini) : '';
-            $content = trim(preg_replace('/; WP-Migrate PHP Config.*?; END WP-Migrate PHP Config/s', '', $content));
-            $content = $ini_block . ($content ? "\n\n" . $content : '');
-            file_put_contents($user_ini, $content);
-            $written[] = 'user.ini';
-        } else { $skipped[] = 'user.ini (not writable)'; }
+        // .user.ini — all settings (PHP-FPM/CGI). Correct filename is ".user.ini".
+        if ($method === 'user_ini' || $method === 'both') {
+            $user_ini = $root . '/.user.ini';
+            $ini_block = "; WP-Migrate PHP Config\n";
+            foreach ($settings as $k => $v) $ini_block .= "$k = $v\n";
+            $ini_block .= "; END WP-Migrate PHP Config";
+            $ini_writable = (file_exists($user_ini) && is_writable($user_ini)) || (!file_exists($user_ini) && is_writable($root));
+            if ($ini_writable) {
+                $content = file_exists($user_ini) ? file_get_contents($user_ini) : '';
+                $content = trim(preg_replace('/; WP-Migrate PHP Config.*?; END WP-Migrate PHP Config/s', '', $content));
+                $content = $ini_block . ($content ? "\n\n" . $content : '');
+                file_put_contents($user_ini, $content);
+                $written[] = '.user.ini';
+            } else { $skipped[] = '.user.ini (not writable)'; }
+        }
 
         echo json_encode(['ok' => !empty($written), 'written' => $written, 'skipped' => $skipped,
             'note' => 'Changes take effect on next request. Some hosts require server restart.']);
@@ -3080,9 +3198,23 @@ foreach ($php_cfg_rows as $r):
 <?php endforeach; ?>
 </tbody>
 </table>
-<div class="actions" style="margin-bottom:10px">
-    <button class="btn btn-primary" onclick="savePhpConfig()">💾 Save PHP Config</button>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+    <label style="font-size:12px;color:#a0aec0"><?= h(t('Method')) ?>:
+        <select id="phpcfg_method" style="padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px">
+            <option value="auto"><?= h(t('Auto-detect (test both)')) ?></option>
+            <option value="htaccess">.htaccess (Apache)</option>
+            <option value="user_ini">.user.ini (PHP-FPM/CGI)</option>
+        </select>
+    </label>
 </div>
+<p style="font-size:11px;color:#718096;margin-bottom:10px">
+    <?= h(t('Test runs the proposed config in an isolated temporary subfolder and loads it over HTTP. If it would break the site (HTTP 500) you are warned and Apply stays disabled; the test folder only affects itself, never the live site.')) ?>
+</p>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-warning" id="phpcfg_test_btn" onclick="testPhpConfig()">🧪 <?= h(t('Test safely')) ?></button>
+    <button class="btn btn-primary" id="phpcfg_apply_btn" onclick="savePhpConfig()" disabled style="opacity:.5;cursor:not-allowed">💾 <?= h(t('Apply')) ?></button>
+</div>
+<div id="tls_phpcfg_test"></div>
 <div id="tls_phpcfg_log" class="log" style="display:none"></div>
 </div>
 
@@ -3734,23 +3866,87 @@ async function deactivateAllPlugins() {
     }
 }
 
-async function savePhpConfig() {
-    const keys = ['memory_limit','upload_max_filesize','post_max_size','max_execution_time','max_input_vars'];
-    const fd = new FormData();
-    let hasVal = false;
-    keys.forEach(k => {
+const PHPCFG_KEYS = ['memory_limit','upload_max_filesize','post_max_size','max_execution_time','max_input_vars'];
+let PHPCFG_VALIDATED_METHOD = null; // method proven safe by the last test
+
+function phpcfgValues() {
+    const fd = new FormData(); let hasVal = false;
+    PHPCFG_KEYS.forEach(k => {
         const v = document.getElementById('phpcfg_' + k)?.value.trim();
         if (v) { fd.append(k, v); hasVal = true; }
     });
+    return { fd, hasVal };
+}
+
+function phpcfgDisableApply() {
+    PHPCFG_VALIDATED_METHOD = null;
+    const b = document.getElementById('phpcfg_apply_btn');
+    b.disabled = true; b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+}
+// Re-test required whenever a value or the method changes.
+document.addEventListener('input', e => { if (e.target && e.target.id && e.target.id.indexOf('phpcfg_') === 0) phpcfgDisableApply(); });
+
+async function testPhpConfig() {
+    const { fd, hasVal } = phpcfgValues();
     if (!hasVal) { log('tls_phpcfg_log', '✗ Enter at least one value'); return; }
-    log('tls_phpcfg_log', '⏳ Saving…');
+    const method = document.getElementById('phpcfg_method').value;
+    fd.append('method', method);
+    const box = document.getElementById('tls_phpcfg_test');
+    box.innerHTML = '<span style="color:#718096;font-size:12px">🧪 Testing in isolated folder…</span>';
+    phpcfgDisableApply();
+    let j;
+    try {
+        const r = await fetch('?action=test_php_config', {method:'POST', body:fd});
+        j = await r.json();
+    } catch(e) { box.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok) { box.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+
+    let html = '<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px">';
+    const label = {htaccess: '.htaccess (Apache)', user_ini: '.user.ini (PHP-FPM/CGI)'};
+    for (const [mth, res] of Object.entries(j.report)) {
+        let verdict;
+        if (res.breaks) verdict = `<span class="badge badge-err">✗ HTTP ${res.status} — would break the site</span>`;
+        else if (res.loaded) verdict = `<span class="badge badge-ok">✓ HTTP ${res.status} — safe</span>`;
+        else verdict = `<span class="badge badge-warn">? HTTP ${res.status || 'no reply'}</span>`;
+        html += `<tr style="border-top:1px solid #2d3148"><td style="padding:5px 8px;font-family:monospace">${label[mth]||mth}</td><td style="padding:5px 8px">${verdict}</td></tr>`;
+        // Show whether the proposed values actually applied in the test folder.
+        if (res.applied) {
+            for (const [k, a] of Object.entries(res.applied)) {
+                const mark = a.ok ? '<span style="color:#6ee7b7">✓</span>' : '<span style="color:#fcd34d">≈</span>';
+                html += `<tr><td style="padding:2px 8px 2px 24px;color:#718096;font-family:monospace">${k}</td><td style="padding:2px 8px;color:#a0aec0">${mark} want ${a.want} / got ${esc(String(a.got))}</td></tr>`;
+            }
+        }
+    }
+    html += '</table>';
+    box.innerHTML = html;
+
+    if (j.recommended) {
+        PHPCFG_VALIDATED_METHOD = j.recommended;
+        // In auto mode, lock the selector choice to the method that passed.
+        const sel = document.getElementById('phpcfg_method');
+        if (sel.value === 'auto') sel.value = j.recommended;
+        const b = document.getElementById('phpcfg_apply_btn');
+        b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer';
+        log('tls_phpcfg_log', `✓ Safe via ${label[j.recommended]}. Apply enabled.`, false);
+    } else {
+        log('tls_phpcfg_log', '✗ No method passed the isolated test. Apply stays disabled to protect the site.', false);
+    }
+}
+
+async function savePhpConfig() {
+    if (!PHPCFG_VALIDATED_METHOD) { log('tls_phpcfg_log', '✗ Run a successful Test first.'); return; }
+    const { fd, hasVal } = phpcfgValues();
+    if (!hasVal) { log('tls_phpcfg_log', '✗ Enter at least one value'); return; }
+    fd.append('method', PHPCFG_VALIDATED_METHOD);
+    log('tls_phpcfg_log', '⏳ Applying…');
     try {
         const r = await fetch('?action=update_php_config', {method:'POST', body:fd});
         const j = await r.json();
         if (j.ok) {
-            log('tls_phpcfg_log', '✓ Saved to: ' + j.written.join(', '));
+            log('tls_phpcfg_log', '✓ Saved to: ' + j.written.join(', '), false);
             if (j.skipped?.length) log('tls_phpcfg_log', '⚠ Skipped: ' + j.skipped.join(', '));
             log('tls_phpcfg_log', 'ℹ ' + j.note);
+            phpcfgDisableApply();
         } else {
             log('tls_phpcfg_log', '✗ ' + j.error);
         }
