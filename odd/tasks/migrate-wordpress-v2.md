@@ -21,6 +21,11 @@ Delivered in phases, one commit per phase. Release at the end.
       against a real dump hash); endpoints wp_users_list / wp_user_password / wp_user_update /
       wp_user_create; bilingual "WordPress Users" card + JS. Capabilities serialize matches real
       dump format exactly. Bumped to 1.5.0 (absorbs the i18n infra bump).
+- [x] P3b: Domain Link Manager — final URL preview + HTTP verification. Each row shows how
+      the link would look under the current site (domToFinalUrl, mirrors server rewrite) and a
+      Verify button runs a fast HEAD (new verify_url endpoint, curl/get_headers, 5s timeout,
+      capped at 25) on both the final internal URL and the existing link, showing the HTTP code.
+      Also fixed deprecated curl_close() (PHP 8.5) in verify_url and wp_install. -> 1.6.0
 - [ ] P4: Security Audit (DB + files: weak passwords, admin default, WP version,
       default SALTs, file perms, XML-RPC, REST users, debug, prefix). -> 1.7.0
 - [ ] P5: phpMyAdmin installer (download+extract to /phpmyadmin) + WP extras. -> 1.8.0

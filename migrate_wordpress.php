@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.5.0');
+define('TOOL_VERSION',  '1.6.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -121,6 +121,11 @@ $GLOBALS['__I18N'] = [
         'Save'                                => 'Guardar',
         'Registered'                          => 'Registrado',
         'Username'                            => 'Usuario',
+        // Domain Link Manager
+        'Verify'                              => 'Verificar',
+        'existing'                            => 'existente',
+        'final'                               => 'final',
+        'checking…'                           => 'verificando…',
     ],
 ];
 
@@ -1727,6 +1732,50 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- VERIFY URLS (fast HEAD) ---
+    // Checks whether a small batch of URLs responds (2xx/3xx) within a short
+    // timeout, so the Domain Link Manager can show whether the rewritten target
+    // URL and the existing links actually resolve. Capped to avoid long scans.
+    if ($action === 'verify_url') {
+        $raw  = json_decode($_POST['urls'] ?? '', true);
+        $urls = is_array($raw) ? array_slice(array_values($raw), 0, 25) : [];
+        if (!$urls) { echo json_encode(['ok' => false, 'error' => 'No URLs provided']); exit; }
+
+        $check = function ($url) {
+            if (!preg_match('#^https?://#i', $url)) return ['status' => 0, 'ok' => false];
+            if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                    CURLOPT_NOBODY         => true,   // HEAD
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_TIMEOUT        => 5,
+                    CURLOPT_CONNECTTIMEOUT => 4,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_USERAGENT      => 'WP-Migration-Tool/verify',
+                    CURLOPT_RETURNTRANSFER => true,
+                ]);
+                curl_exec($ch);
+                $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                // curl_close() is a no-op since PHP 8.0 and deprecated in 8.5; the
+                // handle is freed when it goes out of scope.
+                unset($ch);
+                return ['status' => $code, 'ok' => ($code >= 200 && $code < 400)];
+            }
+            // Fallback: get_headers (needs allow_url_fopen).
+            $ctx = stream_context_create(['http' => ['method' => 'HEAD', 'timeout' => 5, 'ignore_errors' => true]]);
+            $hdr = @get_headers($url, true, $ctx);
+            if (!$hdr || !isset($hdr[0]) || !preg_match('#\s(\d{3})\s#', $hdr[0], $m)) return ['status' => 0, 'ok' => false];
+            $code = (int)$m[1];
+            return ['status' => $code, 'ok' => ($code >= 200 && $code < 400)];
+        };
+
+        $results = [];
+        foreach ($urls as $u) { $results[$u] = $check((string)$u); }
+        echo json_encode(['ok' => true, 'results' => $results]);
+        exit;
+    }
+
     // --- FIX LINKED DOMAINS ---
     // Rewrites every absolute URL of the selected domains to a root-relative path,
     // stripping scheme + host + an optional known subfolder. Serialized-safe.
@@ -2386,7 +2435,7 @@ if ($authenticated && isset($_GET['action'])) {
             $fh = fopen($tmp_zip, 'wb');
             curl_setopt_array($ch, [CURLOPT_FILE => $fh, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 180]);
             curl_exec($ch); $cerr = curl_error($ch);
-            curl_close($ch); fclose($fh);
+            unset($ch); fclose($fh); // curl_close() deprecated in PHP 8.5 (no-op since 8.0)
             if (!$cerr && file_exists($tmp_zip) && filesize($tmp_zip) > 1000000) {
                 $downloaded = true; $dl_method = 'curl PHP';
             }
@@ -3450,6 +3499,9 @@ async function scanDomains() {
         } else {
             vbadge = `<span class="badge badge-err" title="None of the probed files exist on disk — files may not be uploaded yet">⚠ 0/${d.checked} verified</span>`;
         }
+        // Build the final URL preview: the first sample link, with scheme+host
+        // (+strip) replaced by the current site, exactly as fixDomains would.
+        const finalUrl = domToFinalUrl(d.samples[0] || ('https://' + d.domain + '/'), d.strip);
         html += `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-bottom:1px solid #2d3148;font-size:13px">
             <input type="checkbox" class="tls-dom-cb" data-domain="${d.domain}" id="tls_dom_${i}" style="margin-top:3px">
             <div style="flex:1">
@@ -3461,14 +3513,66 @@ async function scanDomains() {
                 <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
                     <span style="color:#718096;font-size:11px">drop base path:</span>
                     <input type="text" class="tls-dom-strip" data-domain="${d.domain}" value="${d.strip}" placeholder="(none)"
+                        oninput="refreshFinalUrl(${i}, '${esc(d.domain)}')"
                         style="width:180px;padding:3px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px;font-family:monospace">
+                    <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="verifyDomainRow(${i}, '${esc(d.domain)}', '${esc(d.samples[0]||'')}')">${T_DOM.verify}</button>
                 </div>
-                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${sample}</div>` : ''}
+                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${T_DOM.existing}: ${sample} <span id="tls_dom_exist_${i}"></span></div>` : ''}
+                <div style="color:#6ee7b7;font-size:11px;font-family:monospace;margin-top:2px">${T_DOM.final}: <span id="tls_dom_final_${i}" data-sample="${esc(d.samples[0]||('https://'+d.domain+'/'))}">${esc(finalUrl)}</span> <span id="tls_dom_finalchk_${i}"></span></div>
             </div></div>`;
     });
     html += '</div>';
     el.innerHTML = html;
     document.getElementById('tls_dom_fix_btn').style.display = 'inline-flex';
+}
+
+// Translations for the Domain Link Manager row widgets.
+const T_DOM = {
+    verify:   <?= json_encode(t('Verify')) ?>,
+    existing: <?= json_encode(t('existing')) ?>,
+    final:    <?= json_encode(t('final')) ?>,
+    checking: <?= json_encode(t('checking…')) ?>,
+};
+
+// Convert an absolute sample URL of a legacy domain to the final URL under the
+// current site, dropping the given base path. Mirrors the server-side rewrite.
+function domToFinalUrl(sampleUrl, strip) {
+    const origin = window.location.origin; // scheme + current host (+port)
+    let m = sampleUrl.match(/^https?:\/\/[^\/]+(\/[^\s"'<>]*)?/i);
+    let path = m && m[1] ? m[1] : '/';
+    strip = (strip || '').trim();
+    if (strip) {
+        if (strip[0] !== '/') strip = '/' + strip;
+        strip = strip.replace(/\/+$/, '');
+        if (path === strip || path.indexOf(strip + '/') === 0) path = path.substring(strip.length);
+    }
+    if (!path) path = '/';
+    return origin + path;
+}
+
+function refreshFinalUrl(i, domain) {
+    const span  = document.getElementById('tls_dom_final_' + i);
+    const strip = document.querySelector(`.tls-dom-strip[data-domain="${domain}"]`).value;
+    span.textContent = domToFinalUrl(span.getAttribute('data-sample'), strip);
+    document.getElementById('tls_dom_finalchk_' + i).innerHTML = ''; // stale check cleared
+}
+
+async function verifyDomainRow(i, domain, sample) {
+    const finalSpan = document.getElementById('tls_dom_final_' + i);
+    const finalUrl  = finalSpan.textContent;
+    const existChk  = document.getElementById('tls_dom_exist_' + i);
+    const finalChk  = document.getElementById('tls_dom_finalchk_' + i);
+    finalChk.innerHTML = existChk.innerHTML = `<span style="color:#718096">${T_DOM.checking}</span>`;
+    const fd = new FormData();
+    fd.append('urls', JSON.stringify([finalUrl, sample].filter(Boolean)));
+    const r = await fetch('?action=verify_url', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { finalChk.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    const badge = res => res && res.ok
+        ? `<span class="badge badge-ok">✓ ${res.status}</span>`
+        : `<span class="badge badge-err">✗ ${res && res.status ? res.status : 'no reply'}</span>`;
+    finalChk.innerHTML = badge(j.results[finalUrl]);
+    if (sample && j.results[sample]) existChk.innerHTML = badge(j.results[sample]);
 }
 
 async function fixDomains() {
