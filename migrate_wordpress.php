@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.2.0');
+define('TOOL_VERSION',  '1.3.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -1397,7 +1397,26 @@ if ($authenticated && isset($_GET['action'])) {
         $pdo     = $r['pdo'];
         $prefix  = $fix_db['prefix'];
         $like    = '%http%://%.%/wp-content%';
-        $pattern = '/https?:\/\/[^\/\s\'"<>]+\/wp-content\//i';
+        // Capture the full absolute asset URL so we can verify the target file
+        // exists on disk before rewriting it to a relative /wp-content/ path.
+        // Group 1 = everything from /wp-content/ onwards (the kept relative path).
+        $pattern = '#https?://[^/\s\'"<>]+(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
+        $root    = rtrim($abspath, '/');
+
+        // Rewrite only when the resulting relative path points to a real file.
+        // When it does not, leave the URL untouched and count it as unverified so
+        // we never create a relative link to a missing asset.
+        $unverified = 0;
+        $rewrite = function ($str) use ($pattern, $root, &$unverified) {
+            return preg_replace_callback($pattern, function ($m) use ($root, &$unverified) {
+                $rel = preg_replace('/[?#].*$/', '', $m[1]); // strip query/hash for the disk check
+                if (is_file($root . $rel)) {
+                    return $m[1]; // keep original query/hash by returning full captured path
+                }
+                $unverified++;
+                return $m[0]; // leave the absolute URL as-is
+            }, $str);
+        };
 
         $tables = [
             ['table' => $prefix . 'posts',    'col' => 'post_content', 'id' => 'ID'],
@@ -1417,15 +1436,15 @@ if ($authenticated && isset($_GET['action'])) {
                     // Fix serialized strings first (recalculate s:LENGTH)
                     $new = preg_replace_callback(
                         '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
-                        function($m) use ($pattern) {
-                            if (!preg_match($pattern, $m[2])) return $m[0];
-                            $str = preg_replace($pattern, '/wp-content/', $m[2]);
+                        function($m) use ($rewrite) {
+                            $str = $rewrite($m[2]);
+                            if ($str === $m[2]) return $m[0];
                             return 's:' . strlen($str) . ':"' . $str . '"';
                         },
                         $old
                     );
                     // Fix remaining plain occurrences
-                    $new = preg_replace($pattern, '/wp-content/', $new);
+                    $new = $rewrite($new);
                     if ($new !== $old) {
                         $upd = $pdo->prepare("UPDATE `{$t['table']}` SET `{$t['col']}` = ? WHERE `{$t['id']}` = ?");
                         if ($upd->execute([$new, $row[$t['id']]])) $updated++;
@@ -1435,7 +1454,7 @@ if ($authenticated && isset($_GET['action'])) {
             } catch (Exception $e) { $errors++; }
         }
 
-        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors]);
+        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors, 'unverified' => $unverified]);
         exit;
     }
 
@@ -3033,7 +3052,10 @@ async function fixMediaUrls() {
     const r = await fetch('?action=fix_media_urls', {method:'POST', body:fd});
     const j = await r.json();
     if (j.ok) {
-        log('tls_media_log', `✓ Done. Updated ${j.updated} row(s).${j.errors ? `\n⚠ ${j.errors} error(s).` : ''}`, true);
+        let m = `✓ Done. Updated ${j.updated} row(s).`;
+        if (j.unverified) m += `\n⏭ Skipped ${j.unverified} URL(s): target file not found on disk (left absolute to avoid broken links).`;
+        if (j.errors) m += `\n⚠ ${j.errors} error(s).`;
+        log('tls_media_log', m, true);
         document.getElementById('tls_fix_btn').style.display = 'none';
     } else {
         log('tls_media_log', `✗ ${j.error}`, true);

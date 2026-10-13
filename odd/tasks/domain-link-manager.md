@@ -62,3 +62,14 @@ Delegated direct — single writer, one file, multiple non-trivial regions.
 ## Progress
 - Branch feat/domain-link-manager created from main.
 - Dump analyzed: igs-bonn.de/wordpress (27145), esgbonn.de/test (5136), rest external.
+
+## Follow-up: disk-verified fix_media_urls (commit aparte, v1.3.0)
+- fix_media_urls now verifies the target file exists under $abspath before rewriting a
+  domain/wp-content/ URL to /wp-content/; URLs whose file is missing stay absolute and are
+  counted as `unverified` in the JSON + shown in the UI. Prevents broken relative links.
+- export_db URL replacement left untouched: it swaps the whole domain preserving the path
+  (no new file paths generated), and runs at the origin where files exist — disk-verify N/A.
+- Verified: php -l OK, HTTP 200, disk-verify unit test (exists→relative, missing→absolute+count,
+  query preserved, serialized unserialize valid).
+- URLs with an extra subfolder (igs-bonn.de/wordpress/wp-content/...) are intentionally handled
+  by Domain Link Manager (strip), not by fix_media_urls — no harmful overlap.
