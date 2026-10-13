@@ -14,7 +14,9 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] P1: Auth model — accept wp-config DB_PASSWORD by default; force custom password
       when DB pass empty (never open); custom encrypted hash overrides thereafter;
       UI card to set/rotate. v1.3.0 -> 1.4.0.
-- [ ] P2: Full ES/EN i18n (selector + t() + dictionary, 100% UI). -> 1.5.0
+- [~] P2: Full ES/EN i18n. Infra done (t(), $I18N, ?lang=/cookie/Accept-Language, EN/ES
+      selector); auth screen + header converted. Strategy: each new phase ships bilingual;
+      a final i18n pass converts remaining old sections (status, tabs, health check). -> 1.5.0
 - [ ] P3: WP user management (list/edit/change-password phpass/create). -> 1.6.0
 - [ ] P4: Security Audit (DB + files: weak passwords, admin default, WP version,
       default SALTs, file perms, XML-RPC, REST users, debug, prefix). -> 1.7.0

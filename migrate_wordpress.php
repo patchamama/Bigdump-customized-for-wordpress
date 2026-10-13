@@ -61,6 +61,62 @@ if ($wp_config_path) {
 }
 
 // ============================================================
+// I18N — bilingual UI (English / Spanish)
+// ============================================================
+// Language resolution order: ?lang= query → cookie → Accept-Language → default 'en'.
+if (isset($_GET['lang']) && in_array($_GET['lang'], ['en', 'es'], true)) {
+    $LANG = $_GET['lang'];
+    setcookie('migrate_lang', $LANG, time() + 31536000, '/');
+} elseif (isset($_COOKIE['migrate_lang']) && in_array($_COOKIE['migrate_lang'], ['en', 'es'], true)) {
+    $LANG = $_COOKIE['migrate_lang'];
+} else {
+    $al = strtolower(substr($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '', 0, 2));
+    $LANG = $al === 'es' ? 'es' : 'en';
+}
+
+// Translation dictionary. Keys are English phrases; 'es' holds the Spanish text.
+// Sections are filled progressively; t() falls back to the key when missing.
+$GLOBALS['__LANG'] = $LANG;
+$GLOBALS['__I18N'] = [
+    'es' => [
+        // Access / auth
+        'Set a password to protect this tool' => 'Definí una contraseña para proteger esta herramienta',
+        'Enter password to continue'          => 'Ingresá la contraseña para continuar',
+        'Enter the database password from wp-config.php' => 'Ingresá la contraseña de la base de datos definida en wp-config.php',
+        'Access Password'                     => 'Contraseña de acceso',
+        'Password'                            => 'Contraseña',
+        'New password'                        => 'Nueva contraseña',
+        'Custom password'                     => 'Contraseña propia',
+        'Confirm'                             => 'Confirmar',
+        'Login'                               => 'Entrar',
+        'Logout'                              => 'Salir',
+        'Create password'                     => 'Crear contraseña',
+        'Set password'                        => 'Establecer',
+        'Rotate'                              => 'Rotar',
+        'The database password in wp-config.php is empty, so the tool would be unprotected. Create a password now — it is stored encrypted and required on every access.'
+            => 'La contraseña de la base de datos en wp-config.php está vacía, por lo que la herramienta quedaría sin protección. Creá una contraseña ahora; se guarda cifrada y será obligatoria en cada acceso.',
+        'Use the database password defined in wp-config.php (DB_PASSWORD) to log in. Once inside you can set your own encrypted password.'
+            => 'Usá la contraseña de la base de datos definida en wp-config.php (DB_PASSWORD) para entrar. Una vez dentro podés establecer tu propia contraseña cifrada.',
+        'Access is protected by a custom encrypted password. Set a new one below to rotate it.'
+            => 'El acceso está protegido por una contraseña cifrada propia. Definí una nueva abajo para rotarla.',
+        'Access currently uses the wp-config.php database password. Set a custom encrypted password below to use that instead.'
+            => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
+        // Header
+        'Download tool'                       => 'Descargar herramienta',
+        'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
+        'Running on live server.'             => 'Ejecutándose en un servidor en producción.',
+        'Delete this file after use!'         => '¡Eliminá este archivo después de usarlo!',
+    ],
+];
+
+// Translate: returns the localized string for the current language, or the key.
+function t($key) {
+    $lang = $GLOBALS['__LANG'] ?? 'en';
+    if ($lang === 'en') return $key;
+    return $GLOBALS['__I18N'][$lang][$key] ?? $key;
+}
+
+// ============================================================
 // HELPERS
 // ============================================================
 function h($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
@@ -2267,11 +2323,11 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <h1>🔐 WP Migration Tool</h1>
 <p class="subtitle" style="margin-bottom:20px">
     <?php if ($must_set_password): ?>
-        Set a password to protect this tool / Definí una contraseña para proteger esta herramienta
+        <?= h(t('Set a password to protect this tool')) ?>
     <?php elseif ($stored_hash): ?>
-        Enter password to continue / Ingresá la contraseña para continuar
+        <?= h(t('Enter password to continue')) ?>
     <?php else: ?>
-        Enter the database password from wp-config.php / Ingresá la contraseña de la base de datos definida en wp-config.php
+        <?= h(t('Enter the database password from wp-config.php')) ?>
     <?php endif; ?>
 </p>
 <?php if ($auth_error): ?>
@@ -2280,28 +2336,22 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 
 <?php if ($must_set_password): ?>
 <div class="alert alert-warn" style="text-align:left">
-    The database password in <code>wp-config.php</code> is empty, so the tool would be unprotected.
-    Create a password now — it is stored encrypted and required on every access.<br>
-    <span style="color:#a0aec0">La contraseña de la base de datos en wp-config.php está vacía. Creá una contraseña ahora;
-    se guarda cifrada y será obligatoria en cada acceso.</span>
+    <?= h(t('The database password in wp-config.php is empty, so the tool would be unprotected. Create a password now — it is stored encrypted and required on every access.')) ?>
 </div>
 <form method="POST">
-    <div class="field"><label>New password / Nueva contraseña</label><input type="password" name="new_password" minlength="8" required autofocus></div>
-    <div class="field"><label>Confirm / Confirmar</label><input type="password" name="new_password2" minlength="8" required></div>
-    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center">Create password / Crear contraseña</button>
+    <div class="field"><label><?= h(t('New password')) ?></label><input type="password" name="new_password" minlength="8" required autofocus></div>
+    <div class="field"><label><?= h(t('Confirm')) ?></label><input type="password" name="new_password2" minlength="8" required></div>
+    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center"><?= h(t('Create password')) ?></button>
 </form>
 <?php else: ?>
 <?php if (!$stored_hash): ?>
 <div class="alert" style="text-align:left;background:#1e2235;color:#a0aec0;border:1px solid #2d3148">
-    Use the database password defined in <code>wp-config.php</code> (<code>DB_PASSWORD</code>) to log in.
-    Once inside you can set your own encrypted password.<br>
-    <span>Usá la contraseña de la base de datos definida en wp-config.php (DB_PASSWORD). Una vez dentro
-    podés establecer tu propia contraseña cifrada.</span>
+    <?= h(t('Use the database password defined in wp-config.php (DB_PASSWORD) to log in. Once inside you can set your own encrypted password.')) ?>
 </div>
 <?php endif; ?>
 <form method="POST">
-    <div class="field"><label>Password / Contraseña</label><input type="password" name="password" required autofocus></div>
-    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">Login / Entrar</button>
+    <div class="field"><label><?= h(t('Password')) ?></label><input type="password" name="password" required autofocus></div>
+    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center"><?= h(t('Login')) ?></button>
 </form>
 <?php endif; ?>
 </div>
@@ -2313,38 +2363,38 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
 <div>
     <h1>🚀 WP Migration Tool <span style="font-size:13px;font-weight:400;color:#4f6ef7;margin-left:6px">v<?= TOOL_VERSION ?></span></h1>
-    <div class="subtitle">WordPress Migration · Export &amp; Import</div>
+    <div class="subtitle"><?= h(t('WordPress Migration · Export & Import')) ?></div>
 </div>
 <div style="display:flex;gap:8px;align-items:center">
-<a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ Download tool</a>
-<a href="?logout" class="btn btn-sm" style="background:#2d3148;color:#a0aec0">Logout</a>
+<span style="display:inline-flex;border:1px solid #2d3148;border-radius:6px;overflow:hidden;font-size:12px">
+    <a href="?lang=en" style="padding:5px 10px;text-decoration:none;<?= $LANG==='en'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">EN</a>
+    <a href="?lang=es" style="padding:5px 10px;text-decoration:none;<?= $LANG==='es'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">ES</a>
+</span>
+<a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ <?= h(t('Download tool')) ?></a>
+<a href="?logout" class="btn btn-sm" style="background:#2d3148;color:#a0aec0"><?= h(t('Logout')) ?></a>
 </div>
 </div>
 
 <?php if (!is_localhost()): ?>
-<div class="alert alert-warn">⚠️ <strong>Running on live server.</strong> Delete this file after use!</div>
+<div class="alert alert-warn">⚠️ <strong><?= h(t('Running on live server.')) ?></strong> <?= h(t('Delete this file after use!')) ?></div>
 <?php endif; ?>
 
 <!-- ACCESS PASSWORD -->
 <div class="card" style="border-color:#2d3148">
-<h2>🔑 Access Password / Contraseña de acceso</h2>
+<h2>🔑 <?= h(t('Access Password')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:12px">
     <?php if ($stored_hash): ?>
-        Access is protected by a custom encrypted password. Set a new one below to rotate it.<br>
-        <span>El acceso está protegido por una contraseña cifrada propia. Definí una nueva abajo para rotarla.</span>
+        <?= h(t('Access is protected by a custom encrypted password. Set a new one below to rotate it.')) ?>
     <?php else: ?>
-        Access currently uses the <code>wp-config.php</code> database password. Set a custom encrypted
-        password below to use that instead.<br>
-        <span>El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña
-        cifrada propia abajo para usar esa en su lugar.</span>
+        <?= h(t('Access currently uses the wp-config.php database password. Set a custom encrypted password below to use that instead.')) ?>
     <?php endif; ?>
 </p>
 <form method="POST" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-    <div class="field" style="margin:0"><label><?= $stored_hash ? 'New password / Nueva contraseña' : 'Custom password / Contraseña propia' ?></label>
+    <div class="field" style="margin:0"><label><?= h($stored_hash ? t('New password') : t('Custom password')) ?></label>
         <input type="password" name="new_password" minlength="8" required style="width:200px"></div>
-    <div class="field" style="margin:0"><label>Confirm / Confirmar</label>
+    <div class="field" style="margin:0"><label><?= h(t('Confirm')) ?></label>
         <input type="password" name="new_password2" minlength="8" required style="width:200px"></div>
-    <button type="submit" name="set_password" class="btn btn-primary"><?= $stored_hash ? 'Rotate / Rotar' : 'Set password / Establecer' ?></button>
+    <button type="submit" name="set_password" class="btn btn-primary"><?= h($stored_hash ? t('Rotate') : t('Set password')) ?></button>
 </form>
 </div>
 
