@@ -56,8 +56,11 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] S1: SEO audit (seo_audit, renderCategories) + edit title/tagline (seo_update_meta).
       Verified against real wp_test: blog_public=1, permalinks /index.php/ flagged, no HTTPS,
       0 untitled. Bilingual SEO card. -> 2.1.0
-- [ ] S2: permalinks (/%postname%/ w/ anti-500 test) + sitemap.xml + robots/blog_public toggle
-      + request-indexing & site: check links (Google/Bing/DuckDuckGo/Yandex). -> 2.2.0
+- [x] S2: seo_set_permalinks (/%postname%/ + standard .htaccess, backup), seo_generate_sitemap
+      (sitemap.xml from published posts/pages + robots.txt Sitemap line), seo_toggle_index
+      (robots.txt + blog_public). JS links: Google/Bing submit + ping, and site: checks on
+      Google/Bing/DuckDuckGo/Yandex. Verified against wp_test with rollback (permalinks, blog_public,
+      sitemap url count). -> 2.2.0
 - [ ] S3: full-site password (.htaccess+.htpasswd) with isolated anti-500 test + probe URL. -> 2.3.0
 - [ ] S4: README + tag v2.3.0-wp + GitHub release.
 

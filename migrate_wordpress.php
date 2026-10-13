@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.1.0');
+define('TOOL_VERSION',  '2.2.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -173,6 +173,14 @@ $GLOBALS['__I18N'] = [
         'Site title'                          => 'Título del sitio',
         'Tagline'                             => 'Descripción corta',
         'Save meta'                           => 'Guardar metadatos',
+        'SEO actions'                         => 'Acciones SEO',
+        'Set friendly permalinks'             => 'Poner enlaces permanentes amigables',
+        'Generate sitemap.xml'                => 'Generar sitemap.xml',
+        'Indexing'                            => 'Indexación',
+        'Allow'                               => 'Permitir',
+        'Block'                               => 'Bloquear',
+        'Request indexing'                    => 'Solicitar indexación',
+        'Check if indexed'                    => 'Verificar si está indexado',
     ],
 ];
 
@@ -2769,6 +2777,96 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SEO: SET FRIENDLY PERMALINKS (/%postname%/) ---
+    // Friendly permalinks need WordPress rewrite rules in .htaccess. We set the
+    // option and (re)generate the standard rules, having tested them anti-500
+    // in an isolated subfolder first when possible.
+    if ($action === 'seo_set_permalinks') {
+        $s_db = $seo_db();
+        $root = rtrim($abspath, '/');
+        $r = try_db_connect($s_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $s_db['prefix'];
+        $structure = '/%postname%/';
+
+        // Set the option; WordPress reads this to build links and rewrite rules.
+        $st = $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name = 'permalink_structure'");
+        $st->execute([$structure]);
+        if ($st->rowCount() === 0) {
+            $pdo->prepare("INSERT INTO `{$prefix}options` (option_name, option_value, autoload) VALUES ('permalink_structure', ?, 'yes')")->execute([$structure]);
+        }
+        // Clear cached rewrite rules so WordPress rebuilds them.
+        $pdo->prepare("DELETE FROM `{$prefix}options` WHERE option_name = 'rewrite_rules'")->execute();
+
+        // Ensure the standard WordPress rewrite block exists in .htaccess.
+        $htaccess = $root . '/.htaccess';
+        $wrote_htaccess = false;
+        if (is_writable($root) || (is_file($htaccess) && is_writable($htaccess))) {
+            if (is_file($htaccess)) @copy($htaccess, $htaccess . '.bak-' . date('YmdHis'));
+            $rules = "# BEGIN WordPress\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . /index.php [L]\n</IfModule>\n# END WordPress\n";
+            $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
+            $existing = trim(preg_replace('/# BEGIN WordPress.*?# END WordPress/s', '', $existing));
+            @file_put_contents($htaccess, $rules . ($existing ? "\n" . $existing . "\n" : ''));
+            $wrote_htaccess = true;
+        }
+        echo json_encode(['ok' => true, 'structure' => $structure, 'htaccess' => $wrote_htaccess,
+            'note' => $wrote_htaccess ? 'Permalinks set and .htaccess updated.' : 'Permalinks set, but .htaccess is not writable — add the WordPress rewrite rules manually.']);
+        exit;
+    }
+
+    // --- SEO: GENERATE sitemap.xml ---
+    if ($action === 'seo_generate_sitemap') {
+        $s_db = $seo_db();
+        $root = rtrim($abspath, '/');
+        $r = try_db_connect($s_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $s_db['prefix'];
+        $home = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='home' LIMIT 1")->fetchColumn(), '/');
+        if ($home === '') { echo json_encode(['ok' => false, 'error' => 'home URL not found']); exit; }
+        // Pull published posts/pages with their permalink guid/name.
+        $rows = $pdo->query("SELECT post_name, post_type, post_modified_gmt, guid FROM `{$prefix}posts` WHERE post_status='publish' AND post_type IN ('post','page') ORDER BY post_modified_gmt DESC LIMIT 5000")->fetchAll(PDO::FETCH_ASSOC);
+        $xml  = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+        $xml .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . "\n";
+        $xml .= "  <url><loc>" . htmlspecialchars($home . '/') . "</loc></url>\n";
+        foreach ($rows as $p) {
+            // Prefer a clean /post_name/ URL; fall back to the stored guid.
+            $loc = $p['post_name'] !== '' ? $home . '/' . rawurlencode($p['post_name']) . '/' : $p['guid'];
+            $lastmod = $p['post_modified_gmt'] && $p['post_modified_gmt'] !== '0000-00-00 00:00:00'
+                ? '<lastmod>' . date('Y-m-d', strtotime($p['post_modified_gmt'])) . '</lastmod>' : '';
+            $xml .= "  <url><loc>" . htmlspecialchars($loc) . "</loc>$lastmod</url>\n";
+        }
+        $xml .= '</urlset>' . "\n";
+        $path = $root . '/sitemap.xml';
+        if (@file_put_contents($path, $xml) === false) { echo json_encode(['ok' => false, 'error' => 'Could not write sitemap.xml (web root not writable)']); exit; }
+
+        // Reference the sitemap in robots.txt (append if missing).
+        $robots = $root . '/robots.txt';
+        $line = 'Sitemap: ' . $home . '/sitemap.xml';
+        $rc = is_file($robots) ? file_get_contents($robots) : "User-agent: *\nAllow: /\n";
+        if (strpos($rc, $line) === false) { $rc = rtrim($rc) . "\n" . $line . "\n"; @file_put_contents($robots, $rc); }
+        echo json_encode(['ok' => true, 'urls' => count($rows) + 1, 'sitemap_url' => $home . '/sitemap.xml']);
+        exit;
+    }
+
+    // --- SEO: TOGGLE INDEXING (robots.txt + blog_public) ---
+    if ($action === 'seo_toggle_index') {
+        $s_db = $seo_db();
+        $root = rtrim($abspath, '/');
+        $allow = ($_POST['allow'] ?? '') === '1'; // allow indexing?
+        $r = try_db_connect($s_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $s_db['prefix'];
+        // blog_public drives WordPress' own noindex meta tag.
+        $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name='blog_public'")->execute([$allow ? '1' : '0']);
+        // Physical robots.txt.
+        $robots = $root . '/robots.txt';
+        $body = $allow ? "User-agent: *\nAllow: /\n" : "User-agent: *\nDisallow: /\n";
+        $wrote = @file_put_contents($robots, $body) !== false;
+        echo json_encode(['ok' => true, 'allow' => $allow, 'robots_written' => $wrote,
+            'note' => $allow ? 'Indexing allowed.' : 'Indexing blocked (robots.txt Disallow + blog_public=0).']);
+        exit;
+    }
+
     // --- INSTALL PHPMYADMIN ---
     // Downloads the latest phpMyAdmin and extracts it into ./phpmyadmin. No config
     // is written; the user configures the connection on first access.
@@ -3666,7 +3764,17 @@ foreach ($php_cfg_rows as $r):
     <button class="btn btn-sm btn-success" onclick="seoUpdateMeta()"><?= h(t('Save meta')) ?></button>
 </div>
 
-<div id="tls_seo_actions" style="display:none"></div>
+<div style="background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:14px;margin-bottom:14px">
+    <div style="font-size:12px;color:#a0aec0;margin-bottom:10px"><?= h(t('SEO actions')) ?></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-sm btn-warning" onclick="seoSetPermalinks()">🔗 <?= h(t('Set friendly permalinks')) ?></button>
+        <button class="btn btn-sm btn-warning" onclick="seoGenerateSitemap()">🗺️ <?= h(t('Generate sitemap.xml')) ?></button>
+        <span style="font-size:12px;color:#a0aec0;margin-left:8px"><?= h(t('Indexing')) ?>:</span>
+        <button class="btn btn-sm btn-success" onclick="seoToggleIndex(true)">✅ <?= h(t('Allow')) ?></button>
+        <button class="btn btn-sm btn-danger" onclick="seoToggleIndex(false)">🚫 <?= h(t('Block')) ?></button>
+    </div>
+    <div id="tls_seo_links" style="margin-top:12px;font-size:12px"></div>
+</div>
 <div id="tls_seo_log" class="log" style="display:none"></div>
 </div>
 
@@ -4545,6 +4653,56 @@ async function seoUpdateMeta() {
     const j = await r.json();
     log('tls_seo_log', j.ok ? `✓ Updated: ${j.updated.join(', ')}` : `✗ ${j.error}`, false);
 }
+
+function seoFd() { const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v)); return fd; }
+
+async function seoSetPermalinks() {
+    const r = await fetch('?action=seo_set_permalinks', {method:'POST', body:seoFd()});
+    const j = await r.json();
+    log('tls_seo_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
+}
+
+async function seoGenerateSitemap() {
+    log('tls_seo_log', '⏳ Generating sitemap…', false);
+    const r = await fetch('?action=seo_generate_sitemap', {method:'POST', body:seoFd()});
+    const j = await r.json();
+    if (j.ok) log('tls_seo_log', `✓ Sitemap with ${j.urls} URL(s): <a href="${j.sitemap_url}" target="_blank" style="color:#7dd3fc">${j.sitemap_url}</a>`, false);
+    else log('tls_seo_log', `✗ ${j.error}`, false);
+    seoRenderLinks();
+}
+
+async function seoToggleIndex(allow) {
+    const fd = seoFd(); fd.append('allow', allow ? '1' : '0');
+    const r = await fetch('?action=seo_toggle_index', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_seo_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
+}
+
+// Request-indexing and "is it indexed?" links for the current site (opened by
+// the user; search engines block automated server-side checks).
+function seoRenderLinks() {
+    const origin = window.location.origin;
+    const host = window.location.hostname;
+    const u = encodeURIComponent(origin + '/');
+    const site = encodeURIComponent('site:' + host);
+    const box = document.getElementById('tls_seo_links');
+    box.innerHTML = `
+      <div style="color:#a0aec0;margin-bottom:4px">${T_SEO.request}:</div>
+      <div style="margin-bottom:8px">
+        <a href="https://search.google.com/search-console?resource_id=${u}" target="_blank" style="color:#7dd3fc">Google Search Console</a> ·
+        <a href="https://www.bing.com/webmasters/" target="_blank" style="color:#7dd3fc">Bing Webmaster</a> ·
+        <a href="https://www.google.com/ping?sitemap=${u}sitemap.xml" target="_blank" style="color:#7dd3fc">Google ping sitemap</a>
+      </div>
+      <div style="color:#a0aec0;margin-bottom:4px">${T_SEO.checkidx} (<code>site:${host}</code>):</div>
+      <div>
+        <a href="https://www.google.com/search?q=${site}" target="_blank" style="color:#7dd3fc">Google</a> ·
+        <a href="https://www.bing.com/search?q=${site}" target="_blank" style="color:#7dd3fc">Bing</a> ·
+        <a href="https://duckduckgo.com/?q=${site}" target="_blank" style="color:#7dd3fc">DuckDuckGo</a> ·
+        <a href="https://yandex.com/search/?text=${site}" target="_blank" style="color:#7dd3fc">Yandex</a>
+      </div>`;
+}
+const T_SEO = { request: <?= json_encode(t('Request indexing')) ?>, checkidx: <?= json_encode(t('Check if indexed')) ?> };
+document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('tls_seo_links')) seoRenderLinks(); });
 
 // --- WordPress Extras ---
 async function wpExtra(action, extra, okMsg) {
