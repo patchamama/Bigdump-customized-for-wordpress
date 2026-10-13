@@ -41,7 +41,11 @@ Delivered in phases, one commit per phase. Release at the end.
       fingerprint files, exposed dumps, .htaccess, xmlrpc.php, REST user enum. Shared JS
       renderCategories() reused by health check + audit. Bilingual. Weak-password detection
       unit-tested. Merged to main + pushed. -> 1.8.0
-- [ ] P5: phpMyAdmin installer (download+extract to /phpmyadmin) + WP extras. -> 1.8.0
+- [x] P5: phpMyAdmin installer + WP extras. pma_install (download latest, extract to
+      /phpmyadmin, no config) reusing wp_install download pattern. Extras: wp_fix_htaccess
+      (standard WP rules, backs up old), wp_repair_tables (REPAIR+OPTIMIZE all), wp_flush_rewrite
+      (clear rewrite_rules + transients), wp_toggle_debug (wp-config), wp_toggle_maintenance
+      (.maintenance file). Bilingual cards + JS. Logic unit-tested. -> 1.9.0
 - [ ] P6: README migrate_wordpress docs + curl one-liners (done early at user request). 
 - [ ] P7: Final version 2.0.0, tag v2.0.0-wp, GitHub release (push authorized).
 

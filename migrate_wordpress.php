@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.8.0');
+define('TOOL_VERSION',  '1.9.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -138,6 +138,23 @@ $GLOBALS['__I18N'] = [
         'Run Security Audit'                  => 'Ejecutar auditoría',
         'Hardening checks across users, WordPress core, filesystem and attack surface: weak/common passwords, default admin username, outdated WP version, default security keys, file permissions, exposed dumps, XML-RPC and REST exposure. Uses the DB connection configured above.'
             => 'Chequeos de endurecimiento sobre usuarios, núcleo de WordPress, sistema de archivos y superficie de ataque: contraseñas débiles/comunes, usuario admin por defecto, versión de WP desactualizada, claves de seguridad por defecto, permisos de archivos, dumps expuestos, exposición de XML-RPC y REST. Usa la conexión a la base de datos configurada arriba.',
+        // WordPress Extras + phpMyAdmin
+        'WordPress Extras'                    => 'Extras de WordPress',
+        'Common post-migration fixes. Each action uses the DB connection configured above or writes to the site root.'
+            => 'Arreglos comunes posmigración. Cada acción usa la conexión a la base de datos configurada arriba o escribe en la raíz del sitio.',
+        'Regenerate .htaccess + permalinks'   => 'Regenerar .htaccess + enlaces permanentes',
+        'Fixes 404s on all pages after a migration.' => 'Arregla los 404 en todas las páginas tras una migración.',
+        'Repair & optimize tables'            => 'Reparar y optimizar tablas',
+        'Runs REPAIR and OPTIMIZE on every table.' => 'Ejecuta REPAIR y OPTIMIZE en cada tabla.',
+        'Flush rewrite rules + transients'    => 'Vaciar reglas de reescritura + transients',
+        'Clears cached rewrite rules and transients.' => 'Limpia reglas de reescritura y transients en caché.',
+        'WP_DEBUG'                            => 'WP_DEBUG',
+        'On'                                  => 'Activar',
+        'Off'                                 => 'Desactivar',
+        'Maintenance mode'                    => 'Modo mantenimiento',
+        'Download the latest phpMyAdmin and extract it into a /phpmyadmin folder. No config is written — set the connection on first access. Remove the folder when you are done.'
+            => 'Descarga la última versión de phpMyAdmin y la extrae en una carpeta /phpmyadmin. No se escribe configuración — definí la conexión en el primer acceso. Eliminá la carpeta al terminar.',
+        'Download & install phpMyAdmin'       => 'Descargar e instalar phpMyAdmin',
     ],
 ];
 
@@ -2645,6 +2662,176 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- INSTALL PHPMYADMIN ---
+    // Downloads the latest phpMyAdmin and extracts it into ./phpmyadmin. No config
+    // is written; the user configures the connection on first access.
+    if ($action === 'pma_install') {
+        @set_time_limit(0);
+        @ini_set('memory_limit', '512M');
+        $dest    = rtrim($abspath, '/') . '/phpmyadmin';
+        $tmp_zip = sys_get_temp_dir() . '/pma_' . time() . '.zip';
+        // Latest stable English build.
+        $url     = 'https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-english.zip';
+        if (is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'A /phpmyadmin folder already exists. Remove it first.']); exit; }
+
+        $downloaded = false; $dl_method = '';
+        if (check_cmd('curl')) {
+            exec(sprintf('curl -L --silent -o %s %s 2>&1', escapeshellarg($tmp_zip), escapeshellarg($url)), $o, $ret);
+            if ($ret === 0 && is_file($tmp_zip) && filesize($tmp_zip) > 1000000) { $downloaded = true; $dl_method = 'curl CLI'; }
+        }
+        if (!$downloaded && check_cmd('wget')) {
+            exec(sprintf('wget -q -O %s %s 2>&1', escapeshellarg($tmp_zip), escapeshellarg($url)), $o, $ret);
+            if ($ret === 0 && is_file($tmp_zip) && filesize($tmp_zip) > 1000000) { $downloaded = true; $dl_method = 'wget CLI'; }
+        }
+        if (!$downloaded && function_exists('curl_init')) {
+            $ch = curl_init($url); $fh = fopen($tmp_zip, 'wb');
+            curl_setopt_array($ch, [CURLOPT_FILE => $fh, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 300]);
+            curl_exec($ch); $cerr = curl_error($ch); unset($ch); fclose($fh);
+            if (!$cerr && is_file($tmp_zip) && filesize($tmp_zip) > 1000000) { $downloaded = true; $dl_method = 'curl PHP'; }
+        }
+        if (!$downloaded && ini_get('allow_url_fopen')) {
+            $data = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 300, 'follow_location' => true]]));
+            if ($data && strlen($data) > 1000000) { file_put_contents($tmp_zip, $data); $downloaded = true; $dl_method = 'file_get_contents'; }
+        }
+        if (!$downloaded) { @unlink($tmp_zip); echo json_encode(['ok' => false, 'error' => 'Could not download phpMyAdmin. Check server connectivity.']); exit; }
+
+        // Extract, then move the single top-level phpMyAdmin-* folder to ./phpmyadmin.
+        $tmp_dir = rtrim($abspath, '/') . '/_pma_tmp_' . time();
+        @mkdir($tmp_dir, 0755, true);
+        $extracted = false; $ex_method = '';
+        if (check_cmd('unzip')) {
+            exec(sprintf('unzip -o -q %s -d %s 2>&1', escapeshellarg($tmp_zip), escapeshellarg($tmp_dir)), $o, $ret);
+            if ($ret === 0) { $extracted = true; $ex_method = 'unzip CLI'; }
+        }
+        if (!$extracted && class_exists('ZipArchive')) {
+            $zip = new ZipArchive();
+            if ($zip->open($tmp_zip) === true) { $zip->extractTo($tmp_dir); $zip->close(); $extracted = true; $ex_method = 'ZipArchive PHP'; }
+        }
+        @unlink($tmp_zip);
+        if (!$extracted) { echo json_encode(['ok' => false, 'error' => 'Could not extract phpMyAdmin zip.']); exit; }
+
+        $inner = glob($tmp_dir . '/phpMyAdmin-*');
+        $src = ($inner && is_dir($inner[0])) ? $inner[0] : $tmp_dir;
+        @rename($src, $dest);
+        // Clean leftover tmp dir.
+        if (is_dir($tmp_dir)) {
+            foreach (glob($tmp_dir . '/*') ?: [] as $f) { if (is_dir($f)) @rmdir($f); else @unlink($f); }
+            @rmdir($tmp_dir);
+        }
+        if (!is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'Extraction succeeded but moving to /phpmyadmin failed.']); exit; }
+
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+        echo json_encode(['ok' => true, 'dl_method' => $dl_method, 'ex_method' => $ex_method, 'url' => $base . '/phpmyadmin/']);
+        exit;
+    }
+
+    // --- WP EXTRAS: shared DB connection ---
+    $wp_extras_db = function () use ($db) {
+        return [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+    };
+
+    // --- REGENERATE .htaccess (standard WordPress rules) ---
+    if ($action === 'wp_fix_htaccess') {
+        $root     = rtrim($abspath, '/');
+        $htaccess = $root . '/.htaccess';
+        if (!is_writable($root) && !(is_file($htaccess) && is_writable($htaccess))) {
+            echo json_encode(['ok' => false, 'error' => 'Web root / .htaccess not writable']); exit;
+        }
+        // Back up any existing file first.
+        if (is_file($htaccess)) @copy($htaccess, $htaccess . '.bak-' . date('YmdHis'));
+        $rules = "# BEGIN WordPress\n"
+            . "<IfModule mod_rewrite.c>\n"
+            . "RewriteEngine On\n"
+            . "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
+            . "RewriteBase /\n"
+            . "RewriteRule ^index\\.php$ - [L]\n"
+            . "RewriteCond %{REQUEST_FILENAME} !-f\n"
+            . "RewriteCond %{REQUEST_FILENAME} !-d\n"
+            . "RewriteRule . /index.php [L]\n"
+            . "</IfModule>\n"
+            . "# END WordPress\n";
+        // Preserve any non-WordPress content outside the markers.
+        $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
+        $existing = trim(preg_replace('/# BEGIN WordPress.*?# END WordPress/s', '', $existing));
+        $content  = $rules . ($existing ? "\n" . $existing . "\n" : '');
+        $ok = @file_put_contents($htaccess, $content) !== false;
+        echo json_encode(['ok' => $ok, 'error' => $ok ? '' : 'Write failed', 'note' => 'Standard WordPress rewrite rules written (previous file backed up).']);
+        exit;
+    }
+
+    // --- REPAIR & OPTIMIZE TABLES ---
+    if ($action === 'wp_repair_tables') {
+        $x_db = $wp_extras_db();
+        $r = try_db_connect($x_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo'];
+        $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+        $repaired = 0; $optimized = 0; $errors = 0;
+        foreach ($tables as $tbl) {
+            try { $pdo->query("REPAIR TABLE `$tbl`");   $repaired++; }  catch (Exception $e) { $errors++; }
+            try { $pdo->query("OPTIMIZE TABLE `$tbl`"); $optimized++; } catch (Exception $e) { $errors++; }
+        }
+        echo json_encode(['ok' => true, 'tables' => count($tables), 'repaired' => $repaired, 'optimized' => $optimized, 'errors' => $errors]);
+        exit;
+    }
+
+    // --- FLUSH REWRITE RULES / TRANSIENTS ---
+    if ($action === 'wp_flush_rewrite') {
+        $x_db = $wp_extras_db();
+        $r = try_db_connect($x_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $x_db['prefix'];
+        // Clearing rewrite_rules forces WordPress to rebuild them on the next request.
+        $d1 = $pdo->prepare("DELETE FROM `{$prefix}options` WHERE option_name = 'rewrite_rules'");  $d1->execute();
+        $d2 = $pdo->exec("DELETE FROM `{$prefix}options` WHERE option_name LIKE '\\_transient\\_%' OR option_name LIKE '\\_site\\_transient\\_%'");
+        echo json_encode(['ok' => true, 'rewrite_cleared' => $d1->rowCount(), 'transients_cleared' => (int)$d2]);
+        exit;
+    }
+
+    // --- TOGGLE WP_DEBUG (wp-config.php) ---
+    if ($action === 'wp_toggle_debug') {
+        $enable = ($_POST['enable'] ?? '') === '1';
+        $target = $wp_config_path;
+        if (!$target || !is_writable($target)) { echo json_encode(['ok' => false, 'error' => 'wp-config.php not found or not writable']); exit; }
+        @copy($target, $target . '.bak-' . date('YmdHis'));
+        $cfg = file_get_contents($target);
+        $val = $enable ? 'true' : 'false';
+        if (preg_match("/define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*(?:true|false)\s*\)\s*;/i", $cfg)) {
+            $cfg = preg_replace("/define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*(?:true|false)\s*\)\s*;/i", "define('WP_DEBUG', $val);", $cfg);
+        } else {
+            // Insert before the "stop editing" marker, or append.
+            $line = "define('WP_DEBUG', $val);\n";
+            if (strpos($cfg, "/* That's all, stop editing") !== false) {
+                $cfg = preg_replace("/(\/\* That's all, stop editing)/", $line . '$1', $cfg, 1);
+            } else { $cfg .= "\n" . $line; }
+        }
+        $ok = @file_put_contents($target, $cfg) !== false;
+        echo json_encode(['ok' => $ok, 'enabled' => $enable, 'error' => $ok ? '' : 'Write failed']);
+        exit;
+    }
+
+    // --- TOGGLE MAINTENANCE MODE (.maintenance) ---
+    if ($action === 'wp_toggle_maintenance') {
+        $enable = ($_POST['enable'] ?? '') === '1';
+        $root   = rtrim($abspath, '/');
+        $file   = $root . '/.maintenance';
+        if ($enable) {
+            if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root not writable']); exit; }
+            // WordPress treats the site as under maintenance while $upgrading is recent.
+            $ok = @file_put_contents($file, "<?php \$upgrading = " . time() . "; ?>") !== false;
+            echo json_encode(['ok' => $ok, 'enabled' => true, 'error' => $ok ? '' : 'Write failed']);
+        } else {
+            $ok = !is_file($file) || @unlink($file);
+            echo json_encode(['ok' => $ok, 'enabled' => false, 'error' => $ok ? '' : 'Could not remove .maintenance']);
+        }
+        exit;
+    }
+
     // --- DOWNLOAD THIS TOOL ---
     if ($action === 'download_self') {
         $path = __FILE__;
@@ -3374,6 +3561,47 @@ foreach ($php_cfg_rows as $r):
     <button id="tls_health_btn" class="btn btn-primary" onclick="runHealthCheck()">🔍 Run Health Check</button>
 </div>
 <div id="tls_health_results"></div>
+</div>
+
+<div class="card">
+<h2>🧰 <?= h(t('WordPress Extras')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('Common post-migration fixes. Each action uses the DB connection configured above or writes to the site root.')) ?>
+</p>
+<div class="actions" style="flex-direction:column;align-items:stretch;gap:10px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-warning" onclick="wpFixHtaccess()">📝 <?= h(t('Regenerate .htaccess + permalinks')) ?></button>
+        <span style="font-size:11px;color:#718096"><?= h(t('Fixes 404s on all pages after a migration.')) ?></span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-warning" onclick="wpRepairTables()">🔧 <?= h(t('Repair & optimize tables')) ?></button>
+        <span style="font-size:11px;color:#718096"><?= h(t('Runs REPAIR and OPTIMIZE on every table.')) ?></span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-warning" onclick="wpFlushRewrite()">🔄 <?= h(t('Flush rewrite rules + transients')) ?></button>
+        <span style="font-size:11px;color:#718096"><?= h(t('Clears cached rewrite rules and transients.')) ?></span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:12px;color:#a0aec0"><?= h(t('WP_DEBUG')) ?>:</span>
+        <button class="btn btn-sm btn-success" onclick="wpToggleDebug(true)"><?= h(t('On')) ?></button>
+        <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="wpToggleDebug(false)"><?= h(t('Off')) ?></button>
+        <span style="font-size:12px;color:#a0aec0;margin-left:12px"><?= h(t('Maintenance mode')) ?>:</span>
+        <button class="btn btn-sm btn-warning" onclick="wpToggleMaintenance(true)"><?= h(t('On')) ?></button>
+        <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="wpToggleMaintenance(false)"><?= h(t('Off')) ?></button>
+    </div>
+</div>
+<div id="tls_extras_log" class="log" style="display:none;margin-top:12px"></div>
+</div>
+
+<div class="card">
+<h2>🗃️ phpMyAdmin</h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('Download the latest phpMyAdmin and extract it into a /phpmyadmin folder. No config is written — set the connection on first access. Remove the folder when you are done.')) ?>
+</p>
+<div class="actions">
+    <button id="tls_pma_btn" class="btn btn-primary" onclick="installPhpMyAdmin()">⬇️ <?= h(t('Download & install phpMyAdmin')) ?></button>
+</div>
+<div id="tls_pma_log" class="log" style="display:none;margin-top:12px"></div>
 </div>
 
 </div><!-- /tools -->
@@ -4159,6 +4387,42 @@ async function runSecurityAudit() {
         else out.innerHTML = renderCategories(j.categories);
     } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
     btn.disabled = false; btn.textContent = '🛡️ Run Security Audit';
+}
+
+// --- WordPress Extras ---
+async function wpExtra(action, extra, okMsg) {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    if (extra) Object.entries(extra).forEach(([k,v]) => fd.append(k,v));
+    log('tls_extras_log', '⏳ …', false);
+    try {
+        const r = await fetch('?action=' + action, {method:'POST', body:fd});
+        const j = await r.json();
+        log('tls_extras_log', j.ok ? '✓ ' + okMsg(j) : '✗ ' + j.error, false);
+    } catch(e) { log('tls_extras_log', '✗ ' + e.message, false); }
+}
+function wpFixHtaccess()   { wpExtra('wp_fix_htaccess', null, () => 'Standard WordPress .htaccess written (backup kept).'); }
+function wpRepairTables()  { wpExtra('wp_repair_tables', null, j => `Repaired ${j.repaired}, optimized ${j.optimized} of ${j.tables} table(s).${j.errors?` ${j.errors} error(s).`:''}`); }
+function wpFlushRewrite()  { wpExtra('wp_flush_rewrite', null, j => `Cleared rewrite rules (${j.rewrite_cleared}) and ${j.transients_cleared} transient(s).`); }
+function wpToggleDebug(on) { wpExtra('wp_toggle_debug', {enable: on?'1':'0'}, j => `WP_DEBUG ${j.enabled?'enabled':'disabled'}.`); }
+function wpToggleMaintenance(on) { wpExtra('wp_toggle_maintenance', {enable: on?'1':'0'}, j => `Maintenance mode ${j.enabled?'ON':'OFF'}.`); }
+
+async function installPhpMyAdmin() {
+    const btn = document.getElementById('tls_pma_btn');
+    btn.disabled = true; btn.textContent = '⏳ Downloading…';
+    log('tls_pma_log', '⏳ Downloading and extracting phpMyAdmin (may take a while)…', false);
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    try {
+        const r = await fetch('?action=pma_install', {method:'POST', body:fd});
+        const j = await r.json();
+        if (j.ok) {
+            log('tls_pma_log', `✓ Installed via ${j.dl_method}/${j.ex_method}.\n🔗 <a href="${j.url}" target="_blank" style="color:#7dd3fc">${j.url}</a>\n⚠ Remove the /phpmyadmin folder when done.`, false);
+        } else {
+            log('tls_pma_log', '✗ ' + j.error, false);
+        }
+    } catch(e) { log('tls_pma_log', '✗ ' + e.message, false); }
+    btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin';
 }
 
 async function savePluginSelection() {
