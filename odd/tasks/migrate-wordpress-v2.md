@@ -49,7 +49,8 @@ Delivered in phases, one commit per phase. Release at the end.
       (clear rewrite_rules + transients), wp_toggle_debug (wp-config), wp_toggle_maintenance
       (.maintenance file). Bilingual cards + JS. Logic unit-tested. -> 1.9.0
 - [ ] P6: README migrate_wordpress docs + curl one-liners (done early at user request). 
-- [ ] P7: Final version 2.0.0, tag v2.0.0-wp, GitHub release (push authorized).
+- [x] P6: README updated with all migrate_wordpress v2 features + changelog entry.
+- [x] P7: Version 2.0.0, README done. Tag v2.0.0-wp + GitHub release pending gh token.
 
 ## P1 verification
 - php -l OK, HTTP 200.

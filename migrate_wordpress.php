@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.9.0');
+define('TOOL_VERSION',  '2.0.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 

@@ -92,10 +92,40 @@ operation over PDO/mysqli.
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.
 
-### Access control
+### User management
 
-- Password-protected UI with a server-side session. The authentication hash is stored
-  outside the web content and never committed.
+- **List users** with their roles, email, display name and registration date.
+- **Change password** using the WordPress-compatible phpass (`$P$`) algorithm; WordPress
+  upgrades the hash to bcrypt on next login.
+- **Edit** a user's email, display name and role; **create** new users with a chosen role,
+  writing capabilities exactly as WordPress does.
+
+### Security audit
+
+- Hardening report across four areas: **users & passwords** (weak/common password probe,
+  default `admin` login, administrator count), **WP core & config** (version, default
+  security keys, `WP_DEBUG`, `DISALLOW_FILE_EDIT`, table prefix), **filesystem exposure**
+  (`wp-config.php` permissions, fingerprint files, exposed dumps, `.htaccess`), and
+  **attack surface** (`xmlrpc.php`, REST user enumeration, brute-force advisory).
+
+### Post-migration extras
+
+- **Regenerate `.htaccess`** with the standard WordPress rewrite rules (fixes the typical
+  all-pages 404), backing up the previous file.
+- **Repair & optimize** every database table.
+- **Flush rewrite rules and transients**.
+- **Toggle `WP_DEBUG`** and **maintenance mode** without hand-editing files.
+- **PHP configuration with safe testing** — choose `.htaccess` or `.user.ini`, and a test
+  writes the proposed config into an isolated throwaway subfolder and loads it over HTTP to
+  confirm it does not break the site (HTTP 500) before letting you apply it.
+- **phpMyAdmin installer** — download the latest phpMyAdmin and extract it into `/phpmyadmin`.
+
+### Access control and language
+
+- Password-protected UI with a server-side session. By default the **wp-config `DB_PASSWORD`**
+  is the gate; if it is empty the tool forces you to create an encrypted password first, so it
+  is never left open. A custom encrypted password can be set and then takes priority.
+- **Bilingual UI** — English / Spanish, switchable from the header.
 
 ---
 
@@ -179,6 +209,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 2.0.0` | DB-password-based access with custom encrypted override; bilingual EN/ES UI; WordPress user management; security audit; post-migration extras (htaccess, repair tables, flush rewrite, debug/maintenance); PHP config with isolated safe testing; phpMyAdmin installer; Domain Link Manager final-URL preview and availability check |
 | `migrate 1.3.0` | Domain Link Manager with disk-verified base path; size-limited split `.zip` export; disk-verified media URL fixing |
 | `migrate 1.0` | WordPress migration suite: export/import, URL migration, health check, plugin manager, PHP config, WordPress installer |
 | `bigdump 0.40-wp` | FTP deploy renames script on remote; backup restore from `backups/`; broader backup listing |
