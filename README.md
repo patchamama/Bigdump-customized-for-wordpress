@@ -1,211 +1,197 @@
-# BigDump — WordPress Edition
+# Bigdump — WordPress Edition
 
-> **⚠ SECURITY WARNING:** This script provides unauthenticated access to your database and server filesystem. **Never leave it on a production server.** See the [Security section](#-security-warning) below.
+<p>
+  <img alt="PHP" src="https://img.shields.io/badge/PHP-8.0%2B-777BB4?logo=php&logoColor=white">
+  <img alt="MySQL" src="https://img.shields.io/badge/MySQL%2FMariaDB-5.6%2B-4479A1?logo=mysql&logoColor=white">
+  <img alt="WordPress" src="https://img.shields.io/badge/WordPress-ready-21759B?logo=wordpress&logoColor=white">
+  <img alt="PDO" src="https://img.shields.io/badge/PDO-mysqli-4479A1">
+  <img alt="JavaScript" src="https://img.shields.io/badge/JavaScript-vanilla-F7DF1E?logo=javascript&logoColor=black">
+  <img alt="Single file" src="https://img.shields.io/badge/dependencies-none-success">
+  <img alt="License" src="https://img.shields.io/badge/license-GPL-blue">
+</p>
 
-A powerful, browser-based MySQL import tool originally created by [Alexey Ozerov](http://www.ozerov.de/bigdump/), extended with a full WordPress management suite: auto-configuration, URL migration, backup, FTP/SFTP deployment, user management, and plugin control — all in a single PHP file.
+Two single-file, browser-based PHP tools for WordPress database migration and site
+administration. No Composer, no framework, no build step — drop a file next to
+`wp-config.php` and open it in the browser.
 
----
+- **`migrate_wordpress.php`** — a full WordPress migration and maintenance suite:
+  database export/import with size-limited parts, URL and domain rewriting, media
+  fixes, user management, plugin control, health checks, and a built-in WordPress
+  installer. Password-protected.
+- **`bigdump.php`** — a staggered MySQL dump importer (based on Alexey Ozerov's
+  BigDump) extended for WordPress: auto-config, URL migration, backup, and FTP/SFTP
+  deployment.
 
-## ✨ Features
-
-### Core Import Engine
-- **Staggered import** — splits large SQL dumps into sessions to work around PHP `max_execution_time` and memory limits
-- **Auto-detects dump files** — `.sql`, `.gz` (GZip), `.zip` in the working directory
-- **Auto-extracts** ZIP archives before importing
-- **Ignores `CREATE DATABASE`** and `USE` statements automatically — safe to import dumps from different environments
-- **Drops existing tables** before import to prevent duplicate-key errors
-- **AJAX mode** — import runs progressively without page reloads, with a live progress bar
-- **CSV import** support
-
-### WordPress Integration
-- **Auto-reads `wp-config.php`** — database credentials, charset, and table prefix loaded automatically (searches up to 5 parent directories)
-- **Live DB connection test** — verifies connectivity before starting any operation
-- **PHP parameter check** — audits `upload_max_filesize`, `post_max_size`, `memory_limit`, `max_execution_time`, cURL, ZIP, FTP, and SSH2 extension availability
-
-### URL Migration
-- **Find & replace URLs** in the SQL file before importing — essential when moving between local and production environments
-- **WordPress URL validation** — verifies that both old and new URLs point to a live WordPress installation by probing `/wp-login.php`, `/wp-includes/version.php`, and `/readme.html`
-- **Preview before applying** — shows count of occurrences and a sample of affected lines before writing changes
-
-### Backup
-- **Pre-import backup** — generates a full dump of the current database before overwriting it
-- **Auto-detects `mysqldump`** — uses the system binary if available (faster, more reliable); falls back to a pure PHP implementation if not found
-- Lists and manages existing backup files
-
-### FTP / SFTP Deployment
-- Deploy `bigdump.php` and SQL files directly to a remote server from the browser
-- Supports **FTP**, **FTPS** (SSL), and **SFTP** (via PHP `ssh2` extension)
-- Select which SQL files to include in the transfer
-
-### Persistent Configuration (`bigdump.config.json`)
-- Saves FTP credentials, migration URLs, and import preferences to a local JSON file
-- Pre-fills all forms on page load
-- **Bidirectional migration profiles** — store both local and remote URLs to support local→production and production→local workflows
-
-### WordPress User Management
-- **List all users** from `wp_users` with login, email, display name, and registration date
-- **Change password** — uses the phpass `$P$` algorithm (fully compatible with WordPress; WP upgrades to bcrypt on next login)
-- **Change email** — with client-side format validation
-- **Delete user** — removes from `wp_users` and all `wp_usermeta` records
-- **Add new user** — with login, display name, email, password, and role (Administrator, Editor, Author, Contributor, Subscriber); detects duplicate logins/emails; sets capabilities and user level in `wp_usermeta`
-
-### WordPress Plugin Management
-- **List active and inactive plugins** by reading `active_plugins` from `wp_options`
-- **Activate / Deactivate** individual plugins without logging in to WP admin
-- **Deactivate all plugins at once** — useful for diagnosing conflicts
-
-### Self-Destruct
-- **Delete script button** — removes `bigdump.php` and `bigdump.config.json` from the server in one click directly from the UI
+> **Security notice.** These tools expose database and filesystem operations through
+> the browser. Protect them behind authentication and delete them after use. See
+> [Security](#security).
 
 ---
 
-## 🚨 Security Warning
+## Quick download
 
-**This script has serious security vulnerabilities by design.** It is a maintenance tool, not an application to leave running.
+Download either tool directly into your current directory with a single command.
 
-### Why it is dangerous
-| Risk | Detail |
-|------|--------|
-| **No authentication** | Anyone who can reach the URL has full access to everything the script does |
-| **Full database access** | Can read, modify, or delete any table — including user passwords and private data |
-| **Remote code execution risk** | Accepts file uploads and can write to the filesystem |
-| **Credential exposure** | Reads and displays `wp-config.php` database credentials |
-| **Admin takeover** | Can create WordPress administrator accounts or change existing passwords |
-| **Data loss** | Drops all tables before import — irreversible without a backup |
-| **Config file** | `bigdump.config.json` stores FTP passwords in plaintext on disk |
+```bash
+# WordPress migration suite
+curl -O https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/migrate_wordpress.php
 
-### Safe usage rules
-1. **Use only on local development environments or via a secure, password-protected directory**
-2. Upload the script, perform your task, then **immediately delete it** (use the built-in "Delete this script" button)
-3. Never commit `bigdump.config.json` to version control — it contains credentials
-4. If you must use it on a remote server, restrict access via `.htaccess` IP filtering or HTTP basic auth first
-5. After use, verify the script and config file are gone
+# Staggered SQL importer
+curl -O https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/bigdump.php
+```
+
+Then open the file in the browser from the directory that contains `wp-config.php`
+(or a parent directory).
 
 ---
 
-## 🚀 Quick Start
+## migrate_wordpress.php
 
-### Local (XAMPP / MAMP / Laragon)
-1. Place `bigdump.php` in the same directory as `wp-config.php` (or any parent directory up to 5 levels up)
-2. Place your `.sql`, `.sql.gz`, or `.sql.zip` dump file in the same directory
-3. Open `http://localhost/your-path/bigdump.php` in your browser
-4. The script reads DB credentials automatically — verify the connection test passes
-5. Click **▶ Import** next to your dump file
-6. Wait for completion, then click **Delete this script**
+A password-protected control panel for migrating and maintaining a WordPress site.
+It reads database credentials from `wp-config.php` automatically and drives every
+operation over PDO/mysqli.
 
-### Remote server
-1. Use the **FTP/SFTP Deploy** section to upload `bigdump.php` and your SQL file in one step
-2. Navigate to the remote URL
-3. Run the import
-4. Delete the script
+### Database export and import
+
+- **Export** the full database via `mysqldump` (when available) or a pure-PHP PDO
+  fallback that streams directly to disk.
+- **Size-limited split export** — split a large dump into numbered `.zip` parts, each
+  compressed to stay under a chosen limit (1–10 MB). Parts are cut only at full SQL
+  statement boundaries and each repeats the `FOREIGN_KEY_CHECKS` header, so every part
+  imports standalone and in order. Designed for hosts that reject large uploads.
+- **Import** `.sql`, `.sql.gz`, `.gz` and `.zip` files (zip parts are extracted
+  automatically) via the `mysql` CLI or a chunked PDO importer.
+- **URL replacement during export** — rewrite the origin URL to the target URL,
+  serialized-data safe (recalculates `s:LENGTH:` in serialized PHP strings).
+
+### URL, domain and media rewriting
+
+- **Domain Link Manager** — scan `posts`, `postmeta` and `options` for every absolute
+  linked domain, list them with occurrence counts, and convert selected legacy domains
+  to root-relative links. The base path to drop (e.g. an old `/wordpress` subfolder) is
+  recommended by verifying the referenced files exist on disk, so the cleanup never
+  creates links to missing assets. Serialized-data safe.
+- **Media URL scanner / fixer** — convert absolute `http(s)://domain/wp-content/` asset
+  URLs to relative `/wp-content/` paths, skipping any whose target file is not present
+  on disk (reported as unverified) to avoid broken links.
+- **Site URL manager** — switch `siteurl` and `home` between `http` and `https` without
+  editing `wp-config.php`.
+
+### Site tools
+
+- **Health check** — audits PHP environment, filesystem and WP core files, database
+  tables and row counts, active theme, active plugins, media attachments, and asset
+  references found in content (reporting missing files on disk).
+- **Plugin manager** — list installed and active plugins, toggle individual plugins, or
+  deactivate all at once by editing `active_plugins` in the database.
+- **PHP configuration** — compare current PHP settings against WordPress recommendations
+  and write them to `.htaccess` and/or `.user.ini`.
+- **Cache clear** — purge `wp-content/cache` and Divi `et-cache`.
+- **Hosting export** — package the site files into a `.zip` (or `.tar.gz`) for download,
+  excluding caches and backups.
+- **WordPress installer** — download and install the latest WordPress into the current
+  directory when none is present, preserving an existing `wp-content`.
+
+### Access control
+
+- Password-protected UI with a server-side session. The authentication hash is stored
+  outside the web content and never committed.
 
 ---
 
-## 📋 Requirements
+## bigdump.php
+
+A staggered MySQL dump importer that works around PHP execution-time and memory limits
+by importing in sessions, with a live AJAX progress bar.
+
+### Import engine
+
+- Staggered import of large dumps, splitting work across sessions.
+- Auto-detects `.sql`, `.gz` and `.zip` dump files in the working directory and
+  auto-extracts ZIP archives.
+- Skips `CREATE DATABASE` and `USE` statements; drops existing tables before import to
+  prevent duplicate-key errors.
+- CSV import support.
+
+### WordPress integration
+
+- Reads `wp-config.php` for credentials, charset and table prefix (searches parent
+  directories).
+- Live database connection test and a PHP parameter audit.
+- URL find-and-replace with preview and live-WordPress validation.
+- Pre-import backup via `mysqldump` or a PHP fallback.
+- FTP / FTPS / SFTP deployment of the script and SQL files.
+- WordPress user and plugin management.
+- Persistent configuration in `bigdump.config.json`.
+- Self-destruct button to remove the script after use.
+
+---
+
+## Requirements
 
 | Requirement | Minimum | Recommended |
 |-------------|---------|-------------|
 | PHP | 8.0 | 8.2+ |
-| MySQL/MariaDB | 5.6 | 8.0+ / 10.6+ |
-| `mysqli` extension | Required | — |
-| `zip` extension | Optional | Recommended (ZIP auto-extract) |
-| `curl` extension | Optional | Recommended (URL validation) |
-| `ftp` extension | Optional | Required for FTP deploy |
-| `ssh2` extension | Optional | Required for SFTP deploy |
-| `exec()` / `shell_exec()` | Optional | Required for `mysqldump` backup |
+| MySQL / MariaDB | 5.6 | 8.0+ / 10.6+ |
+| `pdo_mysql` / `mysqli` | Required | — |
+| `zip` extension | Optional | Recommended (ZIP parts, extraction) |
+| `curl` extension | Optional | Recommended (installers, validation) |
+| `ftp` / `ssh2` | Optional | Required for FTP/SFTP deploy (bigdump.php) |
+| `exec()` | Optional | Required for `mysqldump` / `mysql` CLI |
 
 ---
 
-## ⚙ Advanced Notes
+## Security
 
-**Large tables with extended inserts:** BigDump cannot split a single INSERT containing all rows. If you see `allowed memory size exhausted` or `MySQL server has gone away`, your dump uses extended inserts. Re-export from phpMyAdmin with extended inserts disabled.
+These tools are maintenance utilities, not applications to leave running.
 
-**Timeout errors:** Reduce `$linespersession` in the configuration section (default: 3000 lines). For very slow servers, also increase `$delaypersession`.
+| Risk | Detail |
+|------|--------|
+| Full database access | Read, modify or delete any table, including user data |
+| Filesystem writes | Accept uploads and write to the web root |
+| Credential exposure | Read `wp-config.php` database credentials |
+| Admin takeover | Can create or modify WordPress accounts |
+| Data loss | Dropping tables before import is irreversible without a backup |
 
-**Character encoding:** The `$db_connection_charset` variable (auto-set from `wp-config.php`) must match your dump file encoding. Mismatches cause garbled non-latin characters.
+**Rules of use**
 
-**GZip files:** PHP must decompress from the beginning of the file at each session start. Very large `.gz` files may exceed memory limits — use uncompressed `.sql` when possible.
-
-**Multiple databases in one dump:** Not supported. BigDump skips `CREATE DATABASE` and `USE` statements but cannot route data to different databases.
+1. Prefer local development environments or a password-protected directory.
+2. Perform the task, then delete the script immediately.
+3. Never commit `wp-config.php`, `.migrate_config` or `bigdump.config.json`.
+4. On a remote server, restrict access with `.htaccess` IP filtering or HTTP basic auth.
+5. Verify the script and its state files are gone after use.
 
 ---
 
-## 📁 File Structure
+## File structure
 
 ```
-bigdump.php           ← Main script (single file, no dependencies)
-bigdump.config.json   ← Auto-generated config (credentials — do not commit)
-your-dump.sql         ← Your MySQL dump file
-backup_db_YYYYMMDD.sql ← Auto-generated backups
+migrate_wordpress.php    WordPress migration and maintenance suite (single file)
+bigdump.php              Staggered MySQL importer (single file)
+.migrate_config          Auth hash for migrate_wordpress.php (git-ignored)
+.migrate_exports/        Generated exports and split parts (git-ignored)
+bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 ```
 
 ---
 
-## 🔄 Migration Workflow
-
-### Local → Production
-1. Export your local DB from phpMyAdmin
-2. Open BigDump locally, go to **URL Replacement**
-3. Set old URL = `http://localhost/mysite`, new URL = `https://mysite.com`
-4. Click **Preview** → **Apply replacement**
-5. Use **FTP/SFTP Deploy** to upload `bigdump.php` + the modified SQL to your server
-6. Open the remote BigDump URL, run the import
-7. Delete the script
-
-### Production → Local
-1. Export the production DB
-2. In BigDump, set old URL = `https://mysite.com`, new URL = `http://localhost/mysite`
-3. Apply replacement, then import locally
-
----
-
-## 📝 Changelog
+## Changelog
 
 | Version | Changes |
 |---------|---------|
-| `0.40-wp` | FTP deploy renames script to `bigdump_<random>.php` on remote server; backup files in `backups/` subfolder now appear in import table with ↩ Restore button; backup listing now shows all `.sql`/`.gz` files regardless of name prefix |
-| `0.39-wp` | Security warning banner with self-delete; WordPress plugin management (list, activate, deactivate all); full English translation; fixed AJAX JSON empty response bug (missing function definitions before early router) |
-| `0.38-wp` | URL validation against live WP installs; pre-import backup (mysqldump + PHP fallback); FTP/SFTP deployment; persistent `bigdump.config.json` config; WordPress user management (list, add, edit password/email, delete) |
-| `0.37-wp` | wp-config.php auto-load; PHP parameter audit; auto-drop tables before import; ignore CREATE DATABASE; ZIP auto-extract; URL find & replace with preview; modern UI |
-| `0.36b` | Original release by Alexey Ozerov — mysqli migration |
-
----
-
-## 🗂 Pending / Roadmap
-
-### Known improvements needed
-- [ ] **Add HTTP Basic Auth protection** — the script should optionally require a username/password before showing anything, configurable in `bigdump.config.json`
-- [ ] **Chunked file reading for URL replacement** — current implementation loads the entire SQL file into memory; for very large files (>500MB) this will fail
-- [ ] **Progress persistence across browser reloads** — if the browser closes mid-import, there's no way to resume from the correct offset
-- [ ] **SFTP key-based authentication** — currently only password auth is supported for SFTP
-- [ ] **Encrypted config file** — `bigdump.config.json` stores FTP passwords in plaintext
-- [ ] **Multi-site WordPress support** — currently assumes single-site table structure
-- [ ] **Backup compression** — backup files should optionally be gzipped to save disk space
-- [ ] **Dry-run import mode** — parse the SQL and report potential errors without executing queries
-
-### Features to add
-- [ ] **Support for other CMS platforms:**
-  - **Joomla** — detect `configuration.php`, read `$db`, `$user`, `$password`, `$host`; handle `#__` table prefix replacement
-  - **PrestaShop** — detect `app/config/parameters.php`; handle `_DB_PREFIX_` replacement
-  - **Drupal** — detect `sites/default/settings.php`; handle variable table prefixes and multi-site configs
-  - **MediaWiki** — detect `LocalSettings.php`; read `$wgDBname`, `$wgDBuser`, `$wgDBpassword`
-  - **Magento** — detect `app/etc/env.php`
-  - Generic mode: manual credential entry when no CMS is detected
-- [ ] **Plugin installer** — scan the working directory for plugin `.zip` files (e.g. `elementor-pro.zip`, `divi.zip`) and install them directly into `wp-content/plugins/` with a single click, without needing WP admin access — useful when migrating a site that requires paid plugins
-- [ ] **Theme installer** — same concept for `.zip` theme files in `wp-content/themes/`
-- [ ] **wp-config.php editor** — allow editing key WP constants (siteurl, home, debug mode) directly from the UI after import
-- [ ] **Search & replace with serialized data awareness** — WordPress stores serialized PHP arrays in the database; a naive string replace breaks serialized data. Implement a serialization-aware replacer (like the WP-CLI `search-replace` command)
-- [ ] **Table prefix migration** — when importing a dump with a different table prefix than the target installation, auto-rename tables
-- [ ] **Email log / notification** — send a summary email when import completes (useful for unattended remote imports)
-- [ ] **CLI mode** — allow running the import from the command line for server-side use without a browser
+| `migrate 1.3.0` | Domain Link Manager with disk-verified base path; size-limited split `.zip` export; disk-verified media URL fixing |
+| `migrate 1.0` | WordPress migration suite: export/import, URL migration, health check, plugin manager, PHP config, WordPress installer |
+| `bigdump 0.40-wp` | FTP deploy renames script on remote; backup restore from `backups/`; broader backup listing |
+| `bigdump 0.39-wp` | Security banner and self-delete; plugin management; full English translation |
+| `bigdump 0.38-wp` | URL validation; pre-import backup; FTP/SFTP deploy; persistent config; user management |
+| `bigdump 0.37-wp` | wp-config auto-load; PHP audit; auto-drop tables; ZIP auto-extract; URL find and replace |
+| `bigdump 0.36b` | Original release by Alexey Ozerov — mysqli migration |
 
 ---
 
 ## Credits
 
-- Original BigDump by [Alexey Ozerov](http://www.ozerov.de/bigdump/) — GPL © 2003–2015
-- WordPress Edition extensions — GPL
+- Original BigDump by [Alexey Ozerov](http://www.ozerov.de/bigdump/) — GPL (C) 2003–2015.
+- WordPress Edition extensions — GPL.
 
----
-
-*Single-file WordPress database migration tool. No composer, no dependencies, no framework.*
+Single-file WordPress database migration tooling. No Composer, no dependencies, no framework.
