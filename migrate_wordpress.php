@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.0.3');
+define('TOOL_VERSION',  '1.1.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -1285,6 +1285,221 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SCAN LINKED DOMAINS ---
+    // Aggregates every absolute http(s) domain linked in content, excluding the
+    // current host, so the user can decide which legacy/external domains to rewrite.
+    if ($action === 'scan_domains') {
+        $scan_db = [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($scan_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo    = $r['pdo'];
+        $prefix = $scan_db['prefix'];
+
+        // Current host (scheme-less, www-less) is excluded from the results.
+        $cur_host = preg_replace('#^www\.#', '', strtolower(parse_url(current_url(), PHP_URL_HOST) ?? ''));
+
+        $tables = [
+            ['table' => $prefix . 'posts',    'col' => 'post_content'],
+            ['table' => $prefix . 'postmeta', 'col' => 'meta_value'],
+            ['table' => $prefix . 'options',  'col' => 'option_value'],
+        ];
+        $url_rx = '#https?://([a-z0-9.-]+)(/[^\s"\'<>()\[\]\\\\]*)?#i';
+
+        $domains = []; // host => ['count'=>n, 'samples'=>[], 'asset_paths'=>[path=>true]]
+        foreach ($tables as $t) {
+            try {
+                $stmt = $pdo->query("SELECT `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE 'http%' OR `{$t['col']}` LIKE '%http%'");
+                while (($val = $stmt->fetchColumn()) !== false) {
+                    if (strpos($val, 'http') === false) continue;
+                    if (!preg_match_all($url_rx, $val, $m, PREG_SET_ORDER)) continue;
+                    foreach ($m as $hit) {
+                        $host = preg_replace('#^www\.#', '', strtolower($hit[1]));
+                        if ($host === '' || $host === $cur_host) continue;
+                        if (!isset($domains[$host])) $domains[$host] = ['count' => 0, 'samples' => [], 'asset_paths' => []];
+                        $domains[$host]['count']++;
+                        $path = $hit[2] ?? '';
+                        if (count($domains[$host]['samples']) < 3) {
+                            $full = rtrim($hit[0], '.,;)"\'');
+                            if (strlen($full) > 90) $full = substr($full, 0, 90) . '…';
+                            $domains[$host]['samples'][$full] = true;
+                        }
+                        // Keep a bounded set of paths that point to real files (have an
+                        // extension) so we can verify strip candidates on disk later.
+                        if ($path !== '' && count($domains[$host]['asset_paths']) < 300
+                            && preg_match('#\.[a-z0-9]{2,5}($|\?)#i', $path)) {
+                            $clean = preg_replace('/[?#].*$/', '', $path);
+                            $domains[$host]['asset_paths'][$clean] = true;
+                        }
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+
+        // For each domain, probe strip candidates and verify them on disk.
+        // A candidate is a leading path segment to drop (e.g. "/wordpress", "/test").
+        // We recommend the candidate that resolves the most existing files.
+        $root = rtrim($abspath, '/');
+        $recommend_strip = function (array $asset_paths) use ($root) {
+            if (!$asset_paths) return ['strip' => '', 'verified' => 0, 'checked' => 0];
+            $paths = array_keys($asset_paths);
+            // Build candidate strips: "" plus each distinct first segment, and
+            // first-two segments (covers nested like /old/site).
+            $cands = ['' => true];
+            foreach ($paths as $p) {
+                $seg = explode('/', ltrim($p, '/'));
+                if (isset($seg[0]) && $seg[0] !== '') $cands['/' . $seg[0]] = true;
+                if (isset($seg[1]) && $seg[1] !== '') $cands['/' . $seg[0] . '/' . $seg[1]] = true;
+            }
+            $sample = array_slice($paths, 0, 60); // bound disk hits
+            $best = ['strip' => '', 'verified' => 0, 'checked' => count($sample)];
+            foreach (array_keys($cands) as $strip) {
+                $hits = 0;
+                foreach ($sample as $p) {
+                    if ($strip !== '' && strpos($p, $strip . '/') !== 0 && $p !== $strip) continue;
+                    $rel = $strip !== '' ? substr($p, strlen($strip)) : $p;
+                    if ($rel === '' || $rel[0] !== '/') $rel = '/' . ltrim($rel, '/');
+                    if (is_file($root . $rel)) $hits++;
+                }
+                // Prefer more verified hits; tie-break favors a non-empty strip
+                // (removing a stale subfolder) only when it matches at least as well.
+                if ($hits > $best['verified'] || ($hits === $best['verified'] && $strip !== '' && $best['strip'] === '' && $hits > 0)) {
+                    $best = ['strip' => $strip, 'verified' => $hits, 'checked' => count($sample)];
+                }
+            }
+            return $best;
+        };
+
+        $out = [];
+        foreach ($domains as $host => $d) {
+            $rec = $recommend_strip($d['asset_paths']);
+            $out[] = [
+                'domain'        => $host,
+                'count'         => $d['count'],
+                'samples'       => array_keys($d['samples']),
+                'strip'         => $rec['strip'],        // recommended base-path to drop
+                'verified'      => $rec['verified'],     // files that exist on disk with this strip
+                'checked'       => $rec['checked'],      // asset paths probed
+            ];
+        }
+        usort($out, fn($a, $b) => $b['count'] <=> $a['count']);
+
+        echo json_encode(['ok' => true, 'current_host' => $cur_host, 'domains' => $out, 'total' => count($out)]);
+        exit;
+    }
+
+    // --- FIX LINKED DOMAINS ---
+    // Rewrites every absolute URL of the selected domains to a root-relative path,
+    // stripping scheme + host + an optional known subfolder. Serialized-safe.
+    if ($action === 'fix_domains') {
+        $fix_db = [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+        // Per-domain strip map: { "igs-bonn.de": "/wordpress", ... }.
+        // Legacy fallback: a plain "domains" CSV (no strip).
+        $map = json_decode($_POST['map'] ?? '', true);
+        if (!is_array($map) || !$map) {
+            $raw = trim($_POST['domains'] ?? '');
+            $map = [];
+            foreach (array_filter(array_map('trim', explode(',', $raw))) as $h) $map[$h] = '';
+        }
+        // Normalize keys (www-less, lowercase) and strips (leading slash, no trailing).
+        $strips   = [];
+        $selected = [];
+        foreach ($map as $host => $strip) {
+            $host = preg_replace('#^www\.#', '', strtolower(trim((string)$host)));
+            if ($host === '') continue;
+            $strip = trim((string)$strip);
+            if ($strip !== '') $strip = '/' . trim($strip, '/');
+            $strips[$host] = $strip;
+            $selected[]    = $host;
+        }
+        if (!$selected) { echo json_encode(['ok' => false, 'error' => 'No domains selected']); exit; }
+
+        $r = try_db_connect($fix_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo    = $r['pdo'];
+        $prefix = $fix_db['prefix'];
+
+        // Named capture per host so the rewrite can drop that host's own strip.
+        $alts = [];
+        $i    = 0;
+        $host_to_group = [];
+        foreach ($selected as $host) {
+            $g = 'h' . $i++;
+            $host_to_group[$g] = $host;
+            $alts[] = '(?<' . $g . '>' . preg_quote($host, '#') . ')';
+        }
+        // http(s)://[www.](one selected host)(/path)? → strip host + its base-path.
+        $pattern = '#https?://(?:www\.)?(?:' . implode('|', $alts) . ')(?<path>/[^\s"\'<>()\[\]\\\\]*)?#i';
+
+        $rewrite = function ($str) use ($pattern, $host_to_group, $strips) {
+            return preg_replace_callback($pattern, function ($m) use ($host_to_group, $strips) {
+                // Which host matched? Find the non-empty named group.
+                $strip = '';
+                foreach ($host_to_group as $g => $host) {
+                    if (isset($m[$g]) && $m[$g] !== '') { $strip = $strips[$host] ?? ''; break; }
+                }
+                $path = $m['path'] ?? '';
+                if ($strip !== '' && ($path === $strip || strpos($path, $strip . '/') === 0)) {
+                    $path = substr($path, strlen($strip));
+                }
+                return ($path !== '') ? $path : '/';
+            }, $str);
+        };
+
+        $tables = [
+            ['table' => $prefix . 'posts',    'col' => 'post_content', 'id' => 'ID'],
+            ['table' => $prefix . 'postmeta', 'col' => 'meta_value',   'id' => 'meta_id'],
+            ['table' => $prefix . 'options',  'col' => 'option_value', 'id' => 'option_id'],
+        ];
+        $like = '%http%';
+
+        $updated = 0;
+        $errors  = 0;
+        foreach ($tables as $t) {
+            try {
+                $stmt = $pdo->prepare("SELECT `{$t['id']}`, `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ?");
+                $stmt->execute([$like]);
+                while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                    $old = $row[$t['col']];
+                    if (!preg_match($pattern, $old)) continue;
+                    // Serialized strings first: rewrite inside, recalculate s:LENGTH.
+                    $new = preg_replace_callback(
+                        '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
+                        function ($m) use ($rewrite) {
+                            $str = $rewrite($m[2]);
+                            if ($str === $m[2]) return $m[0];
+                            return 's:' . strlen($str) . ':"' . $str . '"';
+                        },
+                        $old
+                    );
+                    // Remaining plain occurrences.
+                    $new = $rewrite($new);
+                    if ($new !== $old) {
+                        $upd = $pdo->prepare("UPDATE `{$t['table']}` SET `{$t['col']}` = ? WHERE `{$t['id']}` = ?");
+                        if ($upd->execute([$new, $row[$t['id']]])) $updated++;
+                        else $errors++;
+                    }
+                }
+            } catch (Exception $e) { $errors++; }
+        }
+
+        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors, 'domains' => $selected]);
+        exit;
+    }
+
     // --- UPDATE SITE URL PROTOCOL ---
     if ($action === 'update_site_url_protocol') {
         $upd_db = [
@@ -2192,6 +2407,25 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 </div>
 
 <div class="card">
+<h2>🌍 Domain Link Manager</h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    Scans posts, postmeta and options for every absolute <code>http(s)://domain/</code> link,
+    excluding the current site. Review the list of linked domains with their counts and select the
+    ones to convert to root-relative <code>/path</code> links — useful to remove references to old
+    hostings (e.g. <code>igs-bonn.de/wordpress</code>) while keeping legitimate external links.
+    The base path to drop (e.g. the old <code>/wordpress</code> subfolder) is recommended by
+    verifying referenced files exist on disk, so you don't create links to missing files.
+    Serialized data is handled correctly.
+</p>
+<div class="actions" style="margin-bottom:12px">
+    <button class="btn btn-primary" onclick="scanDomains()">🔍 Scan DB for linked domains</button>
+    <button id="tls_dom_fix_btn" class="btn btn-danger" onclick="fixDomains()" style="display:none">⚡ Convert selected to relative</button>
+</div>
+<div id="tls_domains_list"></div>
+<div id="tls_domains_log" class="log" style="display:none"></div>
+</div>
+
+<div class="card">
 <h2>🔌 Plugin Manager</h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Lists all installed plugins and lets you activate or deactivate them directly in the database.
@@ -2607,6 +2841,80 @@ async function fixMediaUrls() {
         document.getElementById('tls_fix_btn').style.display = 'none';
     } else {
         log('tls_media_log', `✗ ${j.error}`, true);
+    }
+}
+
+async function scanDomains() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const el = document.getElementById('tls_domains_list');
+    el.innerHTML = '<span style="color:#718096;font-size:13px">⏳ Scanning linked domains...</span>';
+    document.getElementById('tls_dom_fix_btn').style.display = 'none';
+    const r = await fetch('?action=scan_domains', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { el.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    if (!j.total) {
+        el.innerHTML = '<span style="color:#6ee7b7;font-size:13px">✓ No external domains linked. Database is clean.</span>';
+        return;
+    }
+    let html = `<p style="font-size:12px;color:#718096;margin-bottom:8px">Found <strong style="color:#e2e8f0">${j.total}</strong> linked domain(s) (current site <code>${j.current_host}</code> excluded). Check the ones to convert. The <em>base path to drop</em> is recommended from files verified on disk — edit it if needed:</p>`;
+    html += '<div style="max-height:360px;overflow-y:auto;border:1px solid #2d3148;border-radius:6px">';
+    j.domains.forEach((d, i) => {
+        const sample = d.samples.length ? d.samples[0].replace(/</g,'&lt;') : '';
+        // Disk-verification badge: green if the recommended strip resolves files.
+        let vbadge;
+        if (d.checked === 0) {
+            vbadge = `<span class="badge" style="background:#1e2235;color:#718096" title="No asset URLs to verify">no assets</span>`;
+        } else if (d.verified > 0) {
+            vbadge = `<span class="badge badge-ok" title="${d.verified} of ${d.checked} probed files exist on disk with this base path">✓ ${d.verified}/${d.checked} on disk</span>`;
+        } else {
+            vbadge = `<span class="badge badge-err" title="None of the probed files exist on disk — files may not be uploaded yet">⚠ 0/${d.checked} verified</span>`;
+        }
+        html += `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-bottom:1px solid #2d3148;font-size:13px">
+            <input type="checkbox" class="tls-dom-cb" data-domain="${d.domain}" id="tls_dom_${i}" style="margin-top:3px">
+            <div style="flex:1">
+                <label for="tls_dom_${i}" style="cursor:pointer">
+                    <span style="color:#e2e8f0;font-family:monospace">${d.domain}</span>
+                    <span class="badge badge-warn" style="margin-left:6px">${d.count} link(s)</span>
+                    <span style="margin-left:6px">${vbadge}</span>
+                </label>
+                <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
+                    <span style="color:#718096;font-size:11px">drop base path:</span>
+                    <input type="text" class="tls-dom-strip" data-domain="${d.domain}" value="${d.strip}" placeholder="(none)"
+                        style="width:180px;padding:3px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px;font-family:monospace">
+                </div>
+                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${sample}</div>` : ''}
+            </div></div>`;
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    document.getElementById('tls_dom_fix_btn').style.display = 'inline-flex';
+}
+
+async function fixDomains() {
+    const checked = Array.from(document.querySelectorAll('.tls-dom-cb:checked'));
+    if (!checked.length) { alert('Select at least one domain to convert.'); return; }
+    // Build { domain: stripBasePath } from the selected rows.
+    const map = {};
+    checked.forEach(cb => {
+        const dom   = cb.getAttribute('data-domain');
+        const field = document.querySelector(`.tls-dom-strip[data-domain="${dom}"]`);
+        map[dom] = field ? field.value.trim() : '';
+    });
+    const summary = Object.entries(map).map(([d,s]) => s ? `${d}  (drop ${s})` : d).join('\n');
+    if (!confirm(`Convert all links of ${checked.length} domain(s) to root-relative /paths?\n\n${summary}\n\nThis modifies posts, postmeta and options. Make sure you have a DB backup.`)) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('map', JSON.stringify(map));
+    log('tls_domains_log', '⏳ Converting selected domains...', false);
+    const r = await fetch('?action=fix_domains', {method:'POST', body:fd});
+    const j = await r.json();
+    if (j.ok) {
+        log('tls_domains_log', `✓ Done. Updated ${j.updated} row(s) across ${j.domains.length} domain(s).${j.errors ? `\n⚠ ${j.errors} error(s).` : ''}`, false);
+        document.getElementById('tls_dom_fix_btn').style.display = 'none';
+        document.getElementById('tls_domains_list').innerHTML = '<span style="color:#6ee7b7;font-size:13px">✓ Re-scan to confirm the domains are gone.</span>';
+    } else {
+        log('tls_domains_log', `✗ ${j.error}`, false);
     }
 }
 
