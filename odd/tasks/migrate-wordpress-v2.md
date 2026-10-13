@@ -34,8 +34,13 @@ Delivered in phases, one commit per phase. Release at the end.
       ($http_response_header). -> 1.7.0
       NOTE: PHP built-in server does not process .htaccess/.user.ini; real 500-detection only on the
       target host (Apache/PHP-FPM), which is exactly where it matters. Mechanism verified locally.
-- [ ] P4: Security Audit (DB + files: weak passwords, admin default, WP version,
-      default SALTs, file perms, XML-RPC, REST users, debug, prefix). -> 1.7.0
+- [x] P4: Security Audit. New security_audit endpoint, 4 categories (Users & Passwords,
+      WP Core & Config, Filesystem Exposure, Attack Surface): weak/common password probe via
+      WpPasswordHash against each user_pass, default 'admin', admin count, WP version vs 6.4,
+      default SALT placeholder, WP_DEBUG, DISALLOW_FILE_EDIT, table prefix, wp-config perms,
+      fingerprint files, exposed dumps, .htaccess, xmlrpc.php, REST user enum. Shared JS
+      renderCategories() reused by health check + audit. Bilingual. Weak-password detection
+      unit-tested. Merged to main + pushed. -> 1.8.0
 - [ ] P5: phpMyAdmin installer (download+extract to /phpmyadmin) + WP extras. -> 1.8.0
 - [ ] P6: README migrate_wordpress docs + curl one-liners (done early at user request). 
 - [ ] P7: Final version 2.0.0, tag v2.0.0-wp, GitHub release (push authorized).

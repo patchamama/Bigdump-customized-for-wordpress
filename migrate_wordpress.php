@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.7.0');
+define('TOOL_VERSION',  '1.8.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -133,6 +133,11 @@ $GLOBALS['__I18N'] = [
             => 'La prueba aplica la configuración propuesta en una subcarpeta temporal aislada y la carga por HTTP. Si rompería el sitio (HTTP 500) se te avisa y Aplicar queda deshabilitado; la carpeta de prueba solo se afecta a sí misma, nunca al sitio en producción.',
         'Test safely'                         => 'Probar sin riesgo',
         'Apply'                               => 'Aplicar',
+        // Security Audit
+        'Security Audit'                      => 'Auditoría de seguridad',
+        'Run Security Audit'                  => 'Ejecutar auditoría',
+        'Hardening checks across users, WordPress core, filesystem and attack surface: weak/common passwords, default admin username, outdated WP version, default security keys, file permissions, exposed dumps, XML-RPC and REST exposure. Uses the DB connection configured above.'
+            => 'Chequeos de endurecimiento sobre usuarios, núcleo de WordPress, sistema de archivos y superficie de ataque: contraseñas débiles/comunes, usuario admin por defecto, versión de WP desactualizada, claves de seguridad por defecto, permisos de archivos, dumps expuestos, exposición de XML-RPC y REST. Usa la conexión a la base de datos configurada arriba.',
     ],
 ];
 
@@ -2510,6 +2515,136 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SECURITY AUDIT ---
+    // Hardening checks across users, WP core, files and attack surface. Same
+    // category/severity shape as health_check so the UI can reuse the renderer.
+    if ($action === 'security_audit') {
+        @set_time_limit(180);
+        $sa_db = [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+        $root   = rtrim($abspath, '/');
+        $prefix = $sa_db['prefix'];
+        $cats   = [];
+        $cat = function ($label, $icon, $items) {
+            $errors = 0; $warns = 0;
+            foreach ($items as $i) { if ($i['s'] === 'error') $errors++; elseif ($i['s'] === 'warn') $warns++; }
+            $status = $errors ? 'error' : ($warns ? 'warn' : 'ok');
+            return compact('label', 'icon', 'status', 'items', 'errors', 'warns');
+        };
+
+        // ── 1. Users & passwords ───────────────────────────────────────────
+        $u_items = [];
+        $r = try_db_connect($sa_db);
+        if (!$r['ok']) {
+            $cats[] = ['label' => 'Database', 'icon' => '🗄️', 'status' => 'error',
+                       'items' => [['s' => 'error', 'text' => 'Connection failed: ' . $r['error']]], 'errors' => 1, 'warns' => 0];
+            echo json_encode(['ok' => true, 'categories' => $cats]); exit;
+        }
+        $pdo = $r['pdo'];
+        // Common passwords to test against each user_pass hash (phpass $P$).
+        $common = ['123456','password','12345678','qwerty','123456789','12345','1234','111111',
+                   'admin','letmein','welcome','monkey','abc123','password1','admin123','root',
+                   'test','pass','1234567890','changeme','wordpress','secret','p@ssw0rd','Password1'];
+        $hasher = new WpPasswordHash(8);
+        $admin_logins = [];
+        try {
+            $urows = $pdo->query("SELECT ID, user_login, user_pass, display_name FROM `{$prefix}users`")->fetchAll(PDO::FETCH_ASSOC);
+            $weak = 0;
+            foreach ($urows as $u) {
+                // Role lookup to flag administrators.
+                $cap = $pdo->prepare("SELECT meta_value FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = ? LIMIT 1");
+                $cap->execute([$u['ID'], $prefix . 'capabilities']);
+                $caps = @unserialize((string)$cap->fetchColumn());
+                $is_admin = is_array($caps) && !empty($caps['administrator']);
+                if ($is_admin) $admin_logins[] = $u['user_login'];
+                if (strtolower($u['user_login']) === 'admin')
+                    $u_items[] = ['s' => 'warn', 'text' => "Default username 'admin' in use (ID {$u['ID']}) — easy to brute-force"];
+                if (strcasecmp($u['user_login'], $u['display_name']) === 0)
+                    $u_items[] = ['s' => 'warn', 'text' => "User '{$u['user_login']}' exposes its login as display name"];
+                // Weak-password probe against the stored hash.
+                foreach ($common as $cpw) {
+                    if ($hasher->check($cpw, $u['user_pass'])) {
+                        $u_items[] = ['s' => 'error', 'text' => "Weak password for '{$u['user_login']}' — matches common password"];
+                        $weak++;
+                        break;
+                    }
+                }
+            }
+            $u_items[] = ['s' => $weak ? 'error' : 'ok', 'text' => "Users checked: " . count($urows) . ", weak passwords: $weak"];
+            $admin_count = count($admin_logins);
+            $u_items[] = ['s' => $admin_count > 2 ? 'warn' : 'ok', 'text' => "Administrator accounts: $admin_count" . ($admin_count > 2 ? ' (consider reducing)' : '')];
+        } catch (Exception $e) {
+            $u_items[] = ['s' => 'warn', 'text' => 'User check failed: ' . $e->getMessage()];
+        }
+        $cats[] = $cat('Users & Passwords', '👤', $u_items);
+
+        // ── 2. WordPress core / config ─────────────────────────────────────
+        $c_items = [];
+        // Table prefix.
+        $c_items[] = ['s' => $prefix === 'wp_' ? 'warn' : 'ok', 'text' => "Table prefix: '$prefix'" . ($prefix === 'wp_' ? ' (default — predictable)' : '')];
+        // WP version vs a known-recent baseline.
+        $wp_version = '?';
+        if (is_file($root . '/wp-includes/version.php')) {
+            $vc = file_get_contents($root . '/wp-includes/version.php');
+            if (preg_match('/\$wp_version\s*=\s*\'([^\']+)\'/', $vc, $vm)) $wp_version = $vm[1];
+        }
+        $recent = '6.4';
+        $c_items[] = ['s' => ($wp_version !== '?' && version_compare($wp_version, $recent, '<')) ? 'warn' : 'ok',
+                      'text' => "WordPress version: $wp_version" . (($wp_version !== '?' && version_compare($wp_version, $recent, '<')) ? " (older than $recent — update recommended)" : '')];
+        // wp-config.php: default SALTs, debug, file edit.
+        $wp_config = null;
+        foreach ([$root . '/wp-config.php', dirname($root) . '/wp-config.php'] as $p) { if (is_file($p)) { $wp_config = $p; break; } }
+        if ($wp_config) {
+            $cfg = file_get_contents($wp_config);
+            $default_salt = strpos($cfg, 'put your unique phrase here') !== false;
+            $c_items[] = ['s' => $default_salt ? 'error' : 'ok', 'text' => 'Security keys/SALTs: ' . ($default_salt ? 'DEFAULT placeholder — must be randomized' : 'customized')];
+            $debug_on = preg_match("/define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*\)/i", $cfg);
+            $c_items[] = ['s' => $debug_on ? 'warn' : 'ok', 'text' => 'WP_DEBUG: ' . ($debug_on ? 'ENABLED (may leak paths/errors in production)' : 'off')];
+            $file_edit = preg_match("/define\s*\(\s*['\"]DISALLOW_FILE_EDIT['\"]\s*,\s*true\s*\)/i", $cfg);
+            $c_items[] = ['s' => $file_edit ? 'ok' : 'warn', 'text' => 'Admin file editor: ' . ($file_edit ? 'disabled (DISALLOW_FILE_EDIT)' : 'enabled — a compromised admin can edit PHP')];
+        } else {
+            $c_items[] = ['s' => 'warn', 'text' => 'wp-config.php not found for inspection'];
+        }
+        $cats[] = $cat('WordPress Core & Config', '⚙️', $c_items);
+
+        // ── 3. Filesystem exposure ─────────────────────────────────────────
+        $f_items = [];
+        if ($wp_config) {
+            $perms = @fileperms($wp_config) & 0777;
+            $world = ($perms & 0004) !== 0;
+            $f_items[] = ['s' => $world ? 'error' : 'ok', 'text' => 'wp-config.php permissions: ' . sprintf('%o', $perms) . ($world ? ' (WORLD-READABLE — restrict to 600/640)' : '')];
+        }
+        // Fingerprinting files present in web root.
+        foreach (['readme.html', 'license.txt', 'wp-config-sample.php'] as $fp) {
+            if (is_file($root . '/' . $fp)) $f_items[] = ['s' => 'warn', 'text' => "$fp present — reveals WordPress / version, delete it"];
+        }
+        // Exposed dumps / archives in web root.
+        $exposed = [];
+        foreach (glob($root . '/*.{sql,sql.gz,zip,tar.gz,bak}', GLOB_BRACE) ?: [] as $f) $exposed[] = basename($f);
+        $f_items[] = ['s' => $exposed ? 'error' : 'ok', 'text' => $exposed ? 'Exposed dumps/archives in web root: ' . implode(', ', array_slice($exposed, 0, 5)) : 'No exposed dumps/archives in web root'];
+        // .htaccess presence (directory listing / rules).
+        $f_items[] = ['s' => is_file($root . '/.htaccess') ? 'ok' : 'warn', 'text' => '.htaccess: ' . (is_file($root . '/.htaccess') ? 'present' : 'missing (no URL rules / listing protection)')];
+        $cats[] = $cat('Filesystem Exposure', '📁', $f_items);
+
+        // ── 4. Attack surface (local checks) ───────────────────────────────
+        $s_items = [];
+        $s_items[] = ['s' => is_file($root . '/xmlrpc.php') ? 'warn' : 'ok', 'text' => 'XML-RPC: ' . (is_file($root . '/xmlrpc.php') ? 'xmlrpc.php present — common brute-force/DDoS vector, block if unused' : 'not present')];
+        // REST API user enumeration is reachable by default; flag as info/warn.
+        $s_items[] = ['s' => 'warn', 'text' => 'REST API user enumeration (/wp-json/wp/v2/users) is enabled by default — restrict if not needed'];
+        // Login throttling can't be detected from here — advisory.
+        $s_items[] = ['s' => 'warn', 'text' => 'Brute-force protection on wp-login.php cannot be detected here — ensure a limit-login plugin or WAF is active'];
+        $cats[] = $cat('Attack Surface', '🛡️', $s_items);
+
+        echo json_encode(['ok' => true, 'categories' => $cats]);
+        exit;
+    }
+
     // --- DOWNLOAD THIS TOOL ---
     if ($action === 'download_self') {
         $path = __FILE__;
@@ -3216,6 +3351,17 @@ foreach ($php_cfg_rows as $r):
 </div>
 <div id="tls_phpcfg_test"></div>
 <div id="tls_phpcfg_log" class="log" style="display:none"></div>
+</div>
+
+<div class="card" style="border-color:#7f1d1d44">
+<h2>🛡️ <?= h(t('Security Audit')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('Hardening checks across users, WordPress core, filesystem and attack surface: weak/common passwords, default admin username, outdated WP version, default security keys, file permissions, exposed dumps, XML-RPC and REST exposure. Uses the DB connection configured above.')) ?>
+</p>
+<div class="actions" style="margin-bottom:16px">
+    <button id="tls_audit_btn" class="btn btn-danger" onclick="runSecurityAudit()">🛡️ <?= h(t('Run Security Audit')) ?></button>
+</div>
+<div id="tls_audit_results"></div>
 </div>
 
 <div class="card">
@@ -3953,59 +4099,66 @@ async function savePhpConfig() {
     } catch(e) { log('tls_phpcfg_log', '✗ ' + e.message); }
 }
 
+// Shared renderer for category/severity reports (health check + security audit).
+function renderCategories(categories) {
+    const statusColor = {ok:'#6ee7b7', warn:'#fcd34d', error:'#f87171'};
+    const statusBg    = {ok:'#064e3b', warn:'#78350f', error:'#7f1d1d'};
+    const statusIcon  = {ok:'✅', warn:'⚠️', error:'❌'};
+    const totals = categories.reduce((a,c) => { a.errors+=c.errors; a.warns+=c.warns; return a; }, {errors:0,warns:0});
+    const overall = totals.errors ? 'error' : (totals.warns ? 'warn' : 'ok');
+    const overallMsg = totals.errors ? `${totals.errors} error(s), ${totals.warns} warning(s)` : (totals.warns ? `${totals.warns} warning(s)` : 'All checks passed');
+    let html = `<div style="padding:12px 16px;border-radius:6px;background:${statusBg[overall]};border:1px solid ${statusColor[overall]};margin-bottom:16px;font-size:13px;color:${statusColor[overall]}">
+        <strong>${statusIcon[overall]} ${overallMsg}</strong></div>`;
+    categories.forEach(cat => {
+        const sc = statusColor[cat.status], sb = statusBg[cat.status];
+        const badge = `<span style="background:${sb};color:${sc};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600">${statusIcon[cat.status]} ${cat.status.toUpperCase()}</span>`;
+        const errCount = cat.errors ? ` <span style="color:#f87171;font-size:11px">${cat.errors} error(s)</span>` : '';
+        const warnCount = cat.warns ? ` <span style="color:#fcd34d;font-size:11px">${cat.warns} warning(s)</span>` : '';
+        html += `<details ${cat.status !== 'ok' ? 'open' : ''} style="border:1px solid #2d3148;border-radius:6px;margin-bottom:8px;overflow:hidden">
+            <summary style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;background:#1a1d27;font-size:13px;font-weight:600;list-style:none;user-select:none">
+                <span>${cat.icon} ${cat.label}</span>${badge}${errCount}${warnCount}
+            </summary>
+            <div style="padding:4px 0;background:#0f1117">`;
+        cat.items.forEach(item => {
+            const ic = item.s === 'ok' ? '#6ee7b7' : (item.s === 'warn' ? '#fcd34d' : '#f87171');
+            const ii = item.s === 'ok' ? '✓' : (item.s === 'warn' ? '⚠' : '✗');
+            html += `<div style="padding:6px 14px;font-size:12px;font-family:monospace;color:${ic};border-bottom:1px solid #1a1d2733">${ii} ${esc(item.text)}</div>`;
+        });
+        html += `</div></details>`;
+    });
+    return html;
+}
+
 async function runHealthCheck() {
     const btn = document.getElementById('tls_health_btn');
-    const out  = document.getElementById('tls_health_results');
+    const out = document.getElementById('tls_health_results');
     btn.disabled = true; btn.textContent = '⏳ Checking...';
     out.innerHTML = '<p style="color:#718096;font-size:13px;padding:8px 0">⏳ Running checks — this may take a few seconds...</p>';
-
     const fd = new FormData();
     Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
-
     try {
         const r = await fetch('?action=health_check', {method:'POST', body:fd});
         const j = await r.json();
-
-        if (!j.ok) { out.innerHTML = `<p style="color:#f87171">✗ ${j.error}</p>`; btn.disabled=false; btn.textContent='🔍 Run Health Check'; return; }
-
-        const statusColor = {ok:'#6ee7b7', warn:'#fcd34d', error:'#f87171'};
-        const statusBg    = {ok:'#064e3b', warn:'#78350f', error:'#7f1d1d'};
-        const statusIcon  = {ok:'✅', warn:'⚠️', error:'❌'};
-
-        const totals = j.categories.reduce((a,c) => { a.errors+=c.errors; a.warns+=c.warns; return a; }, {errors:0,warns:0});
-        const overall = totals.errors ? 'error' : (totals.warns ? 'warn' : 'ok');
-        const overallMsg = totals.errors ? `${totals.errors} error(s), ${totals.warns} warning(s)` : (totals.warns ? `${totals.warns} warning(s)` : 'All checks passed');
-
-        let html = `<div style="padding:12px 16px;border-radius:6px;background:${statusBg[overall]};border:1px solid ${statusColor[overall]};margin-bottom:16px;font-size:13px;color:${statusColor[overall]}">
-            <strong>${statusIcon[overall]} ${overallMsg}</strong>
-        </div>`;
-
-        j.categories.forEach(cat => {
-            const sc = statusColor[cat.status], sb = statusBg[cat.status];
-            const badge = `<span style="background:${sb};color:${sc};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600">${statusIcon[cat.status]} ${cat.status.toUpperCase()}</span>`;
-            const errCount = cat.errors ? ` <span style="color:#f87171;font-size:11px">${cat.errors} error(s)</span>` : '';
-            const warnCount = cat.warns ? ` <span style="color:#fcd34d;font-size:11px">${cat.warns} warning(s)</span>` : '';
-
-            html += `<details ${cat.status !== 'ok' ? 'open' : ''} style="border:1px solid #2d3148;border-radius:6px;margin-bottom:8px;overflow:hidden">
-                <summary style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;background:#1a1d27;font-size:13px;font-weight:600;list-style:none;user-select:none">
-                    <span>${cat.icon} ${cat.label}</span>${badge}${errCount}${warnCount}
-                </summary>
-                <div style="padding:4px 0;background:#0f1117">`;
-
-            cat.items.forEach(item => {
-                const ic = item.s === 'ok' ? '#6ee7b7' : (item.s === 'warn' ? '#fcd34d' : '#f87171');
-                const ii = item.s === 'ok' ? '✓' : (item.s === 'warn' ? '⚠' : '✗');
-                html += `<div style="padding:6px 14px;font-size:12px;font-family:monospace;color:${ic};border-bottom:1px solid #1a1d2733">${ii} ${item.text}</div>`;
-            });
-
-            html += `</div></details>`;
-        });
-
-        out.innerHTML = html;
-    } catch(e) {
-        out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`;
-    }
+        if (!j.ok) { out.innerHTML = `<p style="color:#f87171">✗ ${j.error}</p>`; }
+        else out.innerHTML = renderCategories(j.categories);
+    } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
     btn.disabled = false; btn.textContent = '🔍 Run Health Check';
+}
+
+async function runSecurityAudit() {
+    const btn = document.getElementById('tls_audit_btn');
+    const out = document.getElementById('tls_audit_results');
+    btn.disabled = true; btn.textContent = '⏳ Auditing...';
+    out.innerHTML = '<p style="color:#718096;font-size:13px;padding:8px 0">⏳ Running security checks...</p>';
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    try {
+        const r = await fetch('?action=security_audit', {method:'POST', body:fd});
+        const j = await r.json();
+        if (!j.ok) { out.innerHTML = `<p style="color:#f87171">✗ ${j.error}</p>`; }
+        else out.innerHTML = renderCategories(j.categories);
+    } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
+    btn.disabled = false; btn.textContent = '🛡️ Run Security Audit';
 }
 
 async function savePluginSelection() {
