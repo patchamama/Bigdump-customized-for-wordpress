@@ -52,6 +52,15 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] P6: README updated with all migrate_wordpress v2 features + changelog entry.
 - [x] P7: Version 2.0.0, README done. Tag v2.0.0-wp + GitHub release pending gh token.
 
+## v2.1 — SEO suite + full-site password (local MySQL now available: 127.0.0.1:3306 root/—, db wp_test)
+- [x] S1: SEO audit (seo_audit, renderCategories) + edit title/tagline (seo_update_meta).
+      Verified against real wp_test: blog_public=1, permalinks /index.php/ flagged, no HTTPS,
+      0 untitled. Bilingual SEO card. -> 2.1.0
+- [ ] S2: permalinks (/%postname%/ w/ anti-500 test) + sitemap.xml + robots/blog_public toggle
+      + request-indexing & site: check links (Google/Bing/DuckDuckGo/Yandex). -> 2.2.0
+- [ ] S3: full-site password (.htaccess+.htpasswd) with isolated anti-500 test + probe URL. -> 2.3.0
+- [ ] S4: README + tag v2.3.0-wp + GitHub release.
+
 ## P1 verification
 - php -l OK, HTTP 200.
 - Auth decision logic unit-tested, 6/6 cases: DB-empty forces must_set (never open),

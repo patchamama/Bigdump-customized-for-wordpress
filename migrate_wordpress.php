@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.0.0');
+define('TOOL_VERSION',  '2.1.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -164,6 +164,15 @@ $GLOBALS['__I18N'] = [
         'Download the latest phpMyAdmin and extract it into a /phpmyadmin folder. No config is written — set the connection on first access. Remove the folder when you are done.'
             => 'Descarga la última versión de phpMyAdmin y la extrae en una carpeta /phpmyadmin. No se escribe configuración — definí la conexión en el primer acceso. Eliminá la carpeta al terminar.',
         'Download & install phpMyAdmin'       => 'Descargar e instalar phpMyAdmin',
+        // SEO
+        'SEO'                                 => 'SEO',
+        'Audit SEO basics (indexability, title/tagline, friendly permalinks, sitemap, robots.txt, HTTPS), edit the title and tagline, toggle indexing, generate a sitemap, request indexing and check if the site is indexed. Uses the DB connection configured above.'
+            => 'Audita aspectos básicos de SEO (indexabilidad, título/descripción, enlaces permanentes amigables, sitemap, robots.txt, HTTPS), edita el título y la descripción, activa/desactiva la indexación, genera un sitemap, solicita indexación y verifica si el sitio está indexado. Usa la conexión a la base de datos configurada arriba.',
+        'Run SEO Audit'                       => 'Ejecutar auditoría SEO',
+        'Basic meta'                          => 'Metadatos básicos',
+        'Site title'                          => 'Título del sitio',
+        'Tagline'                             => 'Descripción corta',
+        'Save meta'                           => 'Guardar metadatos',
     ],
 ];
 
@@ -2671,6 +2680,95 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SEO: shared DB connection ---
+    $seo_db = function () use ($db) {
+        return [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+    };
+
+    // --- SEO AUDIT ---
+    // Checks indexability, title/description, friendly permalinks, sitemap and
+    // robots.txt presence, HTTPS, and untitled published posts. Same category
+    // shape as the other audits so the UI reuses renderCategories().
+    if ($action === 'seo_audit') {
+        $s_db = $seo_db();
+        $root = rtrim($abspath, '/');
+        $r = try_db_connect($s_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $s_db['prefix'];
+        $cat = function ($label, $icon, $items) {
+            $e = 0; $w = 0; foreach ($items as $i) { if ($i['s'] === 'error') $e++; elseif ($i['s'] === 'warn') $w++; }
+            return ['label' => $label, 'icon' => $icon, 'status' => $e ? 'error' : ($w ? 'warn' : 'ok'), 'items' => $items, 'errors' => $e, 'warns' => $w];
+        };
+        $opt = function ($name) use ($pdo, $prefix) {
+            $st = $pdo->prepare("SELECT option_value FROM `{$prefix}options` WHERE option_name = ? LIMIT 1");
+            $st->execute([$name]); return (string)$st->fetchColumn();
+        };
+        $cats = [];
+
+        // Indexability
+        $idx_items = [];
+        $blog_public = $opt('blog_public');
+        $idx_items[] = ['s' => $blog_public === '1' ? 'ok' : 'warn',
+            'text' => 'blog_public: ' . $blog_public . ($blog_public === '1' ? ' (search engines allowed)' : ' (site is discouraging indexing)')];
+        $robots = $root . '/robots.txt';
+        if (is_file($robots)) {
+            $rc = file_get_contents($robots);
+            $blocks_all = (bool)preg_match('/Disallow:\s*\/\s*$/mi', $rc) && !preg_match('/Allow:/i', $rc);
+            $idx_items[] = ['s' => $blocks_all ? 'warn' : 'ok', 'text' => 'robots.txt present' . ($blocks_all ? ' and blocks the whole site (Disallow: /)' : '')];
+        } else {
+            $idx_items[] = ['s' => 'warn', 'text' => 'robots.txt not found (WordPress serves a virtual one)'];
+        }
+        $cats[] = $cat('Indexability', '🔎', $idx_items);
+
+        // Title / description / URLs
+        $meta_items = [];
+        $name = $opt('blogname'); $desc = $opt('blogdescription');
+        $meta_items[] = ['s' => $name !== '' ? 'ok' : 'error', 'text' => 'Site title (blogname): ' . ($name !== '' ? $name : 'EMPTY')];
+        $meta_items[] = ['s' => $desc !== '' ? 'ok' : 'warn', 'text' => 'Tagline (blogdescription): ' . ($desc !== '' ? $desc : 'empty')];
+        $siteurl = $opt('siteurl');
+        $meta_items[] = ['s' => str_starts_with($siteurl, 'https://') ? 'ok' : 'warn', 'text' => 'siteurl: ' . $siteurl . (str_starts_with($siteurl, 'https://') ? '' : ' (not HTTPS)')];
+        $perma = $opt('permalink_structure');
+        $friendly = $perma !== '' && strpos($perma, 'index.php') === false;
+        $meta_items[] = ['s' => $friendly ? 'ok' : 'warn', 'text' => 'Permalinks: ' . ($perma ?: 'plain (?p=123)') . ($friendly ? ' (friendly)' : ' (not SEO-friendly)')];
+        $cats[] = $cat('Title, URLs & Permalinks', '🏷️', $meta_items);
+
+        // Sitemap + content
+        $content_items = [];
+        $has_sitemap_file = is_file($root . '/sitemap.xml');
+        $content_items[] = ['s' => $has_sitemap_file ? 'ok' : 'warn', 'text' => 'sitemap.xml file: ' . ($has_sitemap_file ? 'present' : 'not found (WordPress 5.5+ serves /wp-sitemap.xml)')];
+        try {
+            $untitled = (int)$pdo->query("SELECT COUNT(*) FROM `{$prefix}posts` WHERE post_status='publish' AND post_type IN ('post','page') AND (post_title='' OR post_title IS NULL)")->fetchColumn();
+            $content_items[] = ['s' => $untitled === 0 ? 'ok' : 'warn', 'text' => "Published posts/pages without a title: $untitled"];
+            $pub = (int)$pdo->query("SELECT COUNT(*) FROM `{$prefix}posts` WHERE post_status='publish' AND post_type IN ('post','page')")->fetchColumn();
+            $content_items[] = ['s' => 'ok', 'text' => "Published posts/pages: $pub"];
+        } catch (Exception $e) { $content_items[] = ['s' => 'warn', 'text' => 'Content check failed: ' . $e->getMessage()]; }
+        $cats[] = $cat('Sitemap & Content', '🗺️', $content_items);
+
+        echo json_encode(['ok' => true, 'categories' => $cats]);
+        exit;
+    }
+
+    // --- SEO: UPDATE BASIC META (title / tagline) ---
+    if ($action === 'seo_update_meta') {
+        $s_db = $seo_db();
+        $r = try_db_connect($s_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $s_db['prefix'];
+        $name = trim($_POST['blogname'] ?? '');
+        $desc = trim($_POST['blogdescription'] ?? '');
+        $done = [];
+        if ($name !== '') { $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name='blogname'")->execute([$name]); $done[] = 'title'; }
+        // Tagline may legitimately be blank; only update when the field was submitted.
+        if (isset($_POST['blogdescription'])) { $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name='blogdescription'")->execute([$desc]); $done[] = 'tagline'; }
+        if (!$done) { echo json_encode(['ok' => false, 'error' => 'Nothing to update']); exit; }
+        echo json_encode(['ok' => true, 'updated' => $done]);
+        exit;
+    }
+
     // --- INSTALL PHPMYADMIN ---
     // Downloads the latest phpMyAdmin and extracts it into ./phpmyadmin. No config
     // is written; the user configures the connection on first access.
@@ -3549,6 +3647,29 @@ foreach ($php_cfg_rows as $r):
 <div id="tls_phpcfg_log" class="log" style="display:none"></div>
 </div>
 
+<div class="card" style="border-color:#1e3a2f">
+<h2>🔎 <?= h(t('SEO') ) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('Audit SEO basics (indexability, title/tagline, friendly permalinks, sitemap, robots.txt, HTTPS), edit the title and tagline, toggle indexing, generate a sitemap, request indexing and check if the site is indexed. Uses the DB connection configured above.')) ?>
+</p>
+<div class="actions" style="margin-bottom:14px">
+    <button id="tls_seo_btn" class="btn btn-primary" onclick="runSeoAudit()">🔎 <?= h(t('Run SEO Audit')) ?></button>
+</div>
+<div id="tls_seo_results" style="margin-bottom:14px"></div>
+
+<div style="background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:14px;margin-bottom:14px">
+    <div style="font-size:12px;color:#a0aec0;margin-bottom:8px"><?= h(t('Basic meta')) ?></div>
+    <div class="row">
+        <div class="field"><label><?= h(t('Site title')) ?></label><input type="text" id="seo_blogname"></div>
+        <div class="field"><label><?= h(t('Tagline')) ?></label><input type="text" id="seo_blogdescription"></div>
+    </div>
+    <button class="btn btn-sm btn-success" onclick="seoUpdateMeta()"><?= h(t('Save meta')) ?></button>
+</div>
+
+<div id="tls_seo_actions" style="display:none"></div>
+<div id="tls_seo_log" class="log" style="display:none"></div>
+</div>
+
 <div class="card" style="border-color:#7f1d1d44">
 <h2>🛡️ <?= h(t('Security Audit')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
@@ -4396,6 +4517,33 @@ async function runSecurityAudit() {
         else out.innerHTML = renderCategories(j.categories);
     } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
     btn.disabled = false; btn.textContent = '🛡️ Run Security Audit';
+}
+
+// --- SEO ---
+async function runSeoAudit() {
+    const btn = document.getElementById('tls_seo_btn');
+    const out = document.getElementById('tls_seo_results');
+    btn.disabled = true; btn.textContent = '⏳';
+    out.innerHTML = '<p style="color:#718096;font-size:13px;padding:8px 0">⏳ Running SEO checks…</p>';
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    try {
+        const r = await fetch('?action=seo_audit', {method:'POST', body:fd});
+        const j = await r.json();
+        if (!j.ok) { out.innerHTML = `<p style="color:#f87171">✗ ${j.error}</p>`; }
+        else out.innerHTML = renderCategories(j.categories);
+    } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ ${e.message}</p>`; }
+    btn.disabled = false; btn.textContent = '🔎 Run SEO Audit';
+}
+
+async function seoUpdateMeta() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('blogname', document.getElementById('seo_blogname').value);
+    fd.append('blogdescription', document.getElementById('seo_blogdescription').value);
+    const r = await fetch('?action=seo_update_meta', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_seo_log', j.ok ? `✓ Updated: ${j.updated.join(', ')}` : `✗ ${j.error}`, false);
 }
 
 // --- WordPress Extras ---
