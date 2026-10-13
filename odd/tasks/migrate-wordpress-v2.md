@@ -17,7 +17,10 @@ Delivered in phases, one commit per phase. Release at the end.
 - [~] P2: Full ES/EN i18n. Infra done (t(), $I18N, ?lang=/cookie/Accept-Language, EN/ES
       selector); auth screen + header converted. Strategy: each new phase ships bilingual;
       a final i18n pass converts remaining old sections (status, tabs, health check). -> 1.5.0
-- [ ] P3: WP user management (list/edit/change-password phpass/create). -> 1.6.0
+- [x] P3: WP user management. WpPasswordHash class (phpass $P$, WP-compatible, verified
+      against a real dump hash); endpoints wp_users_list / wp_user_password / wp_user_update /
+      wp_user_create; bilingual "WordPress Users" card + JS. Capabilities serialize matches real
+      dump format exactly. Bumped to 1.5.0 (absorbs the i18n infra bump).
 - [ ] P4: Security Audit (DB + files: weak passwords, admin default, WP version,
       default SALTs, file perms, XML-RPC, REST users, debug, prefix). -> 1.7.0
 - [ ] P5: phpMyAdmin installer (download+extract to /phpmyadmin) + WP extras. -> 1.8.0

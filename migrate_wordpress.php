@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.4.0');
+define('TOOL_VERSION',  '1.5.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -106,6 +106,21 @@ $GLOBALS['__I18N'] = [
         'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
         'Running on live server.'             => 'Ejecutándose en un servidor en producción.',
         'Delete this file after use!'         => '¡Eliminá este archivo después de usarlo!',
+        // WordPress Users
+        'WordPress Users'                     => 'Usuarios de WordPress',
+        'List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.'
+            => 'Listá usuarios de WordPress, cambiá contraseñas, editá datos o creá usuarios nuevos directamente en la base de datos. Útil cuando el panel de WP no es accesible tras una migración.',
+        'Load users'                          => 'Cargar usuarios',
+        'New user'                            => 'Usuario nuevo',
+        'Email'                               => 'Correo',
+        'Display name'                        => 'Nombre visible',
+        'Role'                                => 'Rol',
+        'Create user'                         => 'Crear usuario',
+        'Change password'                     => 'Cambiar contraseña',
+        'Edit'                                => 'Editar',
+        'Save'                                => 'Guardar',
+        'Registered'                          => 'Registrado',
+        'Username'                            => 'Usuario',
     ],
 ];
 
@@ -114,6 +129,72 @@ function t($key) {
     $lang = $GLOBALS['__LANG'] ?? 'en';
     if ($lang === 'en') return $key;
     return $GLOBALS['__I18N'][$lang][$key] ?? $key;
+}
+
+// ============================================================
+// WORDPRESS PASSWORD HASHING (phpass $P$ — WP-compatible)
+// ============================================================
+// Portable Phpass implementation matching WordPress' wp-includes/class-phpass.php.
+// WordPress upgrades the stored hash to bcrypt on the user's next login, so writing
+// a valid $P$ hash is enough for the credential to work immediately.
+class WpPasswordHash {
+    private $itoa64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    private $iteration_count_log2;
+    public function __construct($iteration_count_log2 = 8) {
+        if ($iteration_count_log2 < 4 || $iteration_count_log2 > 31) $iteration_count_log2 = 8;
+        $this->iteration_count_log2 = $iteration_count_log2;
+    }
+    private function encode64($input, $count) {
+        $output = ''; $i = 0;
+        do {
+            $value = ord($input[$i++]);
+            $output .= $this->itoa64[$value & 0x3f];
+            if ($i < $count) $value |= ord($input[$i]) << 8;
+            $output .= $this->itoa64[($value >> 6) & 0x3f];
+            if ($i++ >= $count) break;
+            if ($i < $count) $value |= ord($input[$i]) << 16;
+            $output .= $this->itoa64[($value >> 12) & 0x3f];
+            if ($i++ >= $count) break;
+            $output .= $this->itoa64[($value >> 18) & 0x3f];
+        } while ($i < $count);
+        return $output;
+    }
+    private function gensalt($input) {
+        $output  = '$P$';
+        $output .= $this->itoa64[min($this->iteration_count_log2 + 5, 30)];
+        $output .= $this->encode64($input, 6);
+        return $output;
+    }
+    public function crypt($password, $setting) {
+        $output = '*0';
+        if (substr($setting, 0, 2) === $output) $output = '*1';
+        $id = substr($setting, 0, 3);
+        if ($id !== '$P$' && $id !== '$H$') return $output;
+        $count_log2 = strpos($this->itoa64, $setting[3]);
+        if ($count_log2 < 7 || $count_log2 > 30) return $output;
+        $count = 1 << $count_log2;
+        $salt  = substr($setting, 4, 8);
+        if (strlen($salt) !== 8) return $output;
+        $hash = md5($salt . $password, true);
+        do { $hash = md5($hash . $password, true); } while (--$count);
+        return substr($setting, 0, 12) . $this->encode64($hash, 16);
+    }
+    public function hash($password) {
+        $hash = $this->crypt($password, $this->gensalt(random_bytes(6)));
+        return strlen($hash) === 34 ? $hash : '*';
+    }
+    public function check($password, $stored_hash) {
+        if ($stored_hash === '' || $stored_hash[0] !== '$') return false;
+        return hash_equals($stored_hash, $this->crypt($password, $stored_hash));
+    }
+}
+
+// WordPress role → user_level map (for the deprecated-but-still-present user_level meta).
+function wp_role_level($role) {
+    return [
+        'administrator' => 10, 'editor' => 7, 'author' => 2,
+        'contributor'   => 1,  'subscriber' => 0,
+    ][$role] ?? 0;
 }
 
 // ============================================================
@@ -1865,6 +1946,137 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- WORDPRESS USERS: shared connection helper ---
+    $wp_users_db = function () use ($db) {
+        return [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+    };
+
+    // --- LIST WP USERS ---
+    if ($action === 'wp_users_list') {
+        $u_db = $wp_users_db();
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $rows = $pdo->query("SELECT ID, user_login, user_email, display_name, user_registered FROM `{$prefix}users` ORDER BY ID")->fetchAll(PDO::FETCH_ASSOC);
+        // Roles come from usermeta `{prefix}capabilities` (serialized array of role=>bool).
+        $users = [];
+        foreach ($rows as $row) {
+            $cap = $pdo->prepare("SELECT meta_value FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = ? LIMIT 1");
+            $cap->execute([$row['ID'], $prefix . 'capabilities']);
+            $caps = @unserialize((string)$cap->fetchColumn());
+            $roles = is_array($caps) ? array_keys(array_filter($caps)) : [];
+            $users[] = [
+                'id'         => (int)$row['ID'],
+                'login'      => $row['user_login'],
+                'email'      => $row['user_email'],
+                'display'    => $row['display_name'],
+                'registered' => $row['user_registered'],
+                'roles'      => $roles,
+            ];
+        }
+        echo json_encode(['ok' => true, 'users' => $users, 'count' => count($users)]);
+        exit;
+    }
+
+    // --- CHANGE WP USER PASSWORD (phpass $P$) ---
+    if ($action === 'wp_user_password') {
+        $u_db = $wp_users_db();
+        $id = (int)($_POST['user_id'] ?? 0);
+        $pw = (string)($_POST['new_password'] ?? '');
+        if ($id <= 0)            { echo json_encode(['ok' => false, 'error' => 'Invalid user id']); exit; }
+        if (strlen($pw) < 6)     { echo json_encode(['ok' => false, 'error' => 'Password too short (min 6)']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $hash = (new WpPasswordHash(8))->hash($pw);
+        if (strlen($hash) !== 34) { echo json_encode(['ok' => false, 'error' => 'Hashing failed']); exit; }
+        $upd = $pdo->prepare("UPDATE `{$prefix}users` SET user_pass = ? WHERE ID = ?");
+        $upd->execute([$hash, $id]);
+        // Invalidate any stored session tokens so the new password takes effect.
+        $pdo->prepare("DELETE FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = 'session_tokens'")->execute([$id]);
+        echo json_encode(['ok' => true, 'affected' => $upd->rowCount()]);
+        exit;
+    }
+
+    // --- UPDATE WP USER (email / display_name / role) ---
+    if ($action === 'wp_user_update') {
+        $u_db = $wp_users_db();
+        $id      = (int)($_POST['user_id'] ?? 0);
+        $email   = trim($_POST['email'] ?? '');
+        $display = trim($_POST['display_name'] ?? '');
+        $role    = $_POST['role'] ?? '';
+        $valid_roles = ['administrator','editor','author','contributor','subscriber'];
+        if ($id <= 0)                                   { echo json_encode(['ok' => false, 'error' => 'Invalid user id']); exit; }
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) { echo json_encode(['ok' => false, 'error' => 'Invalid email']); exit; }
+        if ($role !== '' && !in_array($role, $valid_roles, true)) { echo json_encode(['ok' => false, 'error' => 'Invalid role']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $sets = []; $vals = [];
+        if ($email   !== '') { $sets[] = 'user_email = ?';  $vals[] = $email; }
+        if ($display !== '') { $sets[] = 'display_name = ?'; $vals[] = $display; }
+        if ($sets) {
+            $vals[] = $id;
+            $pdo->prepare("UPDATE `{$prefix}users` SET " . implode(', ', $sets) . " WHERE ID = ?")->execute($vals);
+        }
+        if ($role !== '') {
+            $caps = serialize([$role => true]);
+            foreach ([['capabilities', $caps], ['user_level', (string)wp_role_level($role)]] as $meta) {
+                [$key, $value] = $meta;
+                $mk  = $prefix . $key;
+                $sel = $pdo->prepare("SELECT umeta_id FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = ? LIMIT 1");
+                $sel->execute([$id, $mk]);
+                if ($sel->fetchColumn()) {
+                    $pdo->prepare("UPDATE `{$prefix}usermeta` SET meta_value = ? WHERE user_id = ? AND meta_key = ?")->execute([$value, $id, $mk]);
+                } else {
+                    $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")->execute([$id, $mk, $value]);
+                }
+            }
+        }
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // --- CREATE WP USER ---
+    if ($action === 'wp_user_create') {
+        $u_db = $wp_users_db();
+        $login   = trim($_POST['login'] ?? '');
+        $email   = trim($_POST['email'] ?? '');
+        $display = trim($_POST['display_name'] ?? '') ?: $login;
+        $pw      = (string)($_POST['new_password'] ?? '');
+        $role    = $_POST['role'] ?? 'subscriber';
+        $valid_roles = ['administrator','editor','author','contributor','subscriber'];
+        if ($login === '')                              { echo json_encode(['ok' => false, 'error' => 'Login required']); exit; }
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) { echo json_encode(['ok' => false, 'error' => 'Invalid email']); exit; }
+        if (strlen($pw) < 6)                            { echo json_encode(['ok' => false, 'error' => 'Password too short (min 6)']); exit; }
+        if (!in_array($role, $valid_roles, true))       { echo json_encode(['ok' => false, 'error' => 'Invalid role']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        // Reject duplicate login/email.
+        $dup = $pdo->prepare("SELECT ID FROM `{$prefix}users` WHERE user_login = ? OR user_email = ? LIMIT 1");
+        $dup->execute([$login, $email]);
+        if ($dup->fetchColumn()) { echo json_encode(['ok' => false, 'error' => 'Login or email already exists']); exit; }
+        $hash     = (new WpPasswordHash(8))->hash($pw);
+        $nicename = preg_replace('/[^a-z0-9-]+/', '-', strtolower($login));
+        $ins = $pdo->prepare("INSERT INTO `{$prefix}users` (user_login, user_pass, user_nicename, user_email, user_registered, display_name) VALUES (?, ?, ?, ?, NOW(), ?)");
+        $ins->execute([$login, $hash, $nicename, $email, $display]);
+        $new_id = (int)$pdo->lastInsertId();
+        $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")
+            ->execute([$new_id, $prefix . 'capabilities', serialize([$role => true])]);
+        $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")
+            ->execute([$new_id, $prefix . 'user_level', (string)wp_role_level($role)]);
+        echo json_encode(['ok' => true, 'id' => $new_id]);
+        exit;
+    }
+
     // --- UPDATE PHP CONFIG ---
     if ($action === 'update_php_config') {
         $root    = rtrim($abspath, '/');
@@ -2735,6 +2947,40 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 </div>
 
 <div class="card">
+<h2>👤 <?= h(t('WordPress Users')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.')) ?>
+</p>
+<div class="actions" style="margin-bottom:16px">
+    <button class="btn btn-primary" onclick="loadWpUsers()">🔍 <?= h(t('Load users')) ?></button>
+    <button id="tls_user_new_btn" class="btn btn-success" style="display:none" onclick="toggleNewUserForm()">➕ <?= h(t('New user')) ?></button>
+</div>
+<div id="tls_newuser_form" style="display:none;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:14px;margin-bottom:14px">
+    <div class="row">
+        <div class="field"><label><?= h(t('Username')) ?></label><input type="text" id="nu_login"></div>
+        <div class="field"><label><?= h(t('Email')) ?></label><input type="email" id="nu_email"></div>
+    </div>
+    <div class="row">
+        <div class="field"><label><?= h(t('Display name')) ?></label><input type="text" id="nu_display"></div>
+        <div class="field"><label><?= h(t('Password')) ?></label><input type="text" id="nu_pass"></div>
+    </div>
+    <div class="row">
+        <div class="field"><label><?= h(t('Role')) ?></label>
+            <select id="nu_role" style="width:100%;padding:8px 12px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;color:#e2e8f0">
+                <option value="administrator">Administrator</option>
+                <option value="editor">Editor</option>
+                <option value="author">Author</option>
+                <option value="contributor">Contributor</option>
+                <option value="subscriber" selected>Subscriber</option>
+            </select></div>
+        <div class="field"><label>&nbsp;</label><button class="btn btn-success" style="margin-top:0" onclick="createWpUser()"><?= h(t('Create user')) ?></button></div>
+    </div>
+</div>
+<div id="tls_users_list"></div>
+<div id="tls_users_log" class="log" style="display:none"></div>
+</div>
+
+<div class="card">
 <h2>🔌 Plugin Manager</h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Lists all installed plugins and lets you activate or deactivate them directly in the database.
@@ -3250,6 +3496,93 @@ async function fixDomains() {
     } else {
         log('tls_domains_log', `✗ ${j.error}`, false);
     }
+}
+
+// --- WordPress Users ---
+const WP_ROLES = ['administrator','editor','author','contributor','subscriber'];
+const T_USERS = {
+    change_pw: <?= json_encode(t('Change password')) ?>,
+    edit:      <?= json_encode(t('Edit')) ?>,
+    save:      <?= json_encode(t('Save')) ?>,
+    username:  <?= json_encode(t('Username')) ?>,
+    email:     <?= json_encode(t('Email')) ?>,
+    display:   <?= json_encode(t('Display name')) ?>,
+    role:      <?= json_encode(t('Role')) ?>,
+    registered:<?= json_encode(t('Registered')) ?>,
+    newpw:     <?= json_encode(t('New password')) ?>,
+};
+
+function toggleNewUserForm() {
+    const f = document.getElementById('tls_newuser_form');
+    f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+async function loadWpUsers() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const el = document.getElementById('tls_users_list');
+    el.innerHTML = '<span style="color:#718096;font-size:13px">⏳</span>';
+    const r = await fetch('?action=wp_users_list', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { el.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    document.getElementById('tls_user_new_btn').style.display = 'inline-flex';
+    let html = '<table style="width:100%;font-size:13px;border-collapse:collapse">';
+    html += `<tr style="color:#718096;text-align:left"><th style="padding:6px">ID</th><th style="padding:6px">${T_USERS.username}</th><th style="padding:6px">${T_USERS.email}</th><th style="padding:6px">${T_USERS.role}</th><th style="padding:6px">${T_USERS.registered}</th><th style="padding:6px"></th></tr>`;
+    j.users.forEach(u => {
+        const roles = (u.roles || []).join(', ');
+        html += `<tr style="border-top:1px solid #2d3148">
+            <td style="padding:6px;color:#718096">${u.id}</td>
+            <td style="padding:6px;font-family:monospace">${esc(u.login)}</td>
+            <td style="padding:6px">${esc(u.email)}</td>
+            <td style="padding:6px"><span class="badge badge-ok">${esc(roles)}</span></td>
+            <td style="padding:6px;color:#718096">${esc((u.registered||'').substring(0,10))}</td>
+            <td style="padding:6px;text-align:right">
+                <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="editWpUser(${u.id},'${esc(u.email)}','${esc(u.display)}','${(u.roles||[])[0]||''}')">${T_USERS.edit}</button>
+                <button class="btn btn-sm btn-warning" onclick="changeWpUserPw(${u.id},'${esc(u.login)}')">${T_USERS.change_pw}</button>
+            </td></tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function changeWpUserPw(id, login) {
+    const pw = prompt(T_USERS.newpw + ' — ' + login);
+    if (!pw) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user_id', id); fd.append('new_password', pw);
+    const r = await fetch('?action=wp_user_password', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ #${id}: password changed` : `✗ ${j.error}`, false);
+}
+
+async function editWpUser(id, email, display, role) {
+    const newEmail = prompt(T_USERS.email, email); if (newEmail === null) return;
+    const newDisplay = prompt(T_USERS.display, display); if (newDisplay === null) return;
+    const newRole = prompt(T_USERS.role + ' (' + WP_ROLES.join('/') + ')', role); if (newRole === null) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user_id', id); fd.append('email', newEmail); fd.append('display_name', newDisplay); fd.append('role', newRole);
+    const r = await fetch('?action=wp_user_update', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ #${id}: updated` : `✗ ${j.error}`, false);
+    if (j.ok) loadWpUsers();
+}
+
+async function createWpUser() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('login', document.getElementById('nu_login').value);
+    fd.append('email', document.getElementById('nu_email').value);
+    fd.append('display_name', document.getElementById('nu_display').value);
+    fd.append('new_password', document.getElementById('nu_pass').value);
+    fd.append('role', document.getElementById('nu_role').value);
+    const r = await fetch('?action=wp_user_create', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ user created (#${j.id})` : `✗ ${j.error}`, false);
+    if (j.ok) { document.getElementById('tls_newuser_form').style.display='none'; loadWpUsers(); }
 }
 
 async function loadPlugins() {
