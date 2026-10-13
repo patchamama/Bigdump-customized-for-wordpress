@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.3.0');
+define('TOOL_VERSION',  '1.4.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -248,27 +248,50 @@ if (file_exists($config_file)) {
 $auth_error = '';
 $authenticated = isset($_SESSION['migrate_auth']) && $_SESSION['migrate_auth'] === true;
 
-// Primera ejecución: crear contraseña
-if (!$stored_hash && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_password'])) {
+// Access model:
+//  - If a custom password hash exists (.migrate_config), it is the only gate.
+//  - Otherwise, the gate is the wp-config DB_PASSWORD, so the tool is never open:
+//      * DB_PASSWORD set   -> enter by typing it.
+//      * DB_PASSWORD empty -> no password can be typed; the user MUST create a
+//        custom password first. This covers "root with no password" setups.
+//  - After entering, the user can set a custom encrypted password that then
+//    replaces the DB password as the gate.
+$db_pass          = (string)($db['pass'] ?? '');
+$db_pass_is_empty = ($db_pass === '');
+// Must bootstrap a custom password when there is no stored hash and the DB has none.
+$must_set_password = (!$stored_hash && $db_pass_is_empty);
+
+// Save a custom encrypted password. Required during bootstrap; also available
+// afterwards (from the authenticated UI) to set or rotate the gate password.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_password'])) {
+    $allowed = $must_set_password || $authenticated;
     $pw  = $_POST['new_password'] ?? '';
     $pw2 = $_POST['new_password2'] ?? '';
-    if (strlen($pw) < 8) {
+    if (!$allowed) {
+        $auth_error = 'Not allowed / Operación no permitida.';
+    } elseif (strlen($pw) < 8) {
         $auth_error = 'Password must be at least 8 characters / La contraseña debe tener al menos 8 caracteres.';
     } elseif ($pw !== $pw2) {
         $auth_error = 'Passwords do not match / Las contraseñas no coinciden.';
     } else {
         $hash = hash('sha256', AUTH_SALT . $pw);
         file_put_contents($config_file, json_encode(['password_hash' => $hash]));
-        $stored_hash = $hash;
+        @chmod($config_file, 0600);
+        $stored_hash       = $hash;
+        $must_set_password = false;
         $_SESSION['migrate_auth'] = true;
-        $authenticated = true;
+        $authenticated     = true;
     }
 }
 
-// Login
-if ($stored_hash && !$authenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
-    $pw = $_POST['password'] ?? '';
-    if (hash('sha256', AUTH_SALT . $pw) === $stored_hash) {
+// Login: accept the custom hash when present, else the wp-config DB password.
+if (!$authenticated && !$must_set_password
+    && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+    $pw = (string)($_POST['password'] ?? '');
+    $ok = $stored_hash
+        ? hash_equals($stored_hash, hash('sha256', AUTH_SALT . $pw))
+        : (!$db_pass_is_empty && hash_equals($db_pass, $pw));
+    if ($ok) {
         $_SESSION['migrate_auth'] = true;
         $authenticated = true;
     } else {
@@ -2243,22 +2266,42 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <div class="card">
 <h1>🔐 WP Migration Tool</h1>
 <p class="subtitle" style="margin-bottom:20px">
-    <?= $stored_hash ? 'Enter password to continue' : 'First run: create a password' ?>
+    <?php if ($must_set_password): ?>
+        Set a password to protect this tool / Definí una contraseña para proteger esta herramienta
+    <?php elseif ($stored_hash): ?>
+        Enter password to continue / Ingresá la contraseña para continuar
+    <?php else: ?>
+        Enter the database password from wp-config.php / Ingresá la contraseña de la base de datos definida en wp-config.php
+    <?php endif; ?>
 </p>
 <?php if ($auth_error): ?>
 <div class="alert alert-err"><?= h($auth_error) ?></div>
 <?php endif; ?>
 
-<?php if (!$stored_hash): ?>
+<?php if ($must_set_password): ?>
+<div class="alert alert-warn" style="text-align:left">
+    The database password in <code>wp-config.php</code> is empty, so the tool would be unprotected.
+    Create a password now — it is stored encrypted and required on every access.<br>
+    <span style="color:#a0aec0">La contraseña de la base de datos en wp-config.php está vacía. Creá una contraseña ahora;
+    se guarda cifrada y será obligatoria en cada acceso.</span>
+</div>
 <form method="POST">
-    <div class="field"><label>New password</label><input type="password" name="new_password" minlength="8" required autofocus></div>
-    <div class="field"><label>Confirm</label><input type="password" name="new_password2" minlength="8" required></div>
-    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center">Create password</button>
+    <div class="field"><label>New password / Nueva contraseña</label><input type="password" name="new_password" minlength="8" required autofocus></div>
+    <div class="field"><label>Confirm / Confirmar</label><input type="password" name="new_password2" minlength="8" required></div>
+    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center">Create password / Crear contraseña</button>
 </form>
 <?php else: ?>
+<?php if (!$stored_hash): ?>
+<div class="alert" style="text-align:left;background:#1e2235;color:#a0aec0;border:1px solid #2d3148">
+    Use the database password defined in <code>wp-config.php</code> (<code>DB_PASSWORD</code>) to log in.
+    Once inside you can set your own encrypted password.<br>
+    <span>Usá la contraseña de la base de datos definida en wp-config.php (DB_PASSWORD). Una vez dentro
+    podés establecer tu propia contraseña cifrada.</span>
+</div>
+<?php endif; ?>
 <form method="POST">
-    <div class="field"><label>Password</label><input type="password" name="password" required autofocus></div>
-    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">Login</button>
+    <div class="field"><label>Password / Contraseña</label><input type="password" name="password" required autofocus></div>
+    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">Login / Entrar</button>
 </form>
 <?php endif; ?>
 </div>
@@ -2281,6 +2324,29 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <?php if (!is_localhost()): ?>
 <div class="alert alert-warn">⚠️ <strong>Running on live server.</strong> Delete this file after use!</div>
 <?php endif; ?>
+
+<!-- ACCESS PASSWORD -->
+<div class="card" style="border-color:#2d3148">
+<h2>🔑 Access Password / Contraseña de acceso</h2>
+<p style="font-size:12px;color:#718096;margin-bottom:12px">
+    <?php if ($stored_hash): ?>
+        Access is protected by a custom encrypted password. Set a new one below to rotate it.<br>
+        <span>El acceso está protegido por una contraseña cifrada propia. Definí una nueva abajo para rotarla.</span>
+    <?php else: ?>
+        Access currently uses the <code>wp-config.php</code> database password. Set a custom encrypted
+        password below to use that instead.<br>
+        <span>El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña
+        cifrada propia abajo para usar esa en su lugar.</span>
+    <?php endif; ?>
+</p>
+<form method="POST" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+    <div class="field" style="margin:0"><label><?= $stored_hash ? 'New password / Nueva contraseña' : 'Custom password / Contraseña propia' ?></label>
+        <input type="password" name="new_password" minlength="8" required style="width:200px"></div>
+    <div class="field" style="margin:0"><label>Confirm / Confirmar</label>
+        <input type="password" name="new_password2" minlength="8" required style="width:200px"></div>
+    <button type="submit" name="set_password" class="btn btn-primary"><?= $stored_hash ? 'Rotate / Rotar' : 'Set password / Establecer' ?></button>
+</form>
+</div>
 
 <?php if (!$wp_config_path): ?>
 <div class="card" style="border-color:#4f6ef7;background:#1a1d27">
