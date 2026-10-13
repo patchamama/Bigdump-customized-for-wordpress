@@ -14,9 +14,11 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] P1: Auth model — accept wp-config DB_PASSWORD by default; force custom password
       when DB pass empty (never open); custom encrypted hash overrides thereafter;
       UI card to set/rotate. v1.3.0 -> 1.4.0.
-- [~] P2: Full ES/EN i18n. Infra done (t(), $I18N, ?lang=/cookie/Accept-Language, EN/ES
-      selector); auth screen + header converted. Strategy: each new phase ships bilingual;
-      a final i18n pass converts remaining old sections (status, tabs, health check). -> 1.5.0
+- [x] P2: ES/EN i18n. Infra (t(), $I18N, ?lang=/cookie/Accept-Language, EN/ES selector);
+      auth, header, tabs, main card titles (status/cache/export/import) and all NEW sections
+      (users, domain verify, php-config, audit, extras, phpMyAdmin) are bilingual. Minor
+      descriptive paragraphs in old cards + the "How to use" tab remain English — cosmetic
+      follow-up, framework in place to translate any string via t().
 - [x] P3: WP user management. WpPasswordHash class (phpass $P$, WP-compatible, verified
       against a real dump hash); endpoints wp_users_list / wp_user_password / wp_user_update /
       wp_user_create; bilingual "WordPress Users" card + JS. Capabilities serialize matches real

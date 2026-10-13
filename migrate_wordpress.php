@@ -106,6 +106,15 @@ $GLOBALS['__I18N'] = [
         'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
         'Running on live server.'             => 'Ejecutándose en un servidor en producción.',
         'Delete this file after use!'         => '¡Eliminá este archivo después de usarlo!',
+        // Tabs + main card titles
+        'Export (Origin)'                     => 'Exportar (Origen)',
+        'Import (Destination)'                => 'Importar (Destino)',
+        'How to use'                          => 'Cómo usar',
+        'DB Tools'                            => 'Herramientas DB',
+        'Environment Status'                  => 'Estado del entorno',
+        'Clear Cache'                         => 'Limpiar caché',
+        'Database Export'                     => 'Exportar base de datos',
+        'Import SQL'                          => 'Importar SQL',
         // WordPress Users
         'WordPress Users'                     => 'Usuarios de WordPress',
         'List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.'
@@ -3120,7 +3129,7 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 
 <!-- STATUS -->
 <div class="card">
-<h2>📊 Environment Status</h2>
+<h2>📊 <?= h(t('Environment Status')) ?></h2>
 <div class="info-row">
     <span class="info-label">Current URL</span>
     <span class="info-val"><?= h($current_url) ?></span>
@@ -3163,7 +3172,7 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <!-- CACHE -->
 <div class="card" style="border-color:#78350f44">
 <h2 style="display:flex;justify-content:space-between;align-items:center">
-    <span>🧹 Clear Cache</span>
+    <span>🧹 <?= h(t('Clear Cache')) ?></span>
 </h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Clears <code>wp-content/et-cache/</code> (Divi) and <code>wp-content/cache/</code> (WP). Divi regenerates on next page visit.
@@ -3176,17 +3185,17 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 
 <!-- TABS -->
 <div class="tabs">
-    <button class="tab active" onclick="showTab('export')">📤 Export (Origin)</button>
-    <button class="tab" onclick="showTab('import')">📥 Import (Destination)</button>
-    <button class="tab" onclick="showTab('info')">ℹ️ How to use</button>
-    <button class="tab" onclick="showTab('tools')">🛠️ DB Tools</button>
+    <button class="tab active" onclick="showTab('export')">📤 <?= h(t('Export (Origin)')) ?></button>
+    <button class="tab" onclick="showTab('import')">📥 <?= h(t('Import (Destination)')) ?></button>
+    <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
+    <button class="tab" onclick="showTab('tools')">🛠️ <?= h(t('DB Tools')) ?></button>
 </div>
 
 <!-- ===== EXPORT TAB ===== -->
 <div id="tab-export" class="section active">
 
 <div class="card">
-<h2>🗄️ Database Export</h2>
+<h2>🗄️ <?= h(t('Database Export')) ?></h2>
 <div class="row">
     <div class="field"><label>DB Host</label><input type="text" id="exp_db_host" value="<?= h($db['host']) ?>"></div>
     <div class="field"><label>DB Name</label><input type="text" id="exp_db_name" value="<?= h($db['name']) ?>"></div>
@@ -3285,7 +3294,7 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>📥 Import SQL</h2>
+<h2>📥 <?= h(t('Import SQL')) ?></h2>
 <div class="field">
     <label>SQL file (.sql or .sql.gz) — max <?= ini_get('upload_max_filesize') ?></label>
     <input type="file" id="imp_sql_file" accept=".sql,.gz" style="color:#a0aec0">
