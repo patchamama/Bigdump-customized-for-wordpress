@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.3.0');
+define('TOOL_VERSION',  '1.7.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -58,6 +58,155 @@ if ($wp_config_path) {
         // ABSPATH viene del config — usamos __DIR__ mejor
     }
     $abspath = dirname($wp_config_path) . '/';
+}
+
+// ============================================================
+// I18N — bilingual UI (English / Spanish)
+// ============================================================
+// Language resolution order: ?lang= query → cookie → Accept-Language → default 'en'.
+if (isset($_GET['lang']) && in_array($_GET['lang'], ['en', 'es'], true)) {
+    $LANG = $_GET['lang'];
+    setcookie('migrate_lang', $LANG, time() + 31536000, '/');
+} elseif (isset($_COOKIE['migrate_lang']) && in_array($_COOKIE['migrate_lang'], ['en', 'es'], true)) {
+    $LANG = $_COOKIE['migrate_lang'];
+} else {
+    $al = strtolower(substr($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '', 0, 2));
+    $LANG = $al === 'es' ? 'es' : 'en';
+}
+
+// Translation dictionary. Keys are English phrases; 'es' holds the Spanish text.
+// Sections are filled progressively; t() falls back to the key when missing.
+$GLOBALS['__LANG'] = $LANG;
+$GLOBALS['__I18N'] = [
+    'es' => [
+        // Access / auth
+        'Set a password to protect this tool' => 'Definí una contraseña para proteger esta herramienta',
+        'Enter password to continue'          => 'Ingresá la contraseña para continuar',
+        'Enter the database password from wp-config.php' => 'Ingresá la contraseña de la base de datos definida en wp-config.php',
+        'Access Password'                     => 'Contraseña de acceso',
+        'Password'                            => 'Contraseña',
+        'New password'                        => 'Nueva contraseña',
+        'Custom password'                     => 'Contraseña propia',
+        'Confirm'                             => 'Confirmar',
+        'Login'                               => 'Entrar',
+        'Logout'                              => 'Salir',
+        'Create password'                     => 'Crear contraseña',
+        'Set password'                        => 'Establecer',
+        'Rotate'                              => 'Rotar',
+        'The database password in wp-config.php is empty, so the tool would be unprotected. Create a password now — it is stored encrypted and required on every access.'
+            => 'La contraseña de la base de datos en wp-config.php está vacía, por lo que la herramienta quedaría sin protección. Creá una contraseña ahora; se guarda cifrada y será obligatoria en cada acceso.',
+        'Use the database password defined in wp-config.php (DB_PASSWORD) to log in. Once inside you can set your own encrypted password.'
+            => 'Usá la contraseña de la base de datos definida en wp-config.php (DB_PASSWORD) para entrar. Una vez dentro podés establecer tu propia contraseña cifrada.',
+        'Access is protected by a custom encrypted password. Set a new one below to rotate it.'
+            => 'El acceso está protegido por una contraseña cifrada propia. Definí una nueva abajo para rotarla.',
+        'Access currently uses the wp-config.php database password. Set a custom encrypted password below to use that instead.'
+            => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
+        // Header
+        'Download tool'                       => 'Descargar herramienta',
+        'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
+        'Running on live server.'             => 'Ejecutándose en un servidor en producción.',
+        'Delete this file after use!'         => '¡Eliminá este archivo después de usarlo!',
+        // WordPress Users
+        'WordPress Users'                     => 'Usuarios de WordPress',
+        'List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.'
+            => 'Listá usuarios de WordPress, cambiá contraseñas, editá datos o creá usuarios nuevos directamente en la base de datos. Útil cuando el panel de WP no es accesible tras una migración.',
+        'Load users'                          => 'Cargar usuarios',
+        'New user'                            => 'Usuario nuevo',
+        'Email'                               => 'Correo',
+        'Display name'                        => 'Nombre visible',
+        'Role'                                => 'Rol',
+        'Create user'                         => 'Crear usuario',
+        'Change password'                     => 'Cambiar contraseña',
+        'Edit'                                => 'Editar',
+        'Save'                                => 'Guardar',
+        'Registered'                          => 'Registrado',
+        'Username'                            => 'Usuario',
+        // Domain Link Manager
+        'Verify'                              => 'Verificar',
+        'existing'                            => 'existente',
+        'final'                               => 'final',
+        'checking…'                           => 'verificando…',
+        // PHP Configuration
+        'Method'                              => 'Método',
+        'Auto-detect (test both)'             => 'Autodetectar (probar ambos)',
+        'Test runs the proposed config in an isolated temporary subfolder and loads it over HTTP. If it would break the site (HTTP 500) you are warned and Apply stays disabled; the test folder only affects itself, never the live site.'
+            => 'La prueba aplica la configuración propuesta en una subcarpeta temporal aislada y la carga por HTTP. Si rompería el sitio (HTTP 500) se te avisa y Aplicar queda deshabilitado; la carpeta de prueba solo se afecta a sí misma, nunca al sitio en producción.',
+        'Test safely'                         => 'Probar sin riesgo',
+        'Apply'                               => 'Aplicar',
+    ],
+];
+
+// Translate: returns the localized string for the current language, or the key.
+function t($key) {
+    $lang = $GLOBALS['__LANG'] ?? 'en';
+    if ($lang === 'en') return $key;
+    return $GLOBALS['__I18N'][$lang][$key] ?? $key;
+}
+
+// ============================================================
+// WORDPRESS PASSWORD HASHING (phpass $P$ — WP-compatible)
+// ============================================================
+// Portable Phpass implementation matching WordPress' wp-includes/class-phpass.php.
+// WordPress upgrades the stored hash to bcrypt on the user's next login, so writing
+// a valid $P$ hash is enough for the credential to work immediately.
+class WpPasswordHash {
+    private $itoa64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    private $iteration_count_log2;
+    public function __construct($iteration_count_log2 = 8) {
+        if ($iteration_count_log2 < 4 || $iteration_count_log2 > 31) $iteration_count_log2 = 8;
+        $this->iteration_count_log2 = $iteration_count_log2;
+    }
+    private function encode64($input, $count) {
+        $output = ''; $i = 0;
+        do {
+            $value = ord($input[$i++]);
+            $output .= $this->itoa64[$value & 0x3f];
+            if ($i < $count) $value |= ord($input[$i]) << 8;
+            $output .= $this->itoa64[($value >> 6) & 0x3f];
+            if ($i++ >= $count) break;
+            if ($i < $count) $value |= ord($input[$i]) << 16;
+            $output .= $this->itoa64[($value >> 12) & 0x3f];
+            if ($i++ >= $count) break;
+            $output .= $this->itoa64[($value >> 18) & 0x3f];
+        } while ($i < $count);
+        return $output;
+    }
+    private function gensalt($input) {
+        $output  = '$P$';
+        $output .= $this->itoa64[min($this->iteration_count_log2 + 5, 30)];
+        $output .= $this->encode64($input, 6);
+        return $output;
+    }
+    public function crypt($password, $setting) {
+        $output = '*0';
+        if (substr($setting, 0, 2) === $output) $output = '*1';
+        $id = substr($setting, 0, 3);
+        if ($id !== '$P$' && $id !== '$H$') return $output;
+        $count_log2 = strpos($this->itoa64, $setting[3]);
+        if ($count_log2 < 7 || $count_log2 > 30) return $output;
+        $count = 1 << $count_log2;
+        $salt  = substr($setting, 4, 8);
+        if (strlen($salt) !== 8) return $output;
+        $hash = md5($salt . $password, true);
+        do { $hash = md5($hash . $password, true); } while (--$count);
+        return substr($setting, 0, 12) . $this->encode64($hash, 16);
+    }
+    public function hash($password) {
+        $hash = $this->crypt($password, $this->gensalt(random_bytes(6)));
+        return strlen($hash) === 34 ? $hash : '*';
+    }
+    public function check($password, $stored_hash) {
+        if ($stored_hash === '' || $stored_hash[0] !== '$') return false;
+        return hash_equals($stored_hash, $this->crypt($password, $stored_hash));
+    }
+}
+
+// WordPress role → user_level map (for the deprecated-but-still-present user_level meta).
+function wp_role_level($role) {
+    return [
+        'administrator' => 10, 'editor' => 7, 'author' => 2,
+        'contributor'   => 1,  'subscriber' => 0,
+    ][$role] ?? 0;
 }
 
 // ============================================================
@@ -248,27 +397,50 @@ if (file_exists($config_file)) {
 $auth_error = '';
 $authenticated = isset($_SESSION['migrate_auth']) && $_SESSION['migrate_auth'] === true;
 
-// Primera ejecución: crear contraseña
-if (!$stored_hash && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_password'])) {
+// Access model:
+//  - If a custom password hash exists (.migrate_config), it is the only gate.
+//  - Otherwise, the gate is the wp-config DB_PASSWORD, so the tool is never open:
+//      * DB_PASSWORD set   -> enter by typing it.
+//      * DB_PASSWORD empty -> no password can be typed; the user MUST create a
+//        custom password first. This covers "root with no password" setups.
+//  - After entering, the user can set a custom encrypted password that then
+//    replaces the DB password as the gate.
+$db_pass          = (string)($db['pass'] ?? '');
+$db_pass_is_empty = ($db_pass === '');
+// Must bootstrap a custom password when there is no stored hash and the DB has none.
+$must_set_password = (!$stored_hash && $db_pass_is_empty);
+
+// Save a custom encrypted password. Required during bootstrap; also available
+// afterwards (from the authenticated UI) to set or rotate the gate password.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_password'])) {
+    $allowed = $must_set_password || $authenticated;
     $pw  = $_POST['new_password'] ?? '';
     $pw2 = $_POST['new_password2'] ?? '';
-    if (strlen($pw) < 8) {
+    if (!$allowed) {
+        $auth_error = 'Not allowed / Operación no permitida.';
+    } elseif (strlen($pw) < 8) {
         $auth_error = 'Password must be at least 8 characters / La contraseña debe tener al menos 8 caracteres.';
     } elseif ($pw !== $pw2) {
         $auth_error = 'Passwords do not match / Las contraseñas no coinciden.';
     } else {
         $hash = hash('sha256', AUTH_SALT . $pw);
         file_put_contents($config_file, json_encode(['password_hash' => $hash]));
-        $stored_hash = $hash;
+        @chmod($config_file, 0600);
+        $stored_hash       = $hash;
+        $must_set_password = false;
         $_SESSION['migrate_auth'] = true;
-        $authenticated = true;
+        $authenticated     = true;
     }
 }
 
-// Login
-if ($stored_hash && !$authenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
-    $pw = $_POST['password'] ?? '';
-    if (hash('sha256', AUTH_SALT . $pw) === $stored_hash) {
+// Login: accept the custom hash when present, else the wp-config DB password.
+if (!$authenticated && !$must_set_password
+    && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+    $pw = (string)($_POST['password'] ?? '');
+    $ok = $stored_hash
+        ? hash_equals($stored_hash, hash('sha256', AUTH_SALT . $pw))
+        : (!$db_pass_is_empty && hash_equals($db_pass, $pw));
+    if ($ok) {
         $_SESSION['migrate_auth'] = true;
         $authenticated = true;
     } else {
@@ -1567,6 +1739,50 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- VERIFY URLS (fast HEAD) ---
+    // Checks whether a small batch of URLs responds (2xx/3xx) within a short
+    // timeout, so the Domain Link Manager can show whether the rewritten target
+    // URL and the existing links actually resolve. Capped to avoid long scans.
+    if ($action === 'verify_url') {
+        $raw  = json_decode($_POST['urls'] ?? '', true);
+        $urls = is_array($raw) ? array_slice(array_values($raw), 0, 25) : [];
+        if (!$urls) { echo json_encode(['ok' => false, 'error' => 'No URLs provided']); exit; }
+
+        $check = function ($url) {
+            if (!preg_match('#^https?://#i', $url)) return ['status' => 0, 'ok' => false];
+            if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                    CURLOPT_NOBODY         => true,   // HEAD
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_TIMEOUT        => 5,
+                    CURLOPT_CONNECTTIMEOUT => 4,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_USERAGENT      => 'WP-Migration-Tool/verify',
+                    CURLOPT_RETURNTRANSFER => true,
+                ]);
+                curl_exec($ch);
+                $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                // curl_close() is a no-op since PHP 8.0 and deprecated in 8.5; the
+                // handle is freed when it goes out of scope.
+                unset($ch);
+                return ['status' => $code, 'ok' => ($code >= 200 && $code < 400)];
+            }
+            // Fallback: get_headers (needs allow_url_fopen).
+            $ctx = stream_context_create(['http' => ['method' => 'HEAD', 'timeout' => 5, 'ignore_errors' => true]]);
+            $hdr = @get_headers($url, true, $ctx);
+            if (!$hdr || !isset($hdr[0]) || !preg_match('#\s(\d{3})\s#', $hdr[0], $m)) return ['status' => 0, 'ok' => false];
+            $code = (int)$m[1];
+            return ['status' => $code, 'ok' => ($code >= 200 && $code < 400)];
+        };
+
+        $results = [];
+        foreach ($urls as $u) { $results[$u] = $check((string)$u); }
+        echo json_encode(['ok' => true, 'results' => $results]);
+        exit;
+    }
+
     // --- FIX LINKED DOMAINS ---
     // Rewrites every absolute URL of the selected domains to a root-relative path,
     // stripping scheme + host + an optional known subfolder. Serialized-safe.
@@ -1786,7 +2002,240 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- WORDPRESS USERS: shared connection helper ---
+    $wp_users_db = function () use ($db) {
+        return [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+    };
+
+    // --- LIST WP USERS ---
+    if ($action === 'wp_users_list') {
+        $u_db = $wp_users_db();
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $rows = $pdo->query("SELECT ID, user_login, user_email, display_name, user_registered FROM `{$prefix}users` ORDER BY ID")->fetchAll(PDO::FETCH_ASSOC);
+        // Roles come from usermeta `{prefix}capabilities` (serialized array of role=>bool).
+        $users = [];
+        foreach ($rows as $row) {
+            $cap = $pdo->prepare("SELECT meta_value FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = ? LIMIT 1");
+            $cap->execute([$row['ID'], $prefix . 'capabilities']);
+            $caps = @unserialize((string)$cap->fetchColumn());
+            $roles = is_array($caps) ? array_keys(array_filter($caps)) : [];
+            $users[] = [
+                'id'         => (int)$row['ID'],
+                'login'      => $row['user_login'],
+                'email'      => $row['user_email'],
+                'display'    => $row['display_name'],
+                'registered' => $row['user_registered'],
+                'roles'      => $roles,
+            ];
+        }
+        echo json_encode(['ok' => true, 'users' => $users, 'count' => count($users)]);
+        exit;
+    }
+
+    // --- CHANGE WP USER PASSWORD (phpass $P$) ---
+    if ($action === 'wp_user_password') {
+        $u_db = $wp_users_db();
+        $id = (int)($_POST['user_id'] ?? 0);
+        $pw = (string)($_POST['new_password'] ?? '');
+        if ($id <= 0)            { echo json_encode(['ok' => false, 'error' => 'Invalid user id']); exit; }
+        if (strlen($pw) < 6)     { echo json_encode(['ok' => false, 'error' => 'Password too short (min 6)']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $hash = (new WpPasswordHash(8))->hash($pw);
+        if (strlen($hash) !== 34) { echo json_encode(['ok' => false, 'error' => 'Hashing failed']); exit; }
+        $upd = $pdo->prepare("UPDATE `{$prefix}users` SET user_pass = ? WHERE ID = ?");
+        $upd->execute([$hash, $id]);
+        // Invalidate any stored session tokens so the new password takes effect.
+        $pdo->prepare("DELETE FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = 'session_tokens'")->execute([$id]);
+        echo json_encode(['ok' => true, 'affected' => $upd->rowCount()]);
+        exit;
+    }
+
+    // --- UPDATE WP USER (email / display_name / role) ---
+    if ($action === 'wp_user_update') {
+        $u_db = $wp_users_db();
+        $id      = (int)($_POST['user_id'] ?? 0);
+        $email   = trim($_POST['email'] ?? '');
+        $display = trim($_POST['display_name'] ?? '');
+        $role    = $_POST['role'] ?? '';
+        $valid_roles = ['administrator','editor','author','contributor','subscriber'];
+        if ($id <= 0)                                   { echo json_encode(['ok' => false, 'error' => 'Invalid user id']); exit; }
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) { echo json_encode(['ok' => false, 'error' => 'Invalid email']); exit; }
+        if ($role !== '' && !in_array($role, $valid_roles, true)) { echo json_encode(['ok' => false, 'error' => 'Invalid role']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        $sets = []; $vals = [];
+        if ($email   !== '') { $sets[] = 'user_email = ?';  $vals[] = $email; }
+        if ($display !== '') { $sets[] = 'display_name = ?'; $vals[] = $display; }
+        if ($sets) {
+            $vals[] = $id;
+            $pdo->prepare("UPDATE `{$prefix}users` SET " . implode(', ', $sets) . " WHERE ID = ?")->execute($vals);
+        }
+        if ($role !== '') {
+            $caps = serialize([$role => true]);
+            foreach ([['capabilities', $caps], ['user_level', (string)wp_role_level($role)]] as $meta) {
+                [$key, $value] = $meta;
+                $mk  = $prefix . $key;
+                $sel = $pdo->prepare("SELECT umeta_id FROM `{$prefix}usermeta` WHERE user_id = ? AND meta_key = ? LIMIT 1");
+                $sel->execute([$id, $mk]);
+                if ($sel->fetchColumn()) {
+                    $pdo->prepare("UPDATE `{$prefix}usermeta` SET meta_value = ? WHERE user_id = ? AND meta_key = ?")->execute([$value, $id, $mk]);
+                } else {
+                    $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")->execute([$id, $mk, $value]);
+                }
+            }
+        }
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // --- CREATE WP USER ---
+    if ($action === 'wp_user_create') {
+        $u_db = $wp_users_db();
+        $login   = trim($_POST['login'] ?? '');
+        $email   = trim($_POST['email'] ?? '');
+        $display = trim($_POST['display_name'] ?? '') ?: $login;
+        $pw      = (string)($_POST['new_password'] ?? '');
+        $role    = $_POST['role'] ?? 'subscriber';
+        $valid_roles = ['administrator','editor','author','contributor','subscriber'];
+        if ($login === '')                              { echo json_encode(['ok' => false, 'error' => 'Login required']); exit; }
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) { echo json_encode(['ok' => false, 'error' => 'Invalid email']); exit; }
+        if (strlen($pw) < 6)                            { echo json_encode(['ok' => false, 'error' => 'Password too short (min 6)']); exit; }
+        if (!in_array($role, $valid_roles, true))       { echo json_encode(['ok' => false, 'error' => 'Invalid role']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        // Reject duplicate login/email.
+        $dup = $pdo->prepare("SELECT ID FROM `{$prefix}users` WHERE user_login = ? OR user_email = ? LIMIT 1");
+        $dup->execute([$login, $email]);
+        if ($dup->fetchColumn()) { echo json_encode(['ok' => false, 'error' => 'Login or email already exists']); exit; }
+        $hash     = (new WpPasswordHash(8))->hash($pw);
+        $nicename = preg_replace('/[^a-z0-9-]+/', '-', strtolower($login));
+        $ins = $pdo->prepare("INSERT INTO `{$prefix}users` (user_login, user_pass, user_nicename, user_email, user_registered, display_name) VALUES (?, ?, ?, ?, NOW(), ?)");
+        $ins->execute([$login, $hash, $nicename, $email, $display]);
+        $new_id = (int)$pdo->lastInsertId();
+        $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")
+            ->execute([$new_id, $prefix . 'capabilities', serialize([$role => true])]);
+        $pdo->prepare("INSERT INTO `{$prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)")
+            ->execute([$new_id, $prefix . 'user_level', (string)wp_role_level($role)]);
+        echo json_encode(['ok' => true, 'id' => $new_id]);
+        exit;
+    }
+
     // --- UPDATE PHP CONFIG ---
+    // --- TEST PHP CONFIG IN AN ISOLATED SUBFOLDER ---
+    // Writes the proposed .htaccess / .user.ini into a throwaway subfolder with a
+    // probe script, requests the probe over HTTP, and reports whether the config
+    // loads (HTTP 200) or would break the site (HTTP 500), plus the effective
+    // values. The subfolder only affects itself, so the live site is never at risk.
+    if ($action === 'test_php_config') {
+        $root    = rtrim($abspath, '/');
+        $allowed = ['memory_limit', 'upload_max_filesize', 'post_max_size', 'max_execution_time', 'max_input_vars'];
+        $method  = in_array($_POST['method'] ?? '', ['htaccess', 'user_ini', 'auto'], true) ? $_POST['method'] : 'auto';
+
+        $settings = [];
+        foreach ($allowed as $k) {
+            $v = trim($_POST[$k] ?? '');
+            if ($v === '') continue;
+            if (!preg_match('/^\d+[KMGkmg]?$/', $v)) { echo json_encode(['ok' => false, 'error' => "Invalid value for $k: $v"]); exit; }
+            $settings[$k] = $v;
+        }
+        if (empty($settings)) { echo json_encode(['ok' => false, 'error' => 'No values provided']); exit; }
+
+        if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root is not writable; cannot create a test folder.']); exit; }
+
+        // Probe script: reports the effective ini values as JSON.
+        $probe = "<?php header('Content-Type: application/json'); \$k=" . var_export($allowed, true) . "; \$o=[]; foreach(\$k as \$x)\$o[\$x]=ini_get(\$x); echo json_encode(['probe_ok'=>true,'values'=>\$o]);";
+
+        // Base URL of the current script's directory, to reach the test folder over HTTP.
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $base  = rtrim(dirname($proto . '://' . $host . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+
+        $build_htaccess = function () use ($settings) {
+            $b = "# WP-Migrate PHP Config test\n";
+            foreach ($settings as $k => $v) { if ($k === 'max_input_vars') continue; $b .= "php_value $k $v\n"; }
+            return $b;
+        };
+        $build_userini = function () use ($settings) {
+            $b = "; WP-Migrate PHP Config test\n";
+            foreach ($settings as $k => $v) $b .= "$k = $v\n";
+            return $b;
+        };
+
+        // Run one isolated test for a given method; returns status + effective values.
+        $run_test = function ($use_htaccess, $use_userini) use ($root, $base, $probe, $build_htaccess, $build_userini, $settings) {
+            $dir = $root . '/_phpcfg_test_' . bin2hex(random_bytes(4));
+            if (!@mkdir($dir, 0755)) return ['ok' => false, 'error' => 'Could not create test folder'];
+            $cleanup = function () use ($dir) {
+                foreach (glob($dir . '/*') ?: [] as $f) @unlink($f);
+                foreach (glob($dir . '/.*') ?: [] as $f) { if (basename($f) !== '.' && basename($f) !== '..') @unlink($f); }
+                @rmdir($dir);
+            };
+            file_put_contents($dir . '/probe.php', $probe);
+            if ($use_htaccess) file_put_contents($dir . '/.htaccess', $build_htaccess());
+            if ($use_userini)  file_put_contents($dir . '/.user.ini', $build_userini());
+
+            $url = $base . '/' . basename($dir) . '/probe.php';
+            $status = 0; $body = '';
+            if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8, CURLOPT_CONNECTTIMEOUT => 5,
+                    CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false, CURLOPT_FOLLOWLOCATION => true]);
+                $body = (string)curl_exec($ch);
+                $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                unset($ch);
+            } else {
+                $ctx = stream_context_create(['http' => ['timeout' => 8, 'ignore_errors' => true]]);
+                $body = (string)@file_get_contents($url, false, $ctx);
+                // PHP 8.5 deprecates the $http_response_header global; prefer the function.
+                $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+                if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+            }
+            $cleanup();
+
+            $breaks = ($status >= 500);
+            $values = null; $applied = null;
+            $decoded = json_decode($body, true);
+            if (is_array($decoded) && !empty($decoded['probe_ok'])) {
+                $values = $decoded['values'];
+                // Did the proposed values actually take effect in that folder?
+                $applied = [];
+                foreach ($settings as $k => $want) {
+                    $got = $values[$k] ?? '';
+                    $applied[$k] = ['want' => $want, 'got' => $got,
+                        'ok' => (strcasecmp(rtrim((string)$got, 'Bb'), rtrim((string)$want, 'Bb')) === 0)
+                             || ((int)$got === (int)$want && (int)$want > 0)];
+                }
+            }
+            return ['ok' => true, 'status' => $status, 'breaks' => $breaks,
+                    'loaded' => ($status >= 200 && $status < 400), 'values' => $values, 'applied' => $applied];
+        };
+
+        $report = [];
+        if ($method === 'htaccess' || $method === 'auto') $report['htaccess'] = $run_test(true, false);
+        if ($method === 'user_ini' || $method === 'auto') $report['user_ini'] = $run_test(false, true);
+
+        // Recommend a method: a loaded, non-breaking one (prefer the explicit choice).
+        $recommended = null;
+        foreach (['htaccess', 'user_ini'] as $mth) {
+            if (isset($report[$mth]) && $report[$mth]['loaded'] && !$report[$mth]['breaks']) { $recommended = $mth; break; }
+        }
+        echo json_encode(['ok' => true, 'method' => $method, 'report' => $report, 'recommended' => $recommended]);
+        exit;
+    }
+
     if ($action === 'update_php_config') {
         $root    = rtrim($abspath, '/');
         $allowed = ['memory_limit', 'upload_max_filesize', 'post_max_size', 'max_execution_time', 'max_input_vars'];
@@ -1801,39 +2250,48 @@ if ($authenticated && isset($_GET['action'])) {
         }
         if (empty($settings)) { echo json_encode(['ok' => false, 'error' => 'No values provided']); exit; }
 
+        // Which methods to write. Defaults to both for backward compatibility; the
+        // UI passes the method the isolated test validated so we don't write a
+        // config that would 500 the site.
+        $method = in_array($_POST['method'] ?? '', ['htaccess', 'user_ini', 'both'], true) ? $_POST['method'] : 'both';
+
         $written = []; $skipped = [];
         $ms = '# BEGIN WP-Migrate PHP Config'; $me = '# END WP-Migrate PHP Config';
 
         // .htaccess — all settings except max_input_vars
-        $htaccess = $root . '/.htaccess';
-        $ht_block = "$ms\n";
-        foreach ($settings as $k => $v) {
-            if ($k === 'max_input_vars') continue;
-            $ht_block .= "php_value $k $v\n";
+        if ($method === 'htaccess' || $method === 'both') {
+            $htaccess = $root . '/.htaccess';
+            $ht_block = "$ms\n";
+            foreach ($settings as $k => $v) {
+                if ($k === 'max_input_vars') continue;
+                $ht_block .= "php_value $k $v\n";
+            }
+            $ht_block .= "$me";
+            $ht_writable = (file_exists($htaccess) && is_writable($htaccess)) || (!file_exists($htaccess) && is_writable($root));
+            if ($ht_writable) {
+                $content = file_exists($htaccess) ? file_get_contents($htaccess) : '';
+                $content = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $content));
+                $content = $ht_block . ($content ? "\n\n" . $content : '');
+                file_put_contents($htaccess, $content);
+                $written[] = '.htaccess';
+            } else { $skipped[] = '.htaccess (not writable)'; }
         }
-        $ht_block .= "$me";
-        $ht_writable = (file_exists($htaccess) && is_writable($htaccess)) || (!file_exists($htaccess) && is_writable($root));
-        if ($ht_writable) {
-            $content = file_exists($htaccess) ? file_get_contents($htaccess) : '';
-            $content = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $content));
-            $content = $ht_block . ($content ? "\n\n" . $content : '');
-            file_put_contents($htaccess, $content);
-            $written[] = '.htaccess';
-        } else { $skipped[] = '.htaccess (not writable)'; }
 
-        // user.ini — all settings (PHP-FPM)
-        $user_ini = $root . '/user.ini';
-        $ini_block = "; WP-Migrate PHP Config\n";
-        foreach ($settings as $k => $v) $ini_block .= "$k = $v\n";
-        $ini_block .= "; END WP-Migrate PHP Config";
-        $ini_writable = (file_exists($user_ini) && is_writable($user_ini)) || (!file_exists($user_ini) && is_writable($root));
-        if ($ini_writable) {
-            $content = file_exists($user_ini) ? file_get_contents($user_ini) : '';
-            $content = trim(preg_replace('/; WP-Migrate PHP Config.*?; END WP-Migrate PHP Config/s', '', $content));
-            $content = $ini_block . ($content ? "\n\n" . $content : '');
-            file_put_contents($user_ini, $content);
-            $written[] = 'user.ini';
-        } else { $skipped[] = 'user.ini (not writable)'; }
+        // .user.ini — all settings (PHP-FPM/CGI). Correct filename is ".user.ini".
+        if ($method === 'user_ini' || $method === 'both') {
+            $user_ini = $root . '/.user.ini';
+            $ini_block = "; WP-Migrate PHP Config\n";
+            foreach ($settings as $k => $v) $ini_block .= "$k = $v\n";
+            $ini_block .= "; END WP-Migrate PHP Config";
+            $ini_writable = (file_exists($user_ini) && is_writable($user_ini)) || (!file_exists($user_ini) && is_writable($root));
+            if ($ini_writable) {
+                $content = file_exists($user_ini) ? file_get_contents($user_ini) : '';
+                $content = trim(preg_replace('/; WP-Migrate PHP Config.*?; END WP-Migrate PHP Config/s', '', $content));
+                $content = $ini_block . ($content ? "\n\n" . $content : '');
+                file_put_contents($user_ini, $content);
+                $written[] = '.user.ini';
+            } else { $skipped[] = '.user.ini (not writable)'; }
+        }
 
         echo json_encode(['ok' => !empty($written), 'written' => $written, 'skipped' => $skipped,
             'note' => 'Changes take effect on next request. Some hosts require server restart.']);
@@ -2095,7 +2553,7 @@ if ($authenticated && isset($_GET['action'])) {
             $fh = fopen($tmp_zip, 'wb');
             curl_setopt_array($ch, [CURLOPT_FILE => $fh, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 180]);
             curl_exec($ch); $cerr = curl_error($ch);
-            curl_close($ch); fclose($fh);
+            unset($ch); fclose($fh); // curl_close() deprecated in PHP 8.5 (no-op since 8.0)
             if (!$cerr && file_exists($tmp_zip) && filesize($tmp_zip) > 1000000) {
                 $downloaded = true; $dl_method = 'curl PHP';
             }
@@ -2243,22 +2701,36 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <div class="card">
 <h1>🔐 WP Migration Tool</h1>
 <p class="subtitle" style="margin-bottom:20px">
-    <?= $stored_hash ? 'Enter password to continue' : 'First run: create a password' ?>
+    <?php if ($must_set_password): ?>
+        <?= h(t('Set a password to protect this tool')) ?>
+    <?php elseif ($stored_hash): ?>
+        <?= h(t('Enter password to continue')) ?>
+    <?php else: ?>
+        <?= h(t('Enter the database password from wp-config.php')) ?>
+    <?php endif; ?>
 </p>
 <?php if ($auth_error): ?>
 <div class="alert alert-err"><?= h($auth_error) ?></div>
 <?php endif; ?>
 
-<?php if (!$stored_hash): ?>
+<?php if ($must_set_password): ?>
+<div class="alert alert-warn" style="text-align:left">
+    <?= h(t('The database password in wp-config.php is empty, so the tool would be unprotected. Create a password now — it is stored encrypted and required on every access.')) ?>
+</div>
 <form method="POST">
-    <div class="field"><label>New password</label><input type="password" name="new_password" minlength="8" required autofocus></div>
-    <div class="field"><label>Confirm</label><input type="password" name="new_password2" minlength="8" required></div>
-    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center">Create password</button>
+    <div class="field"><label><?= h(t('New password')) ?></label><input type="password" name="new_password" minlength="8" required autofocus></div>
+    <div class="field"><label><?= h(t('Confirm')) ?></label><input type="password" name="new_password2" minlength="8" required></div>
+    <button type="submit" name="set_password" class="btn btn-primary" style="width:100%;justify-content:center"><?= h(t('Create password')) ?></button>
 </form>
 <?php else: ?>
+<?php if (!$stored_hash): ?>
+<div class="alert" style="text-align:left;background:#1e2235;color:#a0aec0;border:1px solid #2d3148">
+    <?= h(t('Use the database password defined in wp-config.php (DB_PASSWORD) to log in. Once inside you can set your own encrypted password.')) ?>
+</div>
+<?php endif; ?>
 <form method="POST">
-    <div class="field"><label>Password</label><input type="password" name="password" required autofocus></div>
-    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">Login</button>
+    <div class="field"><label><?= h(t('Password')) ?></label><input type="password" name="password" required autofocus></div>
+    <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center"><?= h(t('Login')) ?></button>
 </form>
 <?php endif; ?>
 </div>
@@ -2270,17 +2742,40 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
 <div>
     <h1>🚀 WP Migration Tool <span style="font-size:13px;font-weight:400;color:#4f6ef7;margin-left:6px">v<?= TOOL_VERSION ?></span></h1>
-    <div class="subtitle">WordPress Migration · Export &amp; Import</div>
+    <div class="subtitle"><?= h(t('WordPress Migration · Export & Import')) ?></div>
 </div>
 <div style="display:flex;gap:8px;align-items:center">
-<a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ Download tool</a>
-<a href="?logout" class="btn btn-sm" style="background:#2d3148;color:#a0aec0">Logout</a>
+<span style="display:inline-flex;border:1px solid #2d3148;border-radius:6px;overflow:hidden;font-size:12px">
+    <a href="?lang=en" style="padding:5px 10px;text-decoration:none;<?= $LANG==='en'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">EN</a>
+    <a href="?lang=es" style="padding:5px 10px;text-decoration:none;<?= $LANG==='es'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">ES</a>
+</span>
+<a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ <?= h(t('Download tool')) ?></a>
+<a href="?logout" class="btn btn-sm" style="background:#2d3148;color:#a0aec0"><?= h(t('Logout')) ?></a>
 </div>
 </div>
 
 <?php if (!is_localhost()): ?>
-<div class="alert alert-warn">⚠️ <strong>Running on live server.</strong> Delete this file after use!</div>
+<div class="alert alert-warn">⚠️ <strong><?= h(t('Running on live server.')) ?></strong> <?= h(t('Delete this file after use!')) ?></div>
 <?php endif; ?>
+
+<!-- ACCESS PASSWORD -->
+<div class="card" style="border-color:#2d3148">
+<h2>🔑 <?= h(t('Access Password')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:12px">
+    <?php if ($stored_hash): ?>
+        <?= h(t('Access is protected by a custom encrypted password. Set a new one below to rotate it.')) ?>
+    <?php else: ?>
+        <?= h(t('Access currently uses the wp-config.php database password. Set a custom encrypted password below to use that instead.')) ?>
+    <?php endif; ?>
+</p>
+<form method="POST" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+    <div class="field" style="margin:0"><label><?= h($stored_hash ? t('New password') : t('Custom password')) ?></label>
+        <input type="password" name="new_password" minlength="8" required style="width:200px"></div>
+    <div class="field" style="margin:0"><label><?= h(t('Confirm')) ?></label>
+        <input type="password" name="new_password2" minlength="8" required style="width:200px"></div>
+    <button type="submit" name="set_password" class="btn btn-primary"><?= h($stored_hash ? t('Rotate') : t('Set password')) ?></button>
+</form>
+</div>
 
 <?php if (!$wp_config_path): ?>
 <div class="card" style="border-color:#4f6ef7;background:#1a1d27">
@@ -2619,6 +3114,40 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 </div>
 
 <div class="card">
+<h2>👤 <?= h(t('WordPress Users')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.')) ?>
+</p>
+<div class="actions" style="margin-bottom:16px">
+    <button class="btn btn-primary" onclick="loadWpUsers()">🔍 <?= h(t('Load users')) ?></button>
+    <button id="tls_user_new_btn" class="btn btn-success" style="display:none" onclick="toggleNewUserForm()">➕ <?= h(t('New user')) ?></button>
+</div>
+<div id="tls_newuser_form" style="display:none;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:14px;margin-bottom:14px">
+    <div class="row">
+        <div class="field"><label><?= h(t('Username')) ?></label><input type="text" id="nu_login"></div>
+        <div class="field"><label><?= h(t('Email')) ?></label><input type="email" id="nu_email"></div>
+    </div>
+    <div class="row">
+        <div class="field"><label><?= h(t('Display name')) ?></label><input type="text" id="nu_display"></div>
+        <div class="field"><label><?= h(t('Password')) ?></label><input type="text" id="nu_pass"></div>
+    </div>
+    <div class="row">
+        <div class="field"><label><?= h(t('Role')) ?></label>
+            <select id="nu_role" style="width:100%;padding:8px 12px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;color:#e2e8f0">
+                <option value="administrator">Administrator</option>
+                <option value="editor">Editor</option>
+                <option value="author">Author</option>
+                <option value="contributor">Contributor</option>
+                <option value="subscriber" selected>Subscriber</option>
+            </select></div>
+        <div class="field"><label>&nbsp;</label><button class="btn btn-success" style="margin-top:0" onclick="createWpUser()"><?= h(t('Create user')) ?></button></div>
+    </div>
+</div>
+<div id="tls_users_list"></div>
+<div id="tls_users_log" class="log" style="display:none"></div>
+</div>
+
+<div class="card">
 <h2>🔌 Plugin Manager</h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Lists all installed plugins and lets you activate or deactivate them directly in the database.
@@ -2669,9 +3198,23 @@ foreach ($php_cfg_rows as $r):
 <?php endforeach; ?>
 </tbody>
 </table>
-<div class="actions" style="margin-bottom:10px">
-    <button class="btn btn-primary" onclick="savePhpConfig()">💾 Save PHP Config</button>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+    <label style="font-size:12px;color:#a0aec0"><?= h(t('Method')) ?>:
+        <select id="phpcfg_method" style="padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px">
+            <option value="auto"><?= h(t('Auto-detect (test both)')) ?></option>
+            <option value="htaccess">.htaccess (Apache)</option>
+            <option value="user_ini">.user.ini (PHP-FPM/CGI)</option>
+        </select>
+    </label>
 </div>
+<p style="font-size:11px;color:#718096;margin-bottom:10px">
+    <?= h(t('Test runs the proposed config in an isolated temporary subfolder and loads it over HTTP. If it would break the site (HTTP 500) you are warned and Apply stays disabled; the test folder only affects itself, never the live site.')) ?>
+</p>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-warning" id="phpcfg_test_btn" onclick="testPhpConfig()">🧪 <?= h(t('Test safely')) ?></button>
+    <button class="btn btn-primary" id="phpcfg_apply_btn" onclick="savePhpConfig()" disabled style="opacity:.5;cursor:not-allowed">💾 <?= h(t('Apply')) ?></button>
+</div>
+<div id="tls_phpcfg_test"></div>
 <div id="tls_phpcfg_log" class="log" style="display:none"></div>
 </div>
 
@@ -3088,6 +3631,9 @@ async function scanDomains() {
         } else {
             vbadge = `<span class="badge badge-err" title="None of the probed files exist on disk — files may not be uploaded yet">⚠ 0/${d.checked} verified</span>`;
         }
+        // Build the final URL preview: the first sample link, with scheme+host
+        // (+strip) replaced by the current site, exactly as fixDomains would.
+        const finalUrl = domToFinalUrl(d.samples[0] || ('https://' + d.domain + '/'), d.strip);
         html += `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-bottom:1px solid #2d3148;font-size:13px">
             <input type="checkbox" class="tls-dom-cb" data-domain="${d.domain}" id="tls_dom_${i}" style="margin-top:3px">
             <div style="flex:1">
@@ -3099,14 +3645,66 @@ async function scanDomains() {
                 <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
                     <span style="color:#718096;font-size:11px">drop base path:</span>
                     <input type="text" class="tls-dom-strip" data-domain="${d.domain}" value="${d.strip}" placeholder="(none)"
+                        oninput="refreshFinalUrl(${i}, '${esc(d.domain)}')"
                         style="width:180px;padding:3px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px;font-family:monospace">
+                    <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="verifyDomainRow(${i}, '${esc(d.domain)}', '${esc(d.samples[0]||'')}')">${T_DOM.verify}</button>
                 </div>
-                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${sample}</div>` : ''}
+                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${T_DOM.existing}: ${sample} <span id="tls_dom_exist_${i}"></span></div>` : ''}
+                <div style="color:#6ee7b7;font-size:11px;font-family:monospace;margin-top:2px">${T_DOM.final}: <span id="tls_dom_final_${i}" data-sample="${esc(d.samples[0]||('https://'+d.domain+'/'))}">${esc(finalUrl)}</span> <span id="tls_dom_finalchk_${i}"></span></div>
             </div></div>`;
     });
     html += '</div>';
     el.innerHTML = html;
     document.getElementById('tls_dom_fix_btn').style.display = 'inline-flex';
+}
+
+// Translations for the Domain Link Manager row widgets.
+const T_DOM = {
+    verify:   <?= json_encode(t('Verify')) ?>,
+    existing: <?= json_encode(t('existing')) ?>,
+    final:    <?= json_encode(t('final')) ?>,
+    checking: <?= json_encode(t('checking…')) ?>,
+};
+
+// Convert an absolute sample URL of a legacy domain to the final URL under the
+// current site, dropping the given base path. Mirrors the server-side rewrite.
+function domToFinalUrl(sampleUrl, strip) {
+    const origin = window.location.origin; // scheme + current host (+port)
+    let m = sampleUrl.match(/^https?:\/\/[^\/]+(\/[^\s"'<>]*)?/i);
+    let path = m && m[1] ? m[1] : '/';
+    strip = (strip || '').trim();
+    if (strip) {
+        if (strip[0] !== '/') strip = '/' + strip;
+        strip = strip.replace(/\/+$/, '');
+        if (path === strip || path.indexOf(strip + '/') === 0) path = path.substring(strip.length);
+    }
+    if (!path) path = '/';
+    return origin + path;
+}
+
+function refreshFinalUrl(i, domain) {
+    const span  = document.getElementById('tls_dom_final_' + i);
+    const strip = document.querySelector(`.tls-dom-strip[data-domain="${domain}"]`).value;
+    span.textContent = domToFinalUrl(span.getAttribute('data-sample'), strip);
+    document.getElementById('tls_dom_finalchk_' + i).innerHTML = ''; // stale check cleared
+}
+
+async function verifyDomainRow(i, domain, sample) {
+    const finalSpan = document.getElementById('tls_dom_final_' + i);
+    const finalUrl  = finalSpan.textContent;
+    const existChk  = document.getElementById('tls_dom_exist_' + i);
+    const finalChk  = document.getElementById('tls_dom_finalchk_' + i);
+    finalChk.innerHTML = existChk.innerHTML = `<span style="color:#718096">${T_DOM.checking}</span>`;
+    const fd = new FormData();
+    fd.append('urls', JSON.stringify([finalUrl, sample].filter(Boolean)));
+    const r = await fetch('?action=verify_url', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { finalChk.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    const badge = res => res && res.ok
+        ? `<span class="badge badge-ok">✓ ${res.status}</span>`
+        : `<span class="badge badge-err">✗ ${res && res.status ? res.status : 'no reply'}</span>`;
+    finalChk.innerHTML = badge(j.results[finalUrl]);
+    if (sample && j.results[sample]) existChk.innerHTML = badge(j.results[sample]);
 }
 
 async function fixDomains() {
@@ -3134,6 +3732,93 @@ async function fixDomains() {
     } else {
         log('tls_domains_log', `✗ ${j.error}`, false);
     }
+}
+
+// --- WordPress Users ---
+const WP_ROLES = ['administrator','editor','author','contributor','subscriber'];
+const T_USERS = {
+    change_pw: <?= json_encode(t('Change password')) ?>,
+    edit:      <?= json_encode(t('Edit')) ?>,
+    save:      <?= json_encode(t('Save')) ?>,
+    username:  <?= json_encode(t('Username')) ?>,
+    email:     <?= json_encode(t('Email')) ?>,
+    display:   <?= json_encode(t('Display name')) ?>,
+    role:      <?= json_encode(t('Role')) ?>,
+    registered:<?= json_encode(t('Registered')) ?>,
+    newpw:     <?= json_encode(t('New password')) ?>,
+};
+
+function toggleNewUserForm() {
+    const f = document.getElementById('tls_newuser_form');
+    f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+async function loadWpUsers() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const el = document.getElementById('tls_users_list');
+    el.innerHTML = '<span style="color:#718096;font-size:13px">⏳</span>';
+    const r = await fetch('?action=wp_users_list', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { el.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    document.getElementById('tls_user_new_btn').style.display = 'inline-flex';
+    let html = '<table style="width:100%;font-size:13px;border-collapse:collapse">';
+    html += `<tr style="color:#718096;text-align:left"><th style="padding:6px">ID</th><th style="padding:6px">${T_USERS.username}</th><th style="padding:6px">${T_USERS.email}</th><th style="padding:6px">${T_USERS.role}</th><th style="padding:6px">${T_USERS.registered}</th><th style="padding:6px"></th></tr>`;
+    j.users.forEach(u => {
+        const roles = (u.roles || []).join(', ');
+        html += `<tr style="border-top:1px solid #2d3148">
+            <td style="padding:6px;color:#718096">${u.id}</td>
+            <td style="padding:6px;font-family:monospace">${esc(u.login)}</td>
+            <td style="padding:6px">${esc(u.email)}</td>
+            <td style="padding:6px"><span class="badge badge-ok">${esc(roles)}</span></td>
+            <td style="padding:6px;color:#718096">${esc((u.registered||'').substring(0,10))}</td>
+            <td style="padding:6px;text-align:right">
+                <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="editWpUser(${u.id},'${esc(u.email)}','${esc(u.display)}','${(u.roles||[])[0]||''}')">${T_USERS.edit}</button>
+                <button class="btn btn-sm btn-warning" onclick="changeWpUserPw(${u.id},'${esc(u.login)}')">${T_USERS.change_pw}</button>
+            </td></tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function changeWpUserPw(id, login) {
+    const pw = prompt(T_USERS.newpw + ' — ' + login);
+    if (!pw) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user_id', id); fd.append('new_password', pw);
+    const r = await fetch('?action=wp_user_password', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ #${id}: password changed` : `✗ ${j.error}`, false);
+}
+
+async function editWpUser(id, email, display, role) {
+    const newEmail = prompt(T_USERS.email, email); if (newEmail === null) return;
+    const newDisplay = prompt(T_USERS.display, display); if (newDisplay === null) return;
+    const newRole = prompt(T_USERS.role + ' (' + WP_ROLES.join('/') + ')', role); if (newRole === null) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user_id', id); fd.append('email', newEmail); fd.append('display_name', newDisplay); fd.append('role', newRole);
+    const r = await fetch('?action=wp_user_update', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ #${id}: updated` : `✗ ${j.error}`, false);
+    if (j.ok) loadWpUsers();
+}
+
+async function createWpUser() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('login', document.getElementById('nu_login').value);
+    fd.append('email', document.getElementById('nu_email').value);
+    fd.append('display_name', document.getElementById('nu_display').value);
+    fd.append('new_password', document.getElementById('nu_pass').value);
+    fd.append('role', document.getElementById('nu_role').value);
+    const r = await fetch('?action=wp_user_create', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_users_log', j.ok ? `✓ user created (#${j.id})` : `✗ ${j.error}`, false);
+    if (j.ok) { document.getElementById('tls_newuser_form').style.display='none'; loadWpUsers(); }
 }
 
 async function loadPlugins() {
@@ -3181,23 +3866,87 @@ async function deactivateAllPlugins() {
     }
 }
 
-async function savePhpConfig() {
-    const keys = ['memory_limit','upload_max_filesize','post_max_size','max_execution_time','max_input_vars'];
-    const fd = new FormData();
-    let hasVal = false;
-    keys.forEach(k => {
+const PHPCFG_KEYS = ['memory_limit','upload_max_filesize','post_max_size','max_execution_time','max_input_vars'];
+let PHPCFG_VALIDATED_METHOD = null; // method proven safe by the last test
+
+function phpcfgValues() {
+    const fd = new FormData(); let hasVal = false;
+    PHPCFG_KEYS.forEach(k => {
         const v = document.getElementById('phpcfg_' + k)?.value.trim();
         if (v) { fd.append(k, v); hasVal = true; }
     });
+    return { fd, hasVal };
+}
+
+function phpcfgDisableApply() {
+    PHPCFG_VALIDATED_METHOD = null;
+    const b = document.getElementById('phpcfg_apply_btn');
+    b.disabled = true; b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+}
+// Re-test required whenever a value or the method changes.
+document.addEventListener('input', e => { if (e.target && e.target.id && e.target.id.indexOf('phpcfg_') === 0) phpcfgDisableApply(); });
+
+async function testPhpConfig() {
+    const { fd, hasVal } = phpcfgValues();
     if (!hasVal) { log('tls_phpcfg_log', '✗ Enter at least one value'); return; }
-    log('tls_phpcfg_log', '⏳ Saving…');
+    const method = document.getElementById('phpcfg_method').value;
+    fd.append('method', method);
+    const box = document.getElementById('tls_phpcfg_test');
+    box.innerHTML = '<span style="color:#718096;font-size:12px">🧪 Testing in isolated folder…</span>';
+    phpcfgDisableApply();
+    let j;
+    try {
+        const r = await fetch('?action=test_php_config', {method:'POST', body:fd});
+        j = await r.json();
+    } catch(e) { box.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok) { box.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+
+    let html = '<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px">';
+    const label = {htaccess: '.htaccess (Apache)', user_ini: '.user.ini (PHP-FPM/CGI)'};
+    for (const [mth, res] of Object.entries(j.report)) {
+        let verdict;
+        if (res.breaks) verdict = `<span class="badge badge-err">✗ HTTP ${res.status} — would break the site</span>`;
+        else if (res.loaded) verdict = `<span class="badge badge-ok">✓ HTTP ${res.status} — safe</span>`;
+        else verdict = `<span class="badge badge-warn">? HTTP ${res.status || 'no reply'}</span>`;
+        html += `<tr style="border-top:1px solid #2d3148"><td style="padding:5px 8px;font-family:monospace">${label[mth]||mth}</td><td style="padding:5px 8px">${verdict}</td></tr>`;
+        // Show whether the proposed values actually applied in the test folder.
+        if (res.applied) {
+            for (const [k, a] of Object.entries(res.applied)) {
+                const mark = a.ok ? '<span style="color:#6ee7b7">✓</span>' : '<span style="color:#fcd34d">≈</span>';
+                html += `<tr><td style="padding:2px 8px 2px 24px;color:#718096;font-family:monospace">${k}</td><td style="padding:2px 8px;color:#a0aec0">${mark} want ${a.want} / got ${esc(String(a.got))}</td></tr>`;
+            }
+        }
+    }
+    html += '</table>';
+    box.innerHTML = html;
+
+    if (j.recommended) {
+        PHPCFG_VALIDATED_METHOD = j.recommended;
+        // In auto mode, lock the selector choice to the method that passed.
+        const sel = document.getElementById('phpcfg_method');
+        if (sel.value === 'auto') sel.value = j.recommended;
+        const b = document.getElementById('phpcfg_apply_btn');
+        b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer';
+        log('tls_phpcfg_log', `✓ Safe via ${label[j.recommended]}. Apply enabled.`, false);
+    } else {
+        log('tls_phpcfg_log', '✗ No method passed the isolated test. Apply stays disabled to protect the site.', false);
+    }
+}
+
+async function savePhpConfig() {
+    if (!PHPCFG_VALIDATED_METHOD) { log('tls_phpcfg_log', '✗ Run a successful Test first.'); return; }
+    const { fd, hasVal } = phpcfgValues();
+    if (!hasVal) { log('tls_phpcfg_log', '✗ Enter at least one value'); return; }
+    fd.append('method', PHPCFG_VALIDATED_METHOD);
+    log('tls_phpcfg_log', '⏳ Applying…');
     try {
         const r = await fetch('?action=update_php_config', {method:'POST', body:fd});
         const j = await r.json();
         if (j.ok) {
-            log('tls_phpcfg_log', '✓ Saved to: ' + j.written.join(', '));
+            log('tls_phpcfg_log', '✓ Saved to: ' + j.written.join(', '), false);
             if (j.skipped?.length) log('tls_phpcfg_log', '⚠ Skipped: ' + j.skipped.join(', '));
             log('tls_phpcfg_log', 'ℹ ' + j.note);
+            phpcfgDisableApply();
         } else {
             log('tls_phpcfg_log', '✗ ' + j.error);
         }
