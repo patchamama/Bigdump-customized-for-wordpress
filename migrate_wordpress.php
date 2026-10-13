@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.1.0');
+define('TOOL_VERSION',  '1.2.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -124,6 +124,113 @@ function dir_size($dir) {
         foreach ($it as $f) { try { $size += $f->getSize(); } catch(Exception $e) {} }
     } catch(Exception $e) {}
     return $size;
+}
+
+// ------------------------------------------------------------
+// SQL SPLITTER — size-limited .zip parts
+// ------------------------------------------------------------
+// Reads a SQL file one logical statement at a time (respecting string literals
+// and escapes so ';' inside data never splits a statement) and groups full
+// statements into parts. Each part is written as a .zip whose COMPRESSED size
+// stays under $max_bytes. gzencode (same DEFLATE as zip) is used to measure the
+// compressed size cheaply before committing a part to a real .zip on disk.
+// Every part repeats a header (FK checks off, charset) so it imports standalone
+// and in order; the final part restores FK checks.
+function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
+    if (!is_file($sql_path)) return ['ok' => false, 'error' => 'SQL file not found for splitting'];
+    if (!class_exists('ZipArchive')) return ['ok' => false, 'error' => 'ZipArchive not available on this server'];
+
+    $header = "SET FOREIGN_KEY_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\nSET NAMES utf8mb4;\n\n";
+    $footer = "\nSET FOREIGN_KEY_CHECKS=1;\n";
+
+    $fh = fopen($sql_path, 'rb');
+    if (!$fh) return ['ok' => false, 'error' => 'Could not open SQL file'];
+
+    $parts      = [];       // committed part file paths
+    $part_index = 0;
+    $buffer     = $header;   // statements already committed to the current part
+    $in_part    = 0;         // statements in current part (beyond header)
+    $stmt       = '';        // statement being read
+    $in_string  = false;
+    $quote      = '';
+    $escaped    = false;
+
+    // Write $content as a .zip and return its real on-disk size (-1 on failure).
+    $write_zip = function ($content, $idx) use ($out_dir, $base_name) {
+        $part_path = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $idx);
+        $sql_entry = sprintf('%s_part_%03d.sql', $base_name, $idx);
+        $zip = new ZipArchive();
+        if ($zip->open($part_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) return [-1, $part_path];
+        $zip->addFromString($sql_entry, $content);
+        $zip->close();
+        clearstatcache(true, $part_path);
+        return [filesize($part_path), $part_path];
+    };
+
+    while (true) {
+        $line = fgets($fh, 1048576);
+        $eof  = ($line === false);
+        if (!$eof) {
+            $len = strlen($line);
+            for ($i = 0; $i < $len; $i++) {
+                $ch = $line[$i];
+                if ($in_string) {
+                    if ($escaped)           { $escaped = false; }
+                    elseif ($ch === '\\')   { $escaped = true; }
+                    elseif ($ch === $quote) { $in_string = false; }
+                } else {
+                    if ($ch === '\'' || $ch === '"') { $in_string = true; $quote = $ch; }
+                }
+            }
+            $stmt .= $line;
+            $trimmed = rtrim($line, "\r\n");
+            $stmt_complete = (!$in_string && $trimmed !== '' && substr($trimmed, -1) === ';');
+            if (!$stmt_complete) continue; // keep reading until the statement ends
+        }
+
+        // At EOF, flush any trailing non-terminated statement with the buffer.
+        if ($eof) { if (trim($stmt) !== '') { $buffer .= $stmt; $in_part++; $stmt = ''; } break; }
+
+        // We have one complete statement in $stmt. Measure the real .zip of
+        // buffer + this statement. If it exceeds the limit AND the part already
+        // holds at least one statement, commit the part WITHOUT this statement
+        // and start a fresh part. A single statement bigger than the limit forms
+        // its own (unavoidably oversized) part.
+        $candidate_content = $buffer . $stmt . $footer;
+        [$csize, ] = $write_zip($candidate_content, $part_index + 1);
+        if ($csize === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
+
+        if ($csize > $max_bytes && $in_part > 0) {
+            // Commit current buffer (without the new statement) as the part.
+            $part_index++;
+            [$sz, $path] = $write_zip($buffer . $footer, $part_index);
+            if ($sz === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
+            $parts[] = $path;
+            // Start new part with the pending statement.
+            $buffer  = $header . $stmt;
+            $in_part = 1;
+        } else {
+            $buffer .= $stmt;
+            $in_part++;
+        }
+        $stmt = '';
+    }
+
+    fclose($fh);
+
+    // Commit the final part (buffer always holds the header + remaining stmts).
+    if ($in_part > 0 || $buffer !== $header) {
+        $part_index++;
+        [$sz, $path] = $write_zip($buffer . $footer, $part_index);
+        if ($sz === -1) return ['ok' => false, 'error' => 'Failed writing the final zip part'];
+        $parts[] = $path;
+    }
+
+    // Clean up the probe file left at index+1 if it was never committed.
+    $probe = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $part_index + 1);
+    if (is_file($probe)) @unlink($probe);
+
+    return ['ok' => true, 'parts' => $parts, 'count' => count($parts)];
 }
 
 // ============================================================
@@ -756,6 +863,37 @@ if ($authenticated && isset($_GET['action'])) {
             file_put_contents($filepath, $content);
         }
 
+        // Split into size-limited .zip parts when requested. Each part is cut at a
+        // full-statement boundary and compressed to stay under the chosen limit.
+        $split      = !empty($_POST['split']) && $_POST['split'] !== '0';
+        $max_part_mb = (int)($_POST['max_part_size'] ?? 0);
+        if ($split && $max_part_mb >= 1 && $max_part_mb <= 10) {
+            $dl_token = bin2hex(random_bytes(6));
+            $base     = 'db_' . date('Ymd_His') . '_' . $dl_token;
+            $res = split_sql_to_zip_parts($filepath, $dl_dir, $base, $max_part_mb * 1024 * 1024);
+            @unlink($filepath); // raw .sql no longer needed
+            if (!$res['ok']) { echo json_encode(['ok' => false, 'error' => 'Split failed: ' . $res['error']]); exit; }
+            $parts = [];
+            foreach ($res['parts'] as $i => $p) {
+                $name = basename($p);
+                $parts[] = [
+                    'n'    => $i + 1,
+                    'name' => $name,
+                    'size' => human_size(filesize($p)),
+                    'url'  => basename(__FILE__) . '?action=download&token=' . $dl_token . '&file=' . urlencode($name),
+                ];
+            }
+            echo json_encode([
+                'ok'       => true,
+                'method'   => $method,
+                'split'    => true,
+                'count'    => $res['count'],
+                'max_mb'   => $max_part_mb,
+                'parts'    => $parts,
+            ]);
+            exit;
+        }
+
         // Comprimir a .gz
         $gz_ok = false;
         if (function_exists('gzopen')) {
@@ -950,7 +1088,7 @@ if ($authenticated && isset($_GET['action'])) {
         $server_sql = isset($_POST['server_file']) ? basename($_POST['server_file']) : '';
         if ($server_sql) {
             $server_sql_path = rtrim($abspath, '/') . '/' . $server_sql;
-            if (!file_exists($server_sql_path) || !preg_match('/\.(sql|sql\.gz|gz)$/i', $server_sql)) {
+            if (!file_exists($server_sql_path) || !preg_match('/\.(sql|sql\.gz|gz|zip)$/i', $server_sql)) {
                 echo json_encode(['ok' => false, 'error' => 'Server file not found or invalid.']);
                 exit;
             }
@@ -964,10 +1102,26 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Decomprimir si gz
+        // Decompress / extract to a plain .sql path.
         $sql_path = $tmp;
-        if (preg_match('/\.gz$/', $name) && function_exists('gzopen')) {
+        $tmp_sql  = null; // extracted temp file to clean up afterwards
+        if (preg_match('/\.zip$/i', $name)) {
+            if (!class_exists('ZipArchive')) { echo json_encode(['ok' => false, 'error' => 'ZipArchive not available to read .zip part.']); exit; }
+            $zip = new ZipArchive();
+            if ($zip->open($tmp) !== true) { echo json_encode(['ok' => false, 'error' => 'Could not open .zip file.']); exit; }
+            $entry = '';
+            for ($zi = 0; $zi < $zip->numFiles; $zi++) {
+                $zn = $zip->getNameIndex($zi);
+                if (preg_match('/\.sql$/i', $zn)) { $entry = $zn; break; }
+            }
+            if ($entry === '') { $zip->close(); echo json_encode(['ok' => false, 'error' => 'No .sql entry inside the .zip.']); exit; }
+            $tmp_sql = sys_get_temp_dir() . '/import_' . bin2hex(random_bytes(4)) . '.sql';
+            file_put_contents($tmp_sql, $zip->getFromName($entry));
+            $zip->close();
+            $sql_path = $tmp_sql;
+        } elseif (preg_match('/\.gz$/', $name) && function_exists('gzopen')) {
             $sql_path = $tmp . '.sql';
+            $tmp_sql  = $sql_path;
             $gz = gzopen($tmp, 'rb');
             $fh = fopen($sql_path, 'wb');
             while (!gzeof($gz)) fwrite($fh, gzread($gz, 65536));
@@ -2236,12 +2390,32 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 
 <div class="card">
 <h2>📦 Export Actions</h2>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;font-size:13px;color:#a0aec0">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="exp_split" onchange="document.getElementById('exp_split_size').disabled=!this.checked">
+        Split into size-limited <code>.zip</code> parts
+    </label>
+    <label style="display:flex;align-items:center;gap:6px">
+        max part size:
+        <select id="exp_split_size" disabled style="padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:13px">
+            <?php foreach ([1,2,3,4,5,6,7,8,9,10] as $mb): ?>
+            <option value="<?= $mb ?>"<?= $mb === 2 ? ' selected' : '' ?>><?= $mb ?> MB</option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+</div>
+<p style="font-size:11px;color:#718096;margin-bottom:12px">
+    Splitting cuts the dump at full SQL statement boundaries and compresses each part so every
+    <code>.zip</code> stays under the chosen size — import them in order (part 001, 002, …) on
+    hosts that reject large uploads. Each part imports standalone.
+</p>
 <div class="actions">
     <button class="btn btn-primary" onclick="exportDB()">🗄️ Export DB (.sql.gz)</button>
     <button class="btn btn-warning" onclick="exportZip()">📁 Export Hosting (.zip)</button>
 </div>
 <div id="exp_progress" style="display:none" class="progress"><div class="progress-bar" id="exp_progress_bar" style="width:0%"></div></div>
 <div id="exp_log" class="log" style="display:none"></div>
+<div id="exp_parts" style="display:none;margin-top:12px"></div>
 </div>
 
 </div><!-- /export -->
@@ -2613,7 +2787,14 @@ async function exportDB(){
     fd.append('source_url', document.getElementById('exp_source_url').value);
     fd.append('target_url', target);
 
-    log('exp_log','⏳ Exporting DB...', false);
+    const split = document.getElementById('exp_split').checked;
+    if (split) {
+        fd.append('split', '1');
+        fd.append('max_part_size', document.getElementById('exp_split_size').value);
+    }
+
+    document.getElementById('exp_parts').style.display = 'none';
+    log('exp_log', split ? '⏳ Exporting and splitting into .zip parts...' : '⏳ Exporting DB...', false);
     document.getElementById('exp_progress').style.display='block';
     document.getElementById('exp_progress_bar').style.width='30%';
 
@@ -2622,11 +2803,26 @@ async function exportDB(){
     const j = await r.json();
     document.getElementById('exp_progress_bar').style.width='100%';
 
-    if(j.ok){
+    if(!j.ok){ log('exp_log','✗ Error: '+j.error); return; }
+
+    if (j.split) {
+        const el = document.getElementById('exp_log');
+        el.innerHTML += `\n✓ DB exported via ${j.method} and split into ${j.count} part(s) under ${j.max_mb} MB each.\n`;
+        const box = document.getElementById('exp_parts');
+        let html = '<div style="font-size:13px;color:#a0aec0;margin-bottom:6px">Download each part and import in order:</div>';
+        html += '<table style="width:100%;font-size:13px;border-collapse:collapse">';
+        j.parts.forEach(p => {
+            html += `<tr style="border-bottom:1px solid #2d3148">
+                <td style="padding:6px 8px;color:#718096;width:48px">#${String(p.n).padStart(3,'0')}</td>
+                <td style="padding:6px 8px;font-family:monospace"><a href="${p.url}" style="color:#7dd3fc" target="_blank">${p.name}</a></td>
+                <td style="padding:6px 8px;text-align:right;color:#a0aec0">${p.size}</td></tr>`;
+        });
+        html += '</table>';
+        box.innerHTML = html;
+        box.style.display = 'block';
+    } else {
         const el = document.getElementById('exp_log');
         el.innerHTML += `\n✓ DB exported via ${j.method} — ${j.size}\n📥 <a href="${j.url}" style="color:#7dd3fc" target="_blank">${j.filename}</a>\n`;
-    } else {
-        log('exp_log','✗ Error: '+j.error);
     }
 }
 
