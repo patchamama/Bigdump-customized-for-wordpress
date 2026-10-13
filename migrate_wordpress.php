@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '1.0.3');
+define('TOOL_VERSION',  '1.3.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -124,6 +124,113 @@ function dir_size($dir) {
         foreach ($it as $f) { try { $size += $f->getSize(); } catch(Exception $e) {} }
     } catch(Exception $e) {}
     return $size;
+}
+
+// ------------------------------------------------------------
+// SQL SPLITTER — size-limited .zip parts
+// ------------------------------------------------------------
+// Reads a SQL file one logical statement at a time (respecting string literals
+// and escapes so ';' inside data never splits a statement) and groups full
+// statements into parts. Each part is written as a .zip whose COMPRESSED size
+// stays under $max_bytes. gzencode (same DEFLATE as zip) is used to measure the
+// compressed size cheaply before committing a part to a real .zip on disk.
+// Every part repeats a header (FK checks off, charset) so it imports standalone
+// and in order; the final part restores FK checks.
+function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
+    if (!is_file($sql_path)) return ['ok' => false, 'error' => 'SQL file not found for splitting'];
+    if (!class_exists('ZipArchive')) return ['ok' => false, 'error' => 'ZipArchive not available on this server'];
+
+    $header = "SET FOREIGN_KEY_CHECKS=0;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\nSET NAMES utf8mb4;\n\n";
+    $footer = "\nSET FOREIGN_KEY_CHECKS=1;\n";
+
+    $fh = fopen($sql_path, 'rb');
+    if (!$fh) return ['ok' => false, 'error' => 'Could not open SQL file'];
+
+    $parts      = [];       // committed part file paths
+    $part_index = 0;
+    $buffer     = $header;   // statements already committed to the current part
+    $in_part    = 0;         // statements in current part (beyond header)
+    $stmt       = '';        // statement being read
+    $in_string  = false;
+    $quote      = '';
+    $escaped    = false;
+
+    // Write $content as a .zip and return its real on-disk size (-1 on failure).
+    $write_zip = function ($content, $idx) use ($out_dir, $base_name) {
+        $part_path = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $idx);
+        $sql_entry = sprintf('%s_part_%03d.sql', $base_name, $idx);
+        $zip = new ZipArchive();
+        if ($zip->open($part_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) return [-1, $part_path];
+        $zip->addFromString($sql_entry, $content);
+        $zip->close();
+        clearstatcache(true, $part_path);
+        return [filesize($part_path), $part_path];
+    };
+
+    while (true) {
+        $line = fgets($fh, 1048576);
+        $eof  = ($line === false);
+        if (!$eof) {
+            $len = strlen($line);
+            for ($i = 0; $i < $len; $i++) {
+                $ch = $line[$i];
+                if ($in_string) {
+                    if ($escaped)           { $escaped = false; }
+                    elseif ($ch === '\\')   { $escaped = true; }
+                    elseif ($ch === $quote) { $in_string = false; }
+                } else {
+                    if ($ch === '\'' || $ch === '"') { $in_string = true; $quote = $ch; }
+                }
+            }
+            $stmt .= $line;
+            $trimmed = rtrim($line, "\r\n");
+            $stmt_complete = (!$in_string && $trimmed !== '' && substr($trimmed, -1) === ';');
+            if (!$stmt_complete) continue; // keep reading until the statement ends
+        }
+
+        // At EOF, flush any trailing non-terminated statement with the buffer.
+        if ($eof) { if (trim($stmt) !== '') { $buffer .= $stmt; $in_part++; $stmt = ''; } break; }
+
+        // We have one complete statement in $stmt. Measure the real .zip of
+        // buffer + this statement. If it exceeds the limit AND the part already
+        // holds at least one statement, commit the part WITHOUT this statement
+        // and start a fresh part. A single statement bigger than the limit forms
+        // its own (unavoidably oversized) part.
+        $candidate_content = $buffer . $stmt . $footer;
+        [$csize, ] = $write_zip($candidate_content, $part_index + 1);
+        if ($csize === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
+
+        if ($csize > $max_bytes && $in_part > 0) {
+            // Commit current buffer (without the new statement) as the part.
+            $part_index++;
+            [$sz, $path] = $write_zip($buffer . $footer, $part_index);
+            if ($sz === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
+            $parts[] = $path;
+            // Start new part with the pending statement.
+            $buffer  = $header . $stmt;
+            $in_part = 1;
+        } else {
+            $buffer .= $stmt;
+            $in_part++;
+        }
+        $stmt = '';
+    }
+
+    fclose($fh);
+
+    // Commit the final part (buffer always holds the header + remaining stmts).
+    if ($in_part > 0 || $buffer !== $header) {
+        $part_index++;
+        [$sz, $path] = $write_zip($buffer . $footer, $part_index);
+        if ($sz === -1) return ['ok' => false, 'error' => 'Failed writing the final zip part'];
+        $parts[] = $path;
+    }
+
+    // Clean up the probe file left at index+1 if it was never committed.
+    $probe = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $part_index + 1);
+    if (is_file($probe)) @unlink($probe);
+
+    return ['ok' => true, 'parts' => $parts, 'count' => count($parts)];
 }
 
 // ============================================================
@@ -756,6 +863,37 @@ if ($authenticated && isset($_GET['action'])) {
             file_put_contents($filepath, $content);
         }
 
+        // Split into size-limited .zip parts when requested. Each part is cut at a
+        // full-statement boundary and compressed to stay under the chosen limit.
+        $split      = !empty($_POST['split']) && $_POST['split'] !== '0';
+        $max_part_mb = (int)($_POST['max_part_size'] ?? 0);
+        if ($split && $max_part_mb >= 1 && $max_part_mb <= 10) {
+            $dl_token = bin2hex(random_bytes(6));
+            $base     = 'db_' . date('Ymd_His') . '_' . $dl_token;
+            $res = split_sql_to_zip_parts($filepath, $dl_dir, $base, $max_part_mb * 1024 * 1024);
+            @unlink($filepath); // raw .sql no longer needed
+            if (!$res['ok']) { echo json_encode(['ok' => false, 'error' => 'Split failed: ' . $res['error']]); exit; }
+            $parts = [];
+            foreach ($res['parts'] as $i => $p) {
+                $name = basename($p);
+                $parts[] = [
+                    'n'    => $i + 1,
+                    'name' => $name,
+                    'size' => human_size(filesize($p)),
+                    'url'  => basename(__FILE__) . '?action=download&token=' . $dl_token . '&file=' . urlencode($name),
+                ];
+            }
+            echo json_encode([
+                'ok'       => true,
+                'method'   => $method,
+                'split'    => true,
+                'count'    => $res['count'],
+                'max_mb'   => $max_part_mb,
+                'parts'    => $parts,
+            ]);
+            exit;
+        }
+
         // Comprimir a .gz
         $gz_ok = false;
         if (function_exists('gzopen')) {
@@ -950,7 +1088,7 @@ if ($authenticated && isset($_GET['action'])) {
         $server_sql = isset($_POST['server_file']) ? basename($_POST['server_file']) : '';
         if ($server_sql) {
             $server_sql_path = rtrim($abspath, '/') . '/' . $server_sql;
-            if (!file_exists($server_sql_path) || !preg_match('/\.(sql|sql\.gz|gz)$/i', $server_sql)) {
+            if (!file_exists($server_sql_path) || !preg_match('/\.(sql|sql\.gz|gz|zip)$/i', $server_sql)) {
                 echo json_encode(['ok' => false, 'error' => 'Server file not found or invalid.']);
                 exit;
             }
@@ -964,10 +1102,26 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Decomprimir si gz
+        // Decompress / extract to a plain .sql path.
         $sql_path = $tmp;
-        if (preg_match('/\.gz$/', $name) && function_exists('gzopen')) {
+        $tmp_sql  = null; // extracted temp file to clean up afterwards
+        if (preg_match('/\.zip$/i', $name)) {
+            if (!class_exists('ZipArchive')) { echo json_encode(['ok' => false, 'error' => 'ZipArchive not available to read .zip part.']); exit; }
+            $zip = new ZipArchive();
+            if ($zip->open($tmp) !== true) { echo json_encode(['ok' => false, 'error' => 'Could not open .zip file.']); exit; }
+            $entry = '';
+            for ($zi = 0; $zi < $zip->numFiles; $zi++) {
+                $zn = $zip->getNameIndex($zi);
+                if (preg_match('/\.sql$/i', $zn)) { $entry = $zn; break; }
+            }
+            if ($entry === '') { $zip->close(); echo json_encode(['ok' => false, 'error' => 'No .sql entry inside the .zip.']); exit; }
+            $tmp_sql = sys_get_temp_dir() . '/import_' . bin2hex(random_bytes(4)) . '.sql';
+            file_put_contents($tmp_sql, $zip->getFromName($entry));
+            $zip->close();
+            $sql_path = $tmp_sql;
+        } elseif (preg_match('/\.gz$/', $name) && function_exists('gzopen')) {
             $sql_path = $tmp . '.sql';
+            $tmp_sql  = $sql_path;
             $gz = gzopen($tmp, 'rb');
             $fh = fopen($sql_path, 'wb');
             while (!gzeof($gz)) fwrite($fh, gzread($gz, 65536));
@@ -1243,7 +1397,26 @@ if ($authenticated && isset($_GET['action'])) {
         $pdo     = $r['pdo'];
         $prefix  = $fix_db['prefix'];
         $like    = '%http%://%.%/wp-content%';
-        $pattern = '/https?:\/\/[^\/\s\'"<>]+\/wp-content\//i';
+        // Capture the full absolute asset URL so we can verify the target file
+        // exists on disk before rewriting it to a relative /wp-content/ path.
+        // Group 1 = everything from /wp-content/ onwards (the kept relative path).
+        $pattern = '#https?://[^/\s\'"<>]+(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
+        $root    = rtrim($abspath, '/');
+
+        // Rewrite only when the resulting relative path points to a real file.
+        // When it does not, leave the URL untouched and count it as unverified so
+        // we never create a relative link to a missing asset.
+        $unverified = 0;
+        $rewrite = function ($str) use ($pattern, $root, &$unverified) {
+            return preg_replace_callback($pattern, function ($m) use ($root, &$unverified) {
+                $rel = preg_replace('/[?#].*$/', '', $m[1]); // strip query/hash for the disk check
+                if (is_file($root . $rel)) {
+                    return $m[1]; // keep original query/hash by returning full captured path
+                }
+                $unverified++;
+                return $m[0]; // leave the absolute URL as-is
+            }, $str);
+        };
 
         $tables = [
             ['table' => $prefix . 'posts',    'col' => 'post_content', 'id' => 'ID'],
@@ -1263,15 +1436,15 @@ if ($authenticated && isset($_GET['action'])) {
                     // Fix serialized strings first (recalculate s:LENGTH)
                     $new = preg_replace_callback(
                         '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
-                        function($m) use ($pattern) {
-                            if (!preg_match($pattern, $m[2])) return $m[0];
-                            $str = preg_replace($pattern, '/wp-content/', $m[2]);
+                        function($m) use ($rewrite) {
+                            $str = $rewrite($m[2]);
+                            if ($str === $m[2]) return $m[0];
                             return 's:' . strlen($str) . ':"' . $str . '"';
                         },
                         $old
                     );
                     // Fix remaining plain occurrences
-                    $new = preg_replace($pattern, '/wp-content/', $new);
+                    $new = $rewrite($new);
                     if ($new !== $old) {
                         $upd = $pdo->prepare("UPDATE `{$t['table']}` SET `{$t['col']}` = ? WHERE `{$t['id']}` = ?");
                         if ($upd->execute([$new, $row[$t['id']]])) $updated++;
@@ -1281,7 +1454,222 @@ if ($authenticated && isset($_GET['action'])) {
             } catch (Exception $e) { $errors++; }
         }
 
-        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors]);
+        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors, 'unverified' => $unverified]);
+        exit;
+    }
+
+    // --- SCAN LINKED DOMAINS ---
+    // Aggregates every absolute http(s) domain linked in content, excluding the
+    // current host, so the user can decide which legacy/external domains to rewrite.
+    if ($action === 'scan_domains') {
+        $scan_db = [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($scan_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo    = $r['pdo'];
+        $prefix = $scan_db['prefix'];
+
+        // Current host (scheme-less, www-less) is excluded from the results.
+        $cur_host = preg_replace('#^www\.#', '', strtolower(parse_url(current_url(), PHP_URL_HOST) ?? ''));
+
+        $tables = [
+            ['table' => $prefix . 'posts',    'col' => 'post_content'],
+            ['table' => $prefix . 'postmeta', 'col' => 'meta_value'],
+            ['table' => $prefix . 'options',  'col' => 'option_value'],
+        ];
+        $url_rx = '#https?://([a-z0-9.-]+)(/[^\s"\'<>()\[\]\\\\]*)?#i';
+
+        $domains = []; // host => ['count'=>n, 'samples'=>[], 'asset_paths'=>[path=>true]]
+        foreach ($tables as $t) {
+            try {
+                $stmt = $pdo->query("SELECT `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE 'http%' OR `{$t['col']}` LIKE '%http%'");
+                while (($val = $stmt->fetchColumn()) !== false) {
+                    if (strpos($val, 'http') === false) continue;
+                    if (!preg_match_all($url_rx, $val, $m, PREG_SET_ORDER)) continue;
+                    foreach ($m as $hit) {
+                        $host = preg_replace('#^www\.#', '', strtolower($hit[1]));
+                        if ($host === '' || $host === $cur_host) continue;
+                        if (!isset($domains[$host])) $domains[$host] = ['count' => 0, 'samples' => [], 'asset_paths' => []];
+                        $domains[$host]['count']++;
+                        $path = $hit[2] ?? '';
+                        if (count($domains[$host]['samples']) < 3) {
+                            $full = rtrim($hit[0], '.,;)"\'');
+                            if (strlen($full) > 90) $full = substr($full, 0, 90) . '…';
+                            $domains[$host]['samples'][$full] = true;
+                        }
+                        // Keep a bounded set of paths that point to real files (have an
+                        // extension) so we can verify strip candidates on disk later.
+                        if ($path !== '' && count($domains[$host]['asset_paths']) < 300
+                            && preg_match('#\.[a-z0-9]{2,5}($|\?)#i', $path)) {
+                            $clean = preg_replace('/[?#].*$/', '', $path);
+                            $domains[$host]['asset_paths'][$clean] = true;
+                        }
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+
+        // For each domain, probe strip candidates and verify them on disk.
+        // A candidate is a leading path segment to drop (e.g. "/wordpress", "/test").
+        // We recommend the candidate that resolves the most existing files.
+        $root = rtrim($abspath, '/');
+        $recommend_strip = function (array $asset_paths) use ($root) {
+            if (!$asset_paths) return ['strip' => '', 'verified' => 0, 'checked' => 0];
+            $paths = array_keys($asset_paths);
+            // Build candidate strips: "" plus each distinct first segment, and
+            // first-two segments (covers nested like /old/site).
+            $cands = ['' => true];
+            foreach ($paths as $p) {
+                $seg = explode('/', ltrim($p, '/'));
+                if (isset($seg[0]) && $seg[0] !== '') $cands['/' . $seg[0]] = true;
+                if (isset($seg[1]) && $seg[1] !== '') $cands['/' . $seg[0] . '/' . $seg[1]] = true;
+            }
+            $sample = array_slice($paths, 0, 60); // bound disk hits
+            $best = ['strip' => '', 'verified' => 0, 'checked' => count($sample)];
+            foreach (array_keys($cands) as $strip) {
+                $hits = 0;
+                foreach ($sample as $p) {
+                    if ($strip !== '' && strpos($p, $strip . '/') !== 0 && $p !== $strip) continue;
+                    $rel = $strip !== '' ? substr($p, strlen($strip)) : $p;
+                    if ($rel === '' || $rel[0] !== '/') $rel = '/' . ltrim($rel, '/');
+                    if (is_file($root . $rel)) $hits++;
+                }
+                // Prefer more verified hits; tie-break favors a non-empty strip
+                // (removing a stale subfolder) only when it matches at least as well.
+                if ($hits > $best['verified'] || ($hits === $best['verified'] && $strip !== '' && $best['strip'] === '' && $hits > 0)) {
+                    $best = ['strip' => $strip, 'verified' => $hits, 'checked' => count($sample)];
+                }
+            }
+            return $best;
+        };
+
+        $out = [];
+        foreach ($domains as $host => $d) {
+            $rec = $recommend_strip($d['asset_paths']);
+            $out[] = [
+                'domain'        => $host,
+                'count'         => $d['count'],
+                'samples'       => array_keys($d['samples']),
+                'strip'         => $rec['strip'],        // recommended base-path to drop
+                'verified'      => $rec['verified'],     // files that exist on disk with this strip
+                'checked'       => $rec['checked'],      // asset paths probed
+            ];
+        }
+        usort($out, fn($a, $b) => $b['count'] <=> $a['count']);
+
+        echo json_encode(['ok' => true, 'current_host' => $cur_host, 'domains' => $out, 'total' => count($out)]);
+        exit;
+    }
+
+    // --- FIX LINKED DOMAINS ---
+    // Rewrites every absolute URL of the selected domains to a root-relative path,
+    // stripping scheme + host + an optional known subfolder. Serialized-safe.
+    if ($action === 'fix_domains') {
+        $fix_db = [
+            'host'    => $_POST['db_host']   ?? $db['host'],
+            'name'    => $_POST['db_name']   ?? $db['name'],
+            'user'    => $_POST['db_user']   ?? $db['user'],
+            'pass'    => $_POST['db_pass']   ?? $db['pass'],
+            'prefix'  => $_POST['db_prefix'] ?? $db['prefix'],
+            'charset' => 'utf8mb4',
+        ];
+        // Per-domain strip map: { "igs-bonn.de": "/wordpress", ... }.
+        // Legacy fallback: a plain "domains" CSV (no strip).
+        $map = json_decode($_POST['map'] ?? '', true);
+        if (!is_array($map) || !$map) {
+            $raw = trim($_POST['domains'] ?? '');
+            $map = [];
+            foreach (array_filter(array_map('trim', explode(',', $raw))) as $h) $map[$h] = '';
+        }
+        // Normalize keys (www-less, lowercase) and strips (leading slash, no trailing).
+        $strips   = [];
+        $selected = [];
+        foreach ($map as $host => $strip) {
+            $host = preg_replace('#^www\.#', '', strtolower(trim((string)$host)));
+            if ($host === '') continue;
+            $strip = trim((string)$strip);
+            if ($strip !== '') $strip = '/' . trim($strip, '/');
+            $strips[$host] = $strip;
+            $selected[]    = $host;
+        }
+        if (!$selected) { echo json_encode(['ok' => false, 'error' => 'No domains selected']); exit; }
+
+        $r = try_db_connect($fix_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo    = $r['pdo'];
+        $prefix = $fix_db['prefix'];
+
+        // Named capture per host so the rewrite can drop that host's own strip.
+        $alts = [];
+        $i    = 0;
+        $host_to_group = [];
+        foreach ($selected as $host) {
+            $g = 'h' . $i++;
+            $host_to_group[$g] = $host;
+            $alts[] = '(?<' . $g . '>' . preg_quote($host, '#') . ')';
+        }
+        // http(s)://[www.](one selected host)(/path)? → strip host + its base-path.
+        $pattern = '#https?://(?:www\.)?(?:' . implode('|', $alts) . ')(?<path>/[^\s"\'<>()\[\]\\\\]*)?#i';
+
+        $rewrite = function ($str) use ($pattern, $host_to_group, $strips) {
+            return preg_replace_callback($pattern, function ($m) use ($host_to_group, $strips) {
+                // Which host matched? Find the non-empty named group.
+                $strip = '';
+                foreach ($host_to_group as $g => $host) {
+                    if (isset($m[$g]) && $m[$g] !== '') { $strip = $strips[$host] ?? ''; break; }
+                }
+                $path = $m['path'] ?? '';
+                if ($strip !== '' && ($path === $strip || strpos($path, $strip . '/') === 0)) {
+                    $path = substr($path, strlen($strip));
+                }
+                return ($path !== '') ? $path : '/';
+            }, $str);
+        };
+
+        $tables = [
+            ['table' => $prefix . 'posts',    'col' => 'post_content', 'id' => 'ID'],
+            ['table' => $prefix . 'postmeta', 'col' => 'meta_value',   'id' => 'meta_id'],
+            ['table' => $prefix . 'options',  'col' => 'option_value', 'id' => 'option_id'],
+        ];
+        $like = '%http%';
+
+        $updated = 0;
+        $errors  = 0;
+        foreach ($tables as $t) {
+            try {
+                $stmt = $pdo->prepare("SELECT `{$t['id']}`, `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ?");
+                $stmt->execute([$like]);
+                while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                    $old = $row[$t['col']];
+                    if (!preg_match($pattern, $old)) continue;
+                    // Serialized strings first: rewrite inside, recalculate s:LENGTH.
+                    $new = preg_replace_callback(
+                        '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
+                        function ($m) use ($rewrite) {
+                            $str = $rewrite($m[2]);
+                            if ($str === $m[2]) return $m[0];
+                            return 's:' . strlen($str) . ':"' . $str . '"';
+                        },
+                        $old
+                    );
+                    // Remaining plain occurrences.
+                    $new = $rewrite($new);
+                    if ($new !== $old) {
+                        $upd = $pdo->prepare("UPDATE `{$t['table']}` SET `{$t['col']}` = ? WHERE `{$t['id']}` = ?");
+                        if ($upd->execute([$new, $row[$t['id']]])) $updated++;
+                        else $errors++;
+                    }
+                }
+            } catch (Exception $e) { $errors++; }
+        }
+
+        echo json_encode(['ok' => true, 'updated' => $updated, 'errors' => $errors, 'domains' => $selected]);
         exit;
     }
 
@@ -2021,12 +2409,32 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 
 <div class="card">
 <h2>📦 Export Actions</h2>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;font-size:13px;color:#a0aec0">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="exp_split" onchange="document.getElementById('exp_split_size').disabled=!this.checked">
+        Split into size-limited <code>.zip</code> parts
+    </label>
+    <label style="display:flex;align-items:center;gap:6px">
+        max part size:
+        <select id="exp_split_size" disabled style="padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:13px">
+            <?php foreach ([1,2,3,4,5,6,7,8,9,10] as $mb): ?>
+            <option value="<?= $mb ?>"<?= $mb === 2 ? ' selected' : '' ?>><?= $mb ?> MB</option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+</div>
+<p style="font-size:11px;color:#718096;margin-bottom:12px">
+    Splitting cuts the dump at full SQL statement boundaries and compresses each part so every
+    <code>.zip</code> stays under the chosen size — import them in order (part 001, 002, …) on
+    hosts that reject large uploads. Each part imports standalone.
+</p>
 <div class="actions">
     <button class="btn btn-primary" onclick="exportDB()">🗄️ Export DB (.sql.gz)</button>
     <button class="btn btn-warning" onclick="exportZip()">📁 Export Hosting (.zip)</button>
 </div>
 <div id="exp_progress" style="display:none" class="progress"><div class="progress-bar" id="exp_progress_bar" style="width:0%"></div></div>
 <div id="exp_log" class="log" style="display:none"></div>
+<div id="exp_parts" style="display:none;margin-top:12px"></div>
 </div>
 
 </div><!-- /export -->
@@ -2189,6 +2597,25 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
     <button id="tls_fix_btn" class="btn btn-danger" onclick="fixMediaUrls()" style="display:none">⚡ Fix — Convert to /wp-content/</button>
 </div>
 <div id="tls_media_log" class="log" style="display:none"></div>
+</div>
+
+<div class="card">
+<h2>🌍 Domain Link Manager</h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    Scans posts, postmeta and options for every absolute <code>http(s)://domain/</code> link,
+    excluding the current site. Review the list of linked domains with their counts and select the
+    ones to convert to root-relative <code>/path</code> links — useful to remove references to old
+    hostings (e.g. <code>igs-bonn.de/wordpress</code>) while keeping legitimate external links.
+    The base path to drop (e.g. the old <code>/wordpress</code> subfolder) is recommended by
+    verifying referenced files exist on disk, so you don't create links to missing files.
+    Serialized data is handled correctly.
+</p>
+<div class="actions" style="margin-bottom:12px">
+    <button class="btn btn-primary" onclick="scanDomains()">🔍 Scan DB for linked domains</button>
+    <button id="tls_dom_fix_btn" class="btn btn-danger" onclick="fixDomains()" style="display:none">⚡ Convert selected to relative</button>
+</div>
+<div id="tls_domains_list"></div>
+<div id="tls_domains_log" class="log" style="display:none"></div>
 </div>
 
 <div class="card">
@@ -2379,7 +2806,14 @@ async function exportDB(){
     fd.append('source_url', document.getElementById('exp_source_url').value);
     fd.append('target_url', target);
 
-    log('exp_log','⏳ Exporting DB...', false);
+    const split = document.getElementById('exp_split').checked;
+    if (split) {
+        fd.append('split', '1');
+        fd.append('max_part_size', document.getElementById('exp_split_size').value);
+    }
+
+    document.getElementById('exp_parts').style.display = 'none';
+    log('exp_log', split ? '⏳ Exporting and splitting into .zip parts...' : '⏳ Exporting DB...', false);
     document.getElementById('exp_progress').style.display='block';
     document.getElementById('exp_progress_bar').style.width='30%';
 
@@ -2388,11 +2822,26 @@ async function exportDB(){
     const j = await r.json();
     document.getElementById('exp_progress_bar').style.width='100%';
 
-    if(j.ok){
+    if(!j.ok){ log('exp_log','✗ Error: '+j.error); return; }
+
+    if (j.split) {
+        const el = document.getElementById('exp_log');
+        el.innerHTML += `\n✓ DB exported via ${j.method} and split into ${j.count} part(s) under ${j.max_mb} MB each.\n`;
+        const box = document.getElementById('exp_parts');
+        let html = '<div style="font-size:13px;color:#a0aec0;margin-bottom:6px">Download each part and import in order:</div>';
+        html += '<table style="width:100%;font-size:13px;border-collapse:collapse">';
+        j.parts.forEach(p => {
+            html += `<tr style="border-bottom:1px solid #2d3148">
+                <td style="padding:6px 8px;color:#718096;width:48px">#${String(p.n).padStart(3,'0')}</td>
+                <td style="padding:6px 8px;font-family:monospace"><a href="${p.url}" style="color:#7dd3fc" target="_blank">${p.name}</a></td>
+                <td style="padding:6px 8px;text-align:right;color:#a0aec0">${p.size}</td></tr>`;
+        });
+        html += '</table>';
+        box.innerHTML = html;
+        box.style.display = 'block';
+    } else {
         const el = document.getElementById('exp_log');
         el.innerHTML += `\n✓ DB exported via ${j.method} — ${j.size}\n📥 <a href="${j.url}" style="color:#7dd3fc" target="_blank">${j.filename}</a>\n`;
-    } else {
-        log('exp_log','✗ Error: '+j.error);
     }
 }
 
@@ -2603,10 +3052,87 @@ async function fixMediaUrls() {
     const r = await fetch('?action=fix_media_urls', {method:'POST', body:fd});
     const j = await r.json();
     if (j.ok) {
-        log('tls_media_log', `✓ Done. Updated ${j.updated} row(s).${j.errors ? `\n⚠ ${j.errors} error(s).` : ''}`, true);
+        let m = `✓ Done. Updated ${j.updated} row(s).`;
+        if (j.unverified) m += `\n⏭ Skipped ${j.unverified} URL(s): target file not found on disk (left absolute to avoid broken links).`;
+        if (j.errors) m += `\n⚠ ${j.errors} error(s).`;
+        log('tls_media_log', m, true);
         document.getElementById('tls_fix_btn').style.display = 'none';
     } else {
         log('tls_media_log', `✗ ${j.error}`, true);
+    }
+}
+
+async function scanDomains() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const el = document.getElementById('tls_domains_list');
+    el.innerHTML = '<span style="color:#718096;font-size:13px">⏳ Scanning linked domains...</span>';
+    document.getElementById('tls_dom_fix_btn').style.display = 'none';
+    const r = await fetch('?action=scan_domains', {method:'POST', body:fd});
+    const j = await r.json();
+    if (!j.ok) { el.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    if (!j.total) {
+        el.innerHTML = '<span style="color:#6ee7b7;font-size:13px">✓ No external domains linked. Database is clean.</span>';
+        return;
+    }
+    let html = `<p style="font-size:12px;color:#718096;margin-bottom:8px">Found <strong style="color:#e2e8f0">${j.total}</strong> linked domain(s) (current site <code>${j.current_host}</code> excluded). Check the ones to convert. The <em>base path to drop</em> is recommended from files verified on disk — edit it if needed:</p>`;
+    html += '<div style="max-height:360px;overflow-y:auto;border:1px solid #2d3148;border-radius:6px">';
+    j.domains.forEach((d, i) => {
+        const sample = d.samples.length ? d.samples[0].replace(/</g,'&lt;') : '';
+        // Disk-verification badge: green if the recommended strip resolves files.
+        let vbadge;
+        if (d.checked === 0) {
+            vbadge = `<span class="badge" style="background:#1e2235;color:#718096" title="No asset URLs to verify">no assets</span>`;
+        } else if (d.verified > 0) {
+            vbadge = `<span class="badge badge-ok" title="${d.verified} of ${d.checked} probed files exist on disk with this base path">✓ ${d.verified}/${d.checked} on disk</span>`;
+        } else {
+            vbadge = `<span class="badge badge-err" title="None of the probed files exist on disk — files may not be uploaded yet">⚠ 0/${d.checked} verified</span>`;
+        }
+        html += `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-bottom:1px solid #2d3148;font-size:13px">
+            <input type="checkbox" class="tls-dom-cb" data-domain="${d.domain}" id="tls_dom_${i}" style="margin-top:3px">
+            <div style="flex:1">
+                <label for="tls_dom_${i}" style="cursor:pointer">
+                    <span style="color:#e2e8f0;font-family:monospace">${d.domain}</span>
+                    <span class="badge badge-warn" style="margin-left:6px">${d.count} link(s)</span>
+                    <span style="margin-left:6px">${vbadge}</span>
+                </label>
+                <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
+                    <span style="color:#718096;font-size:11px">drop base path:</span>
+                    <input type="text" class="tls-dom-strip" data-domain="${d.domain}" value="${d.strip}" placeholder="(none)"
+                        style="width:180px;padding:3px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px;font-family:monospace">
+                </div>
+                ${sample ? `<div style="color:#4a5568;font-size:11px;font-family:monospace;margin-top:4px">${sample}</div>` : ''}
+            </div></div>`;
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    document.getElementById('tls_dom_fix_btn').style.display = 'inline-flex';
+}
+
+async function fixDomains() {
+    const checked = Array.from(document.querySelectorAll('.tls-dom-cb:checked'));
+    if (!checked.length) { alert('Select at least one domain to convert.'); return; }
+    // Build { domain: stripBasePath } from the selected rows.
+    const map = {};
+    checked.forEach(cb => {
+        const dom   = cb.getAttribute('data-domain');
+        const field = document.querySelector(`.tls-dom-strip[data-domain="${dom}"]`);
+        map[dom] = field ? field.value.trim() : '';
+    });
+    const summary = Object.entries(map).map(([d,s]) => s ? `${d}  (drop ${s})` : d).join('\n');
+    if (!confirm(`Convert all links of ${checked.length} domain(s) to root-relative /paths?\n\n${summary}\n\nThis modifies posts, postmeta and options. Make sure you have a DB backup.`)) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('map', JSON.stringify(map));
+    log('tls_domains_log', '⏳ Converting selected domains...', false);
+    const r = await fetch('?action=fix_domains', {method:'POST', body:fd});
+    const j = await r.json();
+    if (j.ok) {
+        log('tls_domains_log', `✓ Done. Updated ${j.updated} row(s) across ${j.domains.length} domain(s).${j.errors ? `\n⚠ ${j.errors} error(s).` : ''}`, false);
+        document.getElementById('tls_dom_fix_btn').style.display = 'none';
+        document.getElementById('tls_domains_list').innerHTML = '<span style="color:#6ee7b7;font-size:13px">✓ Re-scan to confirm the domains are gone.</span>';
+    } else {
+        log('tls_domains_log', `✗ ${j.error}`, false);
     }
 }
 
