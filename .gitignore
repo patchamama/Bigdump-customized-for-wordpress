@@ -13,6 +13,15 @@ bigdump.config.json
 
 # WordPress config — contains DB credentials
 wp-config.php
+wp-config_.php
+
+# Migration tool runtime state — contains the auth hash
+.migrate_config
+.migrate_exports/
+
+# Tooling / OS cruft
+.DS_Store
+.atl/
 
 # Temporary files
 *.tmp
