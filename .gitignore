@@ -29,3 +29,7 @@ _sitepass_test_*/
 # Temporary files
 *.tmp
 _autorec_test_*/
+_ht_test_*/
+_orphans-remove-it/
+_junk-remove-it/
+wp-content/_orphans-remove-it/

@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.8.0');
+define('TOOL_VERSION',  '3.9.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -248,6 +248,30 @@ $GLOBALS['__I18N'] = [
         'Not installing live.'                => 'No se instala en producción.',
         'loads fine in the sandbox'           => 'carga bien en el sandbox',
         '%s passed the test. Install it into the live site now?' => '%s pasó la prueba. ¿Instalarlo en el sitio real ahora?',
+        // Disk cleanup & Apache tests
+        'Disk cleanup & Apache capabilities'  => 'Limpieza de disco y capacidades de Apache',
+        'Orphan assets (on disk, not in the database)' => 'Archivos huérfanos (en disco, no en la base de datos)',
+        'Finds uploads not referenced anywhere in the database. They are moved to wp-content/_orphans-remove-it with a restore log (not deleted).'
+            => 'Encuentra archivos de uploads no referenciados en la base de datos. Se mueven a wp-content/_orphans-remove-it con un registro para restaurar (no se borran).',
+        'Scan orphans'                        => 'Buscar huérfanos',
+        'Move to pre-delete'                  => 'Mover a pre-borrado',
+        'Large / suspicious files'            => 'Archivos grandes / sospechosos',
+        'Finds logs, backups, archives and oversized files that are usually safe to remove. Moved to _junk-remove-it with a restore log.'
+            => 'Encuentra logs, copias, archivos comprimidos y archivos demasiado grandes que suelen ser seguros de eliminar. Se mueven a _junk-remove-it con un registro para restaurar.',
+        'Min size'                            => 'Tamaño mínimo',
+        'Scan files'                          => 'Buscar archivos',
+        'Move selected to pre-delete'         => 'Mover seleccionados a pre-borrado',
+        'Apache capability tests'             => 'Pruebas de capacidades de Apache',
+        'Tests which Apache/.htaccess features the host supports (rewrite, redirects, Basic auth, gzip, caching, headers) in isolated subfolders — never touching the live .htaccess.'
+            => 'Prueba qué funciones de Apache/.htaccess soporta el hosting (reescritura, redirecciones, autenticación Basic, gzip, caché, cabeceras) en subcarpetas aisladas — sin tocar el .htaccess real.',
+        'Run capability tests'                => 'Ejecutar pruebas de capacidades',
+        'orphans'                             => 'huérfanos',
+        'files'                               => 'archivos',
+        'file(s) moved to'                    => 'archivo(s) movidos a',
+        'Move orphan uploads to the pre-delete folder? Reversible via log.' => '¿Mover los uploads huérfanos a la carpeta de pre-borrado? Reversible mediante registro.',
+        'Move these files to the pre-delete folder? Reversible via log.' => '¿Mover estos archivos a la carpeta de pre-borrado? Reversible mediante registro.',
+        'Running Apache tests…'               => 'Ejecutando pruebas de Apache…',
+        'Only on Apache; the PHP dev server does not process .htaccess.' => 'Solo en Apache; el servidor de desarrollo PHP no procesa .htaccess.',
         'Vet in the sandbox before installing live.' => 'Evaluá en el sandbox antes de instalar en producción.',
         'Destroy the sandbox folder and its test tables?' => '¿Destruir la carpeta del sandbox y sus tablas de prueba?',
         'Clear Cache'                         => 'Limpiar caché',
@@ -3364,6 +3388,141 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- ADVANCED .htaccess / APACHE CAPABILITY TESTS (isolated subfolders) ---
+    // Writes each directive block into its own throwaway subfolder with a probe and
+    // requests it over HTTP, reporting which Apache features the host supports
+    // (never touching the live .htaccess). 500 = not supported; 2xx/expected = ok.
+    if ($action === 'htaccess_tests') {
+        @set_time_limit(120);
+        $root = rtrim($abspath, '/');
+        if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root not writable for test folders']); exit; }
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+
+        // Each test: name, the .htaccess body, the probe request path, and a checker.
+        $tests = [
+            ['mod_rewrite (pretty URLs)', "<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /%DIR%/\nRewriteRule ^go/(.*)$ ok.php?x=$1 [L]\n</IfModule>\n", 'go/hello', fn($s,$b)=>strpos($b,'OK:hello')!==false],
+            ['301 redirect (Redirect)', "Redirect 301 /%DIR%/old.html /%DIR%/ok.php\n", 'old.html', fn($s,$b)=>$s>=200&&$s<400&&strpos($b,'OK')!==false],
+            ['HTTP Basic auth', "AuthType Basic\nAuthName \"x\"\n<RequireAll>\nRequire valid-user\n</RequireAll>\n", 'ok.php', fn($s,$b)=>$s===401],
+            ['gzip/deflate (mod_deflate)', "<IfModule mod_deflate.c>\nAddOutputFilterByType DEFLATE text/plain text/html\n</IfModule>\n", 'ok.php', fn($s,$b,$h)=>$s>=200&&$s<400],
+            ['Expires/Cache headers (mod_expires)', "<IfModule mod_expires.c>\nExpiresActive On\nExpiresByType text/plain \"access plus 1 day\"\n</IfModule>\n", 'ok.php', fn($s,$b)=>$s>=200&&$s<400],
+            ['Custom headers (mod_headers)', "<IfModule mod_headers.c>\nHeader set X-WP-Migrate-Test \"1\"\n</IfModule>\n", 'ok.php', fn($s,$b,$h)=>stripos($h,'X-WP-Migrate-Test')!==false||($s>=200&&$s<400)],
+            ['Directory listing off (Options)', "Options -Indexes\n", 'ok.php', fn($s,$b)=>$s>=200&&$s<400],
+        ];
+        $get = function ($url) {
+            $status=0;$body='';$hdr='';
+            if (function_exists('curl_init')) {
+                $ch=curl_init($url); curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_HEADER=>true,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>false]);
+                $resp=(string)curl_exec($ch); $status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE); $hs=(int)curl_getinfo($ch,CURLINFO_HEADER_SIZE); unset($ch);
+                $hdr=substr($resp,0,$hs); $body=substr($resp,$hs);
+            }
+            return [$status,$body,$hdr];
+        };
+        $results = [];
+        foreach ($tests as [$name,$body_rules,$probe,$check]) {
+            $dir = $root . '/_ht_test_' . bin2hex(random_bytes(3));
+            if (!@mkdir($dir, 0755)) { $results[]=['name'=>$name,'status'=>0,'supported'=>false,'note'=>'cannot create test dir']; continue; }
+            $rules = str_replace('%DIR%', basename($dir), $body_rules);
+            file_put_contents($dir.'/.htaccess', $rules);
+            file_put_contents($dir.'/ok.php', "<?php echo 'OK:'.(\$_GET['x']??'');");
+            [$st,$bd,$hd] = $get($base.'/'.basename($dir).'/'.$probe);
+            $breaks = ($st>=500);
+            $supported = !$breaks && (bool)$check($st,$bd,$hd);
+            $results[] = ['name'=>$name,'status'=>$st,'supported'=>$supported,'breaks'=>$breaks];
+            foreach (glob($dir.'/{,.}*',GLOB_BRACE)?:[] as $f){ if(is_file($f))@unlink($f); } @rmdir($dir);
+        }
+        echo json_encode(['ok'=>true,'results'=>$results]);
+        exit;
+    }
+
+    // --- ORPHAN ASSETS: scan (files on disk NOT referenced in the DB) ---
+    if ($action === 'orphans_scan') {
+        @set_time_limit(0);
+        $o_db = $sandbox_db();
+        $r = try_db_connect($o_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $root = rtrim($abspath, '/'); $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($uploads)) { echo json_encode(['ok' => false, 'error' => 'uploads not found']); exit; }
+        [$used, $all, , $totalBytes] = $clean_collect($r['pdo'], $o_db['prefix'], $root);
+        $orphans = []; $orphanBytes = 0;
+        foreach ($all as $rel => $size) { if (!isset($used[$rel])) { $orphans[$rel] = $size; $orphanBytes += $size; } }
+        $preview = array_slice(array_keys($orphans), 0, 20);
+        echo json_encode(['ok'=>true,'total'=>count($all),'orphans'=>count($orphans),'orphan_size'=>human_size($orphanBytes),
+            'preview'=>$preview,'files'=>array_keys($orphans)]);
+        exit;
+    }
+
+    // --- ORPHAN ASSETS: quarantine (move to a pre-delete folder + restore log) ---
+    if ($action === 'orphans_quarantine') {
+        @set_time_limit(0);
+        $root = rtrim($abspath, '/'); $uploads = $root . '/wp-content/uploads';
+        $batch = json_decode($_POST['files'] ?? '', true); $batch = is_array($batch) ? array_slice($batch, 0, 500) : [];
+        if (!$batch) { echo json_encode(['ok' => false, 'error' => 'No files']); exit; }
+        $qdir = $root . '/wp-content/_orphans-remove-it';
+        @mkdir($qdir, 0755, true);
+        $moved = 0; $log = [];
+        foreach ($batch as $rel) {
+            $rel = ltrim(str_replace('\\','/',preg_replace('/[?#].*$/','',(string)$rel)),'/');
+            if ($rel === '' || strpos($rel,'..') !== false) continue;
+            $src = $uploads . '/' . $rel; $dst = $qdir . '/' . $rel;
+            if (!is_file($src)) continue;
+            @mkdir(dirname($dst), 0755, true);
+            if (@rename($src, $dst)) { $moved++; $log[] = ['from' => 'wp-content/uploads/'.$rel, 'to' => 'wp-content/_orphans-remove-it/'.$rel]; }
+        }
+        if ($log) { @file_put_contents($root.'/wp-content/.orphans-'.date('YmdHis').'.json', json_encode($log, JSON_PRETTY_PRINT)); }
+        echo json_encode(['ok'=>true,'moved'=>$moved,'folder'=>'wp-content/_orphans-remove-it']);
+        exit;
+    }
+
+    // --- JUNK FILES: scan large/suspicious files (logs, backups, archives) ---
+    if ($action === 'junk_scan') {
+        @set_time_limit(0);
+        $root = rtrim($abspath, '/');
+        $min = max(1, (int)($_POST['min_mb'] ?? 10)) * 1024 * 1024;
+        $junk = []; $totalBytes = 0;
+        // Suspicious by extension/name anywhere, plus any file over the size threshold.
+        $susp_rx = '/\.(log|bak|old|sql|sql\.gz|tar|tar\.gz|tgz|zip|tmp|swp|~)$|error_log$|debug\.log$/i';
+        try {
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $f) {
+                if (!$f->isFile()) continue;
+                $rel = str_replace('\\','/', ltrim(str_replace($root,'',$f->getPathname()),'/\\'));
+                if (strpos($rel, '.migrate_') === 0 || strpos($rel, '_orphans-remove-it') !== false || strpos($rel, 'uploads_old-remove-it') !== false) continue;
+                $size = $f->getSize();
+                $big = $size >= $min;
+                $sus = (bool)preg_match($susp_rx, $rel);
+                if ($big || $sus) {
+                    $junk[] = ['path' => $rel, 'size' => human_size($size), 'bytes' => $size, 'reason' => $sus ? ($big?'suspicious+large':'suspicious') : 'large'];
+                    $totalBytes += $size;
+                }
+                if (count($junk) >= 2000) break;
+            }
+        } catch (Exception $e) {}
+        usort($junk, fn($a,$b)=>$b['bytes']<=>$a['bytes']);
+        echo json_encode(['ok'=>true,'count'=>count($junk),'total_size'=>human_size($totalBytes),'files'=>array_slice($junk,0,500)]);
+        exit;
+    }
+
+    // --- JUNK FILES: quarantine (move to pre-delete + restore log) ---
+    if ($action === 'junk_quarantine') {
+        $root = rtrim($abspath, '/');
+        $batch = json_decode($_POST['files'] ?? '', true); $batch = is_array($batch) ? array_slice($batch, 0, 500) : [];
+        if (!$batch) { echo json_encode(['ok' => false, 'error' => 'No files']); exit; }
+        $qdir = $root . '/_junk-remove-it'; @mkdir($qdir, 0755, true);
+        $moved = 0; $log = [];
+        foreach ($batch as $rel) {
+            $rel = ltrim(str_replace('\\','/',(string)$rel),'/');
+            if ($rel === '' || strpos($rel,'..') !== false) continue;
+            $src = $root . '/' . $rel; $dst = $qdir . '/' . $rel;
+            if (!is_file($src)) continue;
+            @mkdir(dirname($dst), 0755, true);
+            if (@rename($src, $dst)) { $moved++; $log[] = ['from' => $rel, 'to' => '_junk-remove-it/'.$rel]; }
+        }
+        if ($log) { @file_put_contents($root.'/.junk-'.date('YmdHis').'.json', json_encode($log, JSON_PRETTY_PRINT)); }
+        echo json_encode(['ok'=>true,'moved'=>$moved,'folder'=>'_junk-remove-it']);
+        exit;
+    }
+
     // --- PLUGIN SEARCH (wordpress.org API) ---
     // Lets the user find a plugin to vet in the sandbox before installing it live.
     if ($action === 'plugin_search' || $action === 'plugin_popular') {
@@ -5926,6 +6085,41 @@ foreach ($php_cfg_rows as $r):
 <div id="te_log" class="log" style="display:none;margin-top:12px"></div>
 </div>
 
+<!-- DISK CLEANUP & APACHE TESTS -->
+<div class="card" style="border-color:#78350f44">
+<h2>🧽 <?= h(t('Disk cleanup & Apache capabilities')) ?></h2>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">🗑️ <?= h(t('Orphan assets (on disk, not in the database)')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Finds uploads not referenced anywhere in the database. They are moved to wp-content/_orphans-remove-it with a restore log (not deleted).')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" id="orph_btn" onclick="orphansScan()">📊 <?= h(t('Scan orphans')) ?></button>
+        <button class="btn btn-sm btn-danger" id="orph_q" onclick="orphansQuarantine()" style="display:none">🗑️ <?= h(t('Move to pre-delete')) ?></button></div>
+    <div id="orph_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">📦 <?= h(t('Large / suspicious files')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Finds logs, backups, archives and oversized files that are usually safe to remove. Moved to _junk-remove-it with a restore log.')) ?></div>
+    <div class="actions" style="align-items:center">
+        <label style="font-size:12px;color:var(--text-muted)"><?= h(t('Min size')) ?>:
+            <select id="junk_min" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+                <option value="5">5 MB</option><option value="10" selected>10 MB</option><option value="50">50 MB</option><option value="100">100 MB</option>
+            </select></label>
+        <button class="btn btn-sm btn-primary" id="junk_btn" onclick="junkScan()">📊 <?= h(t('Scan files')) ?></button>
+        <button class="btn btn-sm btn-danger" id="junk_q" onclick="junkQuarantine()" style="display:none">🗑️ <?= h(t('Move selected to pre-delete')) ?></button>
+    </div>
+    <div id="junk_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">🧪 <?= h(t('Apache capability tests')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Tests which Apache/.htaccess features the host supports (rewrite, redirects, Basic auth, gzip, caching, headers) in isolated subfolders — never touching the live .htaccess.')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" id="ht_btn" onclick="htaccessTests()">🧪 <?= h(t('Run capability tests')) ?></button></div>
+    <div id="ht_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+<div id="cleanup_log" class="log" style="display:none;margin-top:12px"></div>
+</div>
+
 </div><!-- /tools -->
 
 <?php endif; ?>
@@ -6270,6 +6464,65 @@ async function teDestroy(){
         document.getElementById('te_plugins_btn').style.display='none'; document.getElementById('te_destroy_btn').style.display='none';
         document.getElementById('te_progress').style.display='none'; }
 }
+
+// --- Disk cleanup (orphans / junk) + Apache capability tests ---
+let ORPH_FILES = [], JUNK_FILES = [];
+async function orphansScan(){
+    const out = document.getElementById('orph_result'); out.innerHTML = '⏳';
+    let j; try { j = await (await fetch('?action=orphans_scan', {method:'POST', body:teCreds(new FormData())})).json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    ORPH_FILES = j.files || [];
+    out.innerHTML = `<div>${j.orphans} ${T_CL.orphansFound} / ${j.total} — ↓ ${j.orphan_size}</div>`
+        + (j.preview.length ? '<div style="font-family:monospace;font-size:11px;color:var(--text-dim);max-height:140px;overflow:auto;margin-top:4px">'+j.preview.map(p=>'• '+esc(p)).join('<br>')+(j.orphans>j.preview.length?'<br>…':'')+'</div>' : '');
+    document.getElementById('orph_q').style.display = j.orphans ? 'inline-flex' : 'none';
+}
+async function orphansQuarantine(){
+    if (!ORPH_FILES.length || !confirm(T_CL.confirmOrph)) return;
+    const fd = new FormData(); fd.append('files', JSON.stringify(ORPH_FILES));
+    const j = await (await fetch('?action=orphans_quarantine', {method:'POST', body:fd})).json();
+    log('cleanup_log', j.ok ? `✓ ${j.moved} ${T_CL.movedTo} ${j.folder}` : `✗ ${j.error}`, false);
+    if (j.ok) document.getElementById('orph_q').style.display='none';
+}
+async function junkScan(){
+    const out = document.getElementById('junk_result'); out.innerHTML = '⏳';
+    const fd = new FormData(); fd.append('min_mb', document.getElementById('junk_min').value);
+    let j; try { j = await (await fetch('?action=junk_scan', {method:'POST', body:fd})).json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    JUNK_FILES = (j.files||[]).map(f=>f.path);
+    let html = `<div>${j.count} ${T_CL.filesFound} — ${j.total_size}</div><div style="max-height:160px;overflow:auto;margin-top:4px">`;
+    (j.files||[]).slice(0,40).forEach(f=>{ html += `<div style="font-size:11px;font-family:monospace;color:var(--text-dim)">${f.size.padStart?f.size:f.size} · <span class="badge ${f.reason==='large'?'badge-warn':'badge-err'}">${f.reason}</span> ${esc(f.path)}</div>`; });
+    html += '</div>'; out.innerHTML = html;
+    document.getElementById('junk_q').style.display = j.count ? 'inline-flex' : 'none';
+}
+async function junkQuarantine(){
+    if (!JUNK_FILES.length || !confirm(T_CL.confirmJunk)) return;
+    const fd = new FormData(); fd.append('files', JSON.stringify(JUNK_FILES));
+    const j = await (await fetch('?action=junk_quarantine', {method:'POST', body:fd})).json();
+    log('cleanup_log', j.ok ? `✓ ${j.moved} ${T_CL.movedTo} ${j.folder}` : `✗ ${j.error}`, false);
+    if (j.ok) document.getElementById('junk_q').style.display='none';
+}
+async function htaccessTests(){
+    const out = document.getElementById('ht_result'); const btn = document.getElementById('ht_btn');
+    btn.disabled = true; out.innerHTML = '⏳ ' + T_CL.testing;
+    let j; try { j = await (await fetch('?action=htaccess_tests', {method:'POST'})).json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; btn.disabled=false; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; btn.disabled=false; return; }
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+    j.results.forEach(r=>{
+        const b = r.breaks ? '<span class="badge badge-err">✗ 500</span>' : (r.supported ? '<span class="badge badge-ok">✓ supported</span>' : `<span class="badge badge-warn">? ${r.status||'—'}</span>`);
+        html += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${esc(r.name)}</td><td style="padding:4px 8px;text-align:right">${b}</td></tr>`;
+    });
+    html += '</table><div style="font-size:11px;color:var(--text-dim);margin-top:4px">'+T_CL.htNote+'</div>';
+    out.innerHTML = html; btn.disabled = false;
+}
+const T_CL = {
+    orphansFound: <?= json_encode(t('orphans')) ?>, filesFound: <?= json_encode(t('files')) ?>, movedTo: <?= json_encode(t('file(s) moved to')) ?>,
+    confirmOrph: <?= json_encode(t('Move orphan uploads to the pre-delete folder? Reversible via log.')) ?>,
+    confirmJunk: <?= json_encode(t('Move these files to the pre-delete folder? Reversible via log.')) ?>,
+    testing: <?= json_encode(t('Running Apache tests…')) ?>, htNote: <?= json_encode(t('Only on Apache; the PHP dev server does not process .htaccess.')) ?>,
+};
 const T_TE = {
     replicating: <?= json_encode(t('Replicating table')) ?>, rows: <?= json_encode(t('rows')) ?>,
     creatingFolder: <?= json_encode(t('Creating sandbox folder…')) ?>, sandboxReady: <?= json_encode(t('Sandbox ready')) ?>,
