@@ -64,6 +64,12 @@ Scans the database for `/wp-content/` files the site references, detects which a
 disk**, and downloads them from the **original site** in batches with a progress bar — for when an
 FTP copy was incomplete. The original domain is auto-filled from the old site URL and remembered.
 
+It can also enable **automatic recovery while browsing**: an `.htaccess` rule routes any missing
+`/wp-content/` file to a fallback that downloads it from the original site on the fly and caches it,
+so the site fills in as visitors browse. For images you choose what to show if the file is missing
+at the origin too (a "not found" placeholder, nothing, or a normal 404). Tested safely before
+touching `.htaccess`.
+
 ### Clean Site
 
 Rebuilds `wp-content/uploads` with only the files the site actually uses (referenced in the
@@ -272,6 +278,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.6.0` | phpMyAdmin temporary access time is now configurable (5/15/30/60 min); automatic asset recovery while browsing via an `.htaccess` fallback that fetches missing `/wp-content/` files from the original site on the fly, with a choice of placeholder/nothing/404 for images |
 | `migrate 3.4.0` | Fixed split export (no longer hangs — O(n) sizing) and parts now appear in Export files; fixed the Media URL Scanner count so it matches what Fix rewrites; added find & replace in links (Broken Link Checker) that verifies the resulting URL exists before saving |
 | `migrate 3.3.0` | URL Replacement can now run directly against the live database: it finds the source URLs, HTTP-verifies each target URL and replaces only the ones that respond (serialized-safe), with a reversible log |
 | `migrate 3.2.0` | Uploads optimization: organize files into subfolders (YYYY/MM for dated names, else by first letter), deduplicate identical files (size + hash, repointing references), and sanitize special-character filenames — each locating files in the database first, updating all references, and writing a reversible log |

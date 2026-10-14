@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.5.0');
+define('TOOL_VERSION',  '3.6.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -173,6 +173,20 @@ $GLOBALS['__I18N'] = [
         'Save origin'                         => 'Guardar origen',
         'Scan for missing assets'             => 'Buscar archivos faltantes',
         'Download missing from origin'        => 'Descargar faltantes del origen',
+        // Automatic asset recovery (.htaccess)
+        'Automatic recovery while browsing (.htaccess)' => 'Recuperación automática al navegar (.htaccess)',
+        'Routes any missing /wp-content/ file to a fallback that downloads it from the original site on the fly and caches it, so the site fills in as visitors browse. Tested safely before touching .htaccess. For images, choose what to show when the file is not at the origin either.'
+            => 'Dirige cualquier archivo de /wp-content/ que falte a un mecanismo que lo descarga del sitio original al vuelo y lo cachea, de modo que el sitio se va completando mientras los visitantes navegan. Se prueba sin riesgo antes de tocar el .htaccess. Para imágenes, elegí qué mostrar cuando el archivo tampoco está en el origen.',
+        'If not found'                        => 'Si no se encuentra',
+        'Show "image not found" placeholder'  => 'Mostrar imagen de "no encontrada"',
+        'Show nothing'                        => 'No mostrar nada',
+        'Normal 404'                          => '404 normal',
+        'Enable auto-recovery'                => 'Activar recuperación automática',
+        'Disable'                             => 'Desactivar',
+        'Active'                              => 'Activo',
+        'Inactive'                            => 'Inactivo',
+        'Auto-recovery enabled'               => 'Recuperación automática activada',
+        'Auto-recovery disabled'              => 'Recuperación automática desactivada',
         'Missing files detected. You can download them from the original site.' => 'Se detectaron archivos faltantes. Podés descargarlos del sitio original.',
         'Go to asset recovery'                => 'Ir a recuperación de archivos',
         // Clean Site
@@ -1120,6 +1134,64 @@ window.setTimeout(function(){makeRequest("<?php echo addslashes($next); ?>");},5
 // ============================================================
 // ACCIONES AJAX (requieren auth)
 // ============================================================
+
+// --- DYNAMIC ASSET FALLBACK (public; invoked by .htaccess on missing files) ---
+// When a /wp-content/ asset 404s, .htaccess routes the request here. We fetch it
+// from the original site (origin_domain in .migrate_config), save it to the right
+// local path so the next request is served by the web server directly, and stream
+// it now. If it isn't at the origin either, serve a placeholder image / 204 / 404
+// per the stored preference, and log the unrecoverable URL.
+if (isset($_GET['action']) && $_GET['action'] === 'asset_fallback') {
+    $root = __DIR__;
+    // The requested path, forced to a safe /wp-content/ relative path.
+    $p = '/' . ltrim(preg_replace('/[?].*$/', '', (string)($_GET['p'] ?? '')), '/');
+    $cfg = file_exists(__DIR__ . '/.migrate_config') ? (json_decode(file_get_contents(__DIR__ . '/.migrate_config'), true) ?: []) : [];
+    $origin = rtrim((string)($cfg['origin_domain'] ?? ''), '/');
+    $miss   = $cfg['asset_miss'] ?? 'placeholder'; // placeholder | none | 404
+    $is_img = (bool)preg_match('/\.(jpe?g|png|gif|webp|svg|avif|bmp|ico)$/i', $p);
+    $ctypes = ['jpg'=>'image/jpeg','jpeg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp','svg'=>'image/svg+xml','avif'=>'image/avif','ico'=>'image/x-icon','pdf'=>'application/pdf','css'=>'text/css','js'=>'application/javascript','mp4'=>'video/mp4','woff2'=>'font/woff2','woff'=>'font/woff'];
+    $ext = strtolower(pathinfo($p, PATHINFO_EXTENSION));
+    $serve_placeholder = function () {
+        // Tiny gray "image not found" SVG.
+        header('Content-Type: image/svg+xml'); header('Cache-Control: no-store');
+        echo '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="100%" height="100%" fill="#eee"/><text x="50%" y="50%" fill="#999" font-family="sans-serif" font-size="14" text-anchor="middle" dominant-baseline="middle">image not found</text></svg>';
+    };
+    $log_miss = function ($url) use ($root) {
+        @file_put_contents($root . '/.asset-misses.log', date('c') . "\t" . $url . "\n", FILE_APPEND);
+    };
+
+    // Reject anything outside /wp-content/ or with traversal.
+    if (strpos($p, '/wp-content/') !== 0 || strpos($p, '..') !== false) { http_response_code(404); exit; }
+    $dest = $root . $p;
+    // Already present (race): serve it.
+    if (is_file($dest)) { if ($ext && isset($ctypes[$ext])) header('Content-Type: ' . $ctypes[$ext]); readfile($dest); exit; }
+
+    if ($origin !== '' && preg_match('#^https?://#i', $origin)) {
+        $url = $origin . $p;
+        $body = false; $code = 0;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 20, CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_USERAGENT => 'WP-Migration-Tool/fallback']);
+            $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        } elseif (ini_get('allow_url_fopen')) {
+            $body = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 20, 'follow_location' => 1, 'ignore_errors' => true]]));
+            $code = ($body !== false) ? 200 : 0;
+        }
+        if ($code === 200 && $body !== false && strlen($body) > 0) {
+            @mkdir(dirname($dest), 0755, true);
+            @file_put_contents($dest, $body);   // cache for next time
+            if ($ext && isset($ctypes[$ext])) header('Content-Type: ' . $ctypes[$ext]);
+            header('Cache-Control: no-store');
+            echo $body; exit;
+        }
+        $log_miss($url); // couldn't recover
+    }
+    // Not recoverable: placeholder / nothing / 404 per preference.
+    if ($is_img && $miss === 'placeholder') { $serve_placeholder(); exit; }
+    if ($miss === 'none') { http_response_code(204); exit; }
+    http_response_code(404); exit;
+}
+
 // Download no requiere sesión activa — token + nombre de archivo como auth
 if (isset($_GET['action']) && $_GET['action'] === 'download') {
     $token    = preg_replace('/[^a-f0-9]/', '', $_GET['token'] ?? '');
@@ -4474,6 +4546,65 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- AUTO ASSET RECOVERY: enable / disable / status (.htaccess fallback) ---
+    // Adds a rewrite block so any missing /wp-content/ file is routed to the
+    // asset_fallback action, which fetches it from the origin on demand.
+    if ($action === 'autorecover_status' || $action === 'autorecover_enable' || $action === 'autorecover_disable') {
+        $root     = rtrim($abspath, '/');
+        $htaccess = $root . '/.htaccess';
+        $self     = basename(__FILE__);
+        $ms = '# BEGIN WP-Migrate AutoRecover'; $me = '# END WP-Migrate AutoRecover';
+        $cfg = file_exists($config_file) ? (json_decode(file_get_contents($config_file), true) ?: []) : [];
+        $active = is_file($htaccess) && strpos(file_get_contents($htaccess), $ms) !== false;
+
+        if ($action === 'autorecover_status') {
+            echo json_encode(['ok' => true, 'active' => $active, 'origin' => $cfg['origin_domain'] ?? '', 'miss' => $cfg['asset_miss'] ?? 'placeholder']);
+            exit;
+        }
+        if ($action === 'autorecover_disable') {
+            if (is_file($htaccess)) {
+                $c = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', file_get_contents($htaccess)));
+                @file_put_contents($htaccess, $c . ($c ? "\n" : ''));
+            }
+            echo json_encode(['ok' => true, 'active' => false]);
+            exit;
+        }
+
+        // enable
+        $origin = rtrim(trim($_POST['origin'] ?? ($cfg['origin_domain'] ?? '')), '/');
+        $miss   = in_array($_POST['miss'] ?? '', ['placeholder','none','404'], true) ? $_POST['miss'] : 'placeholder';
+        if ($origin === '' || !preg_match('#^https?://#i', $origin)) { echo json_encode(['ok' => false, 'error' => 'Set a valid original site URL first']); exit; }
+        migrate_config_set(['origin_domain' => $origin, 'asset_miss' => $miss]);
+        if (!is_writable($root) && !(is_file($htaccess) && is_writable($htaccess))) { echo json_encode(['ok' => false, 'error' => 'Web root / .htaccess not writable']); exit; }
+
+        // The rewrite block: missing files under /wp-content/ go to asset_fallback.
+        $block = "$ms\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_URI} ^/.*wp-content/ [NC]\nRewriteRule ^(.*)$ /$self?action=asset_fallback&p=/%{REQUEST_URI} [L,QSA]\n</IfModule>\n$me";
+
+        // Test the directives in an isolated subfolder first (anti-500).
+        $dir = $root . '/_autorec_test_' . bin2hex(random_bytes(4));
+        $tested = 'skipped';
+        if (is_writable($root) && @mkdir($dir, 0755)) {
+            file_put_contents($dir . '/.htaccess', "<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /" . basename($dir) . "/\n</IfModule>\n");
+            file_put_contents($dir . '/ok.php', "<?php echo 'OK';");
+            $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+            $st = 0;
+            if (function_exists('curl_init')) { $ch=curl_init($base.'/'.basename($dir).'/ok.php'); curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>false]); curl_exec($ch); $st=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE); unset($ch); }
+            @unlink($dir.'/.htaccess'); @unlink($dir.'/ok.php'); @rmdir($dir);
+            if ($st >= 500) { echo json_encode(['ok' => false, 'error' => 'The host returned HTTP 500 for mod_rewrite — auto-recovery not supported here.']); exit; }
+            $tested = ($st >= 200 && $st < 400) ? 'passed' : 'inconclusive';
+        }
+
+        if (is_file($htaccess)) @copy($htaccess, $htaccess . '.bak-' . date('YmdHis'));
+        $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
+        $existing = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $existing));
+        // Put our block BEFORE the WordPress block so missing assets are caught first.
+        $ok = @file_put_contents($htaccess, $block . "\n\n" . $existing . "\n") !== false;
+        echo json_encode(['ok' => $ok, 'active' => $ok, 'tested' => $tested, 'origin' => $origin, 'miss' => $miss,
+            'error' => $ok ? '' : 'Write failed']);
+        exit;
+    }
+
     // --- REPAIR & OPTIMIZE TABLES ---
     if ($action === 'wp_repair_tables') {
         $x_db = $wp_extras_db();
@@ -4989,6 +5120,25 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <div id="ar_progress_txt" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
 </div>
 <div id="ar_log" class="log" style="display:none"></div>
+
+<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">⚡ <?= h(t('Automatic recovery while browsing (.htaccess)')) ?></div>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+        <?= h(t('Routes any missing /wp-content/ file to a fallback that downloads it from the original site on the fly and caches it, so the site fills in as visitors browse. Tested safely before touching .htaccess. For images, choose what to show when the file is not at the origin either.')) ?>
+    </p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label style="font-size:12px;color:var(--text-muted)"><?= h(t('If not found')) ?>:
+            <select id="ar_miss" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+                <option value="placeholder"><?= h(t('Show "image not found" placeholder')) ?></option>
+                <option value="none"><?= h(t('Show nothing')) ?></option>
+                <option value="404"><?= h(t('Normal 404')) ?></option>
+            </select>
+        </label>
+        <button class="btn btn-sm btn-success" id="ar_auto_on" onclick="autoRecoverEnable()">⚡ <?= h(t('Enable auto-recovery')) ?></button>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" id="ar_auto_off" onclick="autoRecoverDisable()"><?= h(t('Disable')) ?></button>
+        <span id="ar_auto_status" style="font-size:12px"></span>
+    </div>
+</div>
 </div>
 
 <!-- CACHE -->
@@ -5810,6 +5960,39 @@ async function recoverAssets(){
     stop.style.display = 'none';
     log('ar_log', `✓ Done. Recovered ${ok}, not found ${fail}${AR_ABORT ? ' (stopped)' : ''}. Re-scan to confirm.`, false);
 }
+
+// --- Automatic asset recovery (.htaccess fallback) ---
+async function autoRecoverStatus(){
+    try {
+        const r = await fetch('?action=autorecover_status', {method:'POST'});
+        const j = await r.json();
+        if (j.ok){
+            const el = document.getElementById('ar_auto_status');
+            el.innerHTML = j.active ? `<span class="badge badge-ok">${T_AR.active}</span>` : `<span class="badge" style="background:var(--border);color:var(--text-muted)">${T_AR.inactive}</span>`;
+            if (j.miss) document.getElementById('ar_miss').value = j.miss;
+        }
+    } catch(e){}
+}
+async function autoRecoverEnable(){
+    const origin = document.getElementById('ar_origin').value.trim();
+    if (!origin){ alert(T_AR.needOrigin); return; }
+    const fd = new FormData(); fd.append('origin', origin); fd.append('miss', document.getElementById('ar_miss').value);
+    const r = await fetch('?action=autorecover_enable', {method:'POST', body:fd});
+    const j = await r.json();
+    if (j.ok){ log('ar_log', `✓ ${T_AR.enabled} (origin: ${origin}, test: ${j.tested}).`, false); autoRecoverStatus(); }
+    else log('ar_log', '✗ ' + j.error, false);
+}
+async function autoRecoverDisable(){
+    const r = await fetch('?action=autorecover_disable', {method:'POST'});
+    const j = await r.json();
+    if (j.ok){ log('ar_log', `✓ ${T_AR.disabled}`, false); autoRecoverStatus(); }
+}
+const T_AR = {
+    active: <?= json_encode(t('Active')) ?>, inactive: <?= json_encode(t('Inactive')) ?>,
+    enabled: <?= json_encode(t('Auto-recovery enabled')) ?>, disabled: <?= json_encode(t('Auto-recovery disabled')) ?>,
+    needOrigin: <?= json_encode(t('Set the original site URL first.')) ?>,
+};
+document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('ar_auto_status')) autoRecoverStatus(); });
 
 // --- Test Environment (sandbox) ---
 let TE_ABORT = false;
