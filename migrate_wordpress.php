@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.6.0');
+define('TOOL_VERSION',  '3.7.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -234,6 +234,10 @@ $GLOBALS['__I18N'] = [
         'Plugin compatibility report'         => 'Informe de compatibilidad de plugins',
         'Recommend disabling'                 => 'Se recomienda desactivar',
         'All plugins load in the sandbox'     => 'Todos los plugins cargan en el sandbox',
+        'URLs relativized'                    => 'URLs relativizadas',
+        'prefix'                              => 'prefijo',
+        'symlinks'                            => 'symlinks',
+        'files copied'                        => 'archivos copiados',
         'Vet in the sandbox before installing live.' => 'Evaluá en el sandbox antes de instalar en producción.',
         'Destroy the sandbox folder and its test tables?' => '¿Destruir la carpeta del sandbox y sus tablas de prueba?',
         'Clear Cache'                         => 'Limpiar caché',
@@ -3160,34 +3164,36 @@ if ($authenticated && isset($_GET['action'])) {
         $fresh = !is_dir($dir);
         if ($fresh && !@mkdir($dir, 0755)) { echo json_encode(['ok' => false, 'error' => 'Could not create sandbox folder (web root not writable)']); exit; }
 
-        // Link or copy a path from the live root into the sandbox.
+        // Link or copy a path from the live root into the sandbox, counting how.
         $link_method = 'symlink';
-        $provide = function ($name) use ($root, $dir, &$link_method) {
+        $n_symlinks = 0; $n_copied = 0;
+        $provide = function ($name) use ($root, $dir, &$link_method, &$n_symlinks, &$n_copied) {
             $src = $root . '/' . $name; $dest = $dir . '/' . $name;
             if (!file_exists($src) || file_exists($dest)) return;
-            if (@symlink($src, $dest)) return;           // preferred: no duplication
+            if (@symlink($src, $dest)) { $n_symlinks++; return; }  // preferred: no duplication
             $link_method = 'copy';
             if (is_dir($src)) {
-                // Shallow recursive copy fallback.
                 @mkdir($dest, 0755, true);
                 $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
                 foreach ($it as $f) {
                     $target = $dest . '/' . $it->getSubPathName();
-                    $f->isDir() ? @mkdir($target, 0755, true) : @copy($f->getRealPath(), $target);
+                    $f->isDir() ? @mkdir($target, 0755, true) : (@copy($f->getRealPath(), $target) && $n_copied++);
                 }
-            } else { @copy($src, $dest); }
+            } else { if (@copy($src, $dest)) $n_copied++; }
         };
         // Core dirs/files and content. uploads is shared (symlink only — never copied).
         foreach (['wp-admin', 'wp-includes'] as $d) $provide($d);
         foreach (glob($root . '/*.php') ?: [] as $f) $provide(basename($f)); // index.php, wp-load.php, etc.
         @mkdir($dir . '/wp-content', 0755);
         foreach (['plugins', 'themes', 'mu-plugins'] as $d) {
-            if (is_dir($root . '/wp-content/' . $d) && !file_exists($dir . '/wp-content/' . $d))
-                @symlink($root . '/wp-content/' . $d, $dir . '/wp-content/' . $d) || $provide('wp-content/' . $d);
+            if (is_dir($root . '/wp-content/' . $d) && !file_exists($dir . '/wp-content/' . $d)) {
+                if (@symlink($root . '/wp-content/' . $d, $dir . '/wp-content/' . $d)) $n_symlinks++;
+                else $provide('wp-content/' . $d);
+            }
         }
         // uploads: symlink only (large; shared with the live site).
         if (is_dir($root . '/wp-content/uploads') && !file_exists($dir . '/wp-content/uploads'))
-            @symlink($root . '/wp-content/uploads', $dir . '/wp-content/uploads');
+            if (@symlink($root . '/wp-content/uploads', $dir . '/wp-content/uploads')) $n_symlinks++;
 
         // Sandbox URL + its own wp-config.php (sandbox prefix).
         $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
@@ -3204,8 +3210,42 @@ if ($authenticated && isset($_GET['action'])) {
         @file_put_contents($dir . '/wp-config.php', $wpcfg);
         @chmod($dir . '/wp-config.php', 0600);
 
+        // Make the sandbox DB copy actually usable: point siteurl/home at the
+        // sandbox URL and convert absolute asset URLs to relative, so WordPress
+        // renders correctly instead of redirecting to the old/live domain.
+        $db_fixed = ['siteurl' => false, 'relativized' => 0, 'error' => ''];
+        $r = try_db_connect($c_db);
+        if ($r['ok']) {
+            $pdo = $r['pdo'];
+            // Ensure the sandbox tables exist (replicated beforehand).
+            $has = $pdo->query("SHOW TABLES LIKE " . $pdo->quote($dst_prefix . 'options'))->fetchColumn();
+            if ($has) {
+                $pdo->prepare("UPDATE `{$dst_prefix}options` SET option_value = ? WHERE option_name IN ('siteurl','home')")->execute([$sandbox_url]);
+                $db_fixed['siteurl'] = true;
+                // Relativize absolute wp-content URLs in the sandbox copy (serialized-safe).
+                $pattern = '#https?://[^\s\'"<>]*?(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
+                $rewrite = fn($s) => preg_replace_callback($pattern, fn($m) => $m[1], $s);
+                foreach ([[$dst_prefix.'posts','post_content','ID'],[$dst_prefix.'postmeta','meta_value','meta_id'],[$dst_prefix.'options','option_value','option_id']] as [$tbl,$col,$id]) {
+                    try {
+                        $st = $pdo->prepare("SELECT `$id`,`$col` FROM `$tbl` WHERE `$col` LIKE '%http%://%/wp-content%'"); $st->execute();
+                        while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                            $old = $row[$col];
+                            $new = preg_replace_callback('/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s', function($m) use ($rewrite){ $x=$rewrite($m[2]); return $x===$m[2]?$m[0]:'s:'.strlen($x).':"'.$x.'"'; }, $old);
+                            $new = $rewrite($new);
+                            if ($new !== $old) { $pdo->prepare("UPDATE `$tbl` SET `$col`=? WHERE `$id`=?")->execute([$new,$row[$id]]); $db_fixed['relativized']++; }
+                        }
+                    } catch (Exception $e) {}
+                }
+                // Also deactivate plugins so the sandbox starts clean for plugin-by-plugin testing.
+                $pdo->prepare("UPDATE `{$dst_prefix}options` SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize([])]);
+            } else {
+                $db_fixed['error'] = 'sandbox tables not found — replicate the database first';
+            }
+        } else { $db_fixed['error'] = $r['error']; }
+
         echo json_encode(['ok' => true, 'folder' => basename($dir), 'url' => $sandbox_url,
-            'link_method' => $link_method, 'dst_prefix' => $dst_prefix, 'fresh' => $fresh]);
+            'link_method' => $link_method, 'symlinks' => $n_symlinks, 'copied' => $n_copied,
+            'dst_prefix' => $dst_prefix, 'fresh' => $fresh, 'db' => $db_fixed]);
         exit;
     }
 
@@ -6028,10 +6068,17 @@ async function teBuild(){
     catch(e){ log('te_log','✗ '+e.message,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
     if (!sb.ok){ log('te_log','✗ '+sb.error,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
     TE_SANDBOX = sb;
+    const dbinfo = sb.db || {};
+    const dbline = dbinfo.siteurl
+        ? `<span class="badge badge-ok">DB: siteurl set, ${dbinfo.relativized} ${T_TE.relativized}</span>`
+        : `<span class="badge badge-err">DB: ${esc(dbinfo.error || 'not updated')}</span>`;
     document.getElementById('te_sandbox_info').innerHTML =
-        `✓ ${T_TE.sandboxReady}: <a href="${sb.url}/" target="_blank" style="color:#7dd3fc;font-family:monospace">${esc(sb.folder)}/</a> ` +
-        `<span class="badge ${sb.link_method==='symlink'?'badge-ok':'badge-warn'}">${sb.link_method}</span>`;
-    log('te_log', `✓ Tables replicated (${start.count}) and sandbox created (${sb.link_method}).`, false);
+        `✓ ${T_TE.sandboxReady}: <a href="${sb.url}/" target="_blank" style="color:#7dd3fc;font-family:monospace">${esc(sb.folder)}/</a><br>` +
+        `<div style="margin-top:4px;font-size:11px;color:var(--text-dim)">` +
+        `${T_TE.prefix}: <code>${esc(sb.dst_prefix)}</code> · ` +
+        `<span class="badge ${sb.link_method==='symlink'?'badge-ok':'badge-warn'}">${sb.link_method}</span> ` +
+        `${sb.symlinks} ${T_TE.symlinks}, ${sb.copied} ${T_TE.copiedFiles} · ${dbline}</div>`;
+    log('te_log', `✓ ${start.count} tables replicated; sandbox created (${sb.symlinks} symlinks, ${sb.copied} copied); DB ${dbinfo.siteurl?'fixed':'NOT fixed'}.`, false);
     document.getElementById('te_plugins_btn').style.display = 'inline-flex';
     document.getElementById('te_destroy_btn').style.display = 'inline-flex';
     btn.disabled = false; btn.textContent = '🏗️ Rebuild sandbox';
@@ -6112,6 +6159,8 @@ const T_TE = {
     testingPlugins: <?= json_encode(t('Testing plugin')) ?>, reportTitle: <?= json_encode(t('Plugin compatibility report')) ?>,
     recommend: <?= json_encode(t('Recommend disabling')) ?>, allPluginsOk: <?= json_encode(t('All plugins load in the sandbox')) ?>,
     vetNote: <?= json_encode(t('Vet in the sandbox before installing live.')) ?>, confirmDestroy: <?= json_encode(t('Destroy the sandbox folder and its test tables?')) ?>,
+    relativized: <?= json_encode(t('URLs relativized')) ?>, prefix: <?= json_encode(t('prefix')) ?>,
+    symlinks: <?= json_encode(t('symlinks')) ?>, copiedFiles: <?= json_encode(t('files copied')) ?>,
 };
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read
