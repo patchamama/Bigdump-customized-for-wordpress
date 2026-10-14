@@ -135,12 +135,20 @@ operation over PDO/mysqli.
   confirm it does not break the site (HTTP 500) before letting you apply it.
 - **phpMyAdmin installer** — download the latest phpMyAdmin and extract it into `/phpmyadmin`.
 
+### Broken link checker
+
+- Checks the links stored in the database over HTTP (scope: current site or all domains, with a
+  configurable cap and a stoppable progress bar) and groups the broken ones (HTTP 400+ or no
+  response) by domain. Each entry shows **where it lives in WordPress** — the post/page (with an
+  edit shortcut to WP admin), the postmeta key, or the option — and opens in a new tab.
+
 ### Access control and language
 
 - Password-protected UI with a server-side session. By default the **wp-config `DB_PASSWORD`**
   is the gate; if it is empty the tool forces you to create an encrypted password first, so it
   is never left open. A custom encrypted password can be set and then takes priority.
 - **Bilingual UI** — English / Spanish, switchable from the header.
+- **Light / dark theme** — toggle from the header, remembered across sessions.
 
 ---
 
@@ -224,6 +232,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 2.10.0` | Light/dark theme; fuller Spanish translation; broken link checker now shows each link's location in WordPress (post/meta/option) with an edit shortcut and covers page links, not just assets; friendly-permalink chooser with an isolated anti-500 test; WP-CLI shown in the CLI list; How-to-use tab reordered and rewritten; phpMyAdmin random folder with auto-expiring temporary credentials |
 | `migrate 2.4.0` | SEO suite (audit, meta, friendly permalinks, sitemap, indexing toggle, request/check-indexed links); full-site HTTP Basic password with isolated anti-500 test; Get BigDump into the site; fix Media URL Scanner to rewrite URLs that carry a subfolder before `/wp-content/`, with opt-in disk verification |
 | `migrate 2.0.0` | DB-password-based access with custom encrypted override; bilingual EN/ES UI; WordPress user management; security audit; post-migration extras (htaccess, repair tables, flush rewrite, debug/maintenance); PHP config with isolated safe testing; phpMyAdmin installer; Domain Link Manager final-URL preview and availability check |
 | `migrate 1.3.0` | Domain Link Manager with disk-verified base path; size-limited split `.zip` export; disk-verified media URL fixing |
