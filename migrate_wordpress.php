@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.8.0');
+define('TOOL_VERSION',  '2.8.1');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -156,6 +156,25 @@ $GLOBALS['__I18N'] = [
         'Clear Cache'                         => 'Limpiar caché',
         'Database Export'                     => 'Exportar base de datos',
         'Import SQL'                          => 'Importar SQL',
+        // Common form labels (export / import / tools)
+        'DB Host'                             => 'Host de BD',
+        'DB Name'                             => 'Nombre de BD',
+        'DB User'                             => 'Usuario de BD',
+        'DB Password'                         => 'Contraseña de BD',
+        'Table prefix'                        => 'Prefijo de tablas',
+        'Test connection'                     => 'Probar conexión',
+        'Source URL (origin)'                 => 'URL de origen',
+        'Target URL (destination)'            => 'URL de destino',
+        'DB Connection for Tools'             => 'Conexión de BD para Herramientas',
+        'URL Replacement'                     => 'Reemplazo de URL',
+        'Export Actions'                      => 'Acciones de exportación',
+        'Destination DB'                      => 'BD de destino',
+        'Extract Hosting'                     => 'Extraer hosting',
+        'Site URL Manager'                    => 'Gestor de URL del sitio',
+        'Media URL Scanner'                   => 'Escáner de URLs de medios',
+        'Plugin Manager'                      => 'Gestor de plugins',
+        'PHP Configuration'                   => 'Configuración PHP',
+        'Site Health Check'                   => 'Chequeo de salud del sitio',
         // WordPress Users
         'WordPress Users'                     => 'Usuarios de WordPress',
         'List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.'
@@ -3735,18 +3754,18 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <div class="card">
 <h2>🗄️ <?= h(t('Database Export')) ?></h2>
 <div class="row">
-    <div class="field"><label>DB Host</label><input type="text" id="exp_db_host" value="<?= h($db['host']) ?>"></div>
-    <div class="field"><label>DB Name</label><input type="text" id="exp_db_name" value="<?= h($db['name']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Host')) ?></label><input type="text" id="exp_db_host" value="<?= h($db['host']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Name')) ?></label><input type="text" id="exp_db_name" value="<?= h($db['name']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>DB User</label><input type="text" id="exp_db_user" value="<?= h($db['user']) ?>"></div>
-    <div class="field"><label>DB Password</label><input type="password" id="exp_db_pass" value="<?= h($db['pass']) ?>"></div>
+    <div class="field"><label><?= h(t('DB User')) ?></label><input type="text" id="exp_db_user" value="<?= h($db['user']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Password')) ?></label><input type="password" id="exp_db_pass" value="<?= h($db['pass']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>Table prefix</label><input type="text" id="exp_db_prefix" value="<?= h($db['prefix']) ?>"></div>
+    <div class="field"><label><?= h(t('Table prefix')) ?></label><input type="text" id="exp_db_prefix" value="<?= h($db['prefix']) ?>"></div>
     <div class="field"><label></label>
         <div style="display:flex;gap:8px;margin-top:22px">
-            <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="testDB('exp')">🔌 Test connection</button>
+            <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="testDB('exp')">🔌 <?= h(t('Test connection')) ?></button>
             <button class="btn btn-sm" style="background:#1e3a2f;color:#6ee7b7" onclick="reloadWpConfig()">↺ wp-config</button>
         </div>
     </div>
@@ -3755,14 +3774,14 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>🔗 URL Replacement</h2>
+<h2>🔗 <?= h(t('URL Replacement')) ?></h2>
 <div class="row">
     <div class="field">
-        <label>Source URL (origin)</label>
+        <label><?= h(t('Source URL (origin)')) ?></label>
         <input type="text" id="exp_source_url" value="<?= h($site_url ?: $current_url) ?>" placeholder="https://origin.com">
     </div>
     <div class="field">
-        <label>Target URL (destination)</label>
+        <label><?= h(t('Target URL (destination)')) ?></label>
         <input type="text" id="exp_target_url" placeholder="https://destination.com" oninput="localStorage.setItem('migrate_target_url',this.value)">
     </div>
 </div>
@@ -3772,7 +3791,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>📦 Export Actions</h2>
+<h2>📦 <?= h(t('Export Actions')) ?></h2>
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;font-size:13px;color:#a0aec0">
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
         <input type="checkbox" id="exp_split" onchange="document.getElementById('exp_split_size').disabled=!this.checked">
@@ -3812,22 +3831,22 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>🗄️ Destination DB</h2>
+<h2>🗄️ <?= h(t('Destination DB')) ?></h2>
 <div class="row">
-    <div class="field"><label>DB Host</label><input type="text" id="imp_db_host" value="<?= h($db['host']) ?>"></div>
-    <div class="field"><label>DB Name</label><input type="text" id="imp_db_name" value="<?= h($db['name']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Host')) ?></label><input type="text" id="imp_db_host" value="<?= h($db['host']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Name')) ?></label><input type="text" id="imp_db_name" value="<?= h($db['name']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>DB User</label><input type="text" id="imp_db_user" value="<?= h($db['user']) ?>"></div>
-    <div class="field"><label>DB Password</label><input type="password" id="imp_db_pass" value="<?= h($db['pass']) ?>"></div>
+    <div class="field"><label><?= h(t('DB User')) ?></label><input type="text" id="imp_db_user" value="<?= h($db['user']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Password')) ?></label><input type="password" id="imp_db_pass" value="<?= h($db['pass']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>Table prefix</label><input type="text" id="imp_db_prefix" value="<?= h($db['prefix']) ?>"></div>
+    <div class="field"><label><?= h(t('Table prefix')) ?></label><input type="text" id="imp_db_prefix" value="<?= h($db['prefix']) ?>"></div>
     <div class="field"><label>Expected destination URL</label>
         <input type="text" id="imp_dest_url" value="<?= h($current_url) ?>" placeholder="https://destination.com">
     </div>
 </div>
-<button class="btn btn-sm" style="background:#2d3148;color:#a0aec0;margin-top:8px" onclick="testDB('imp')">🔌 Test connection</button>
+<button class="btn btn-sm" style="background:#2d3148;color:#a0aec0;margin-top:8px" onclick="testDB('imp')">🔌 <?= h(t('Test connection')) ?></button>
 <div id="imp_db_status"></div>
 </div>
 
@@ -3848,7 +3867,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>📁 Extract Hosting</h2>
+<h2>📁 <?= h(t('Extract Hosting')) ?></h2>
 
 <div style="margin-bottom:12px">
     <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="scanFiles()">🔍 Scan files on server</button>
@@ -3913,26 +3932,26 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <div id="tab-tools" class="section">
 
 <div class="card">
-<h2>🔌 DB Connection for Tools</h2>
+<h2>🔌 <?= h(t('DB Connection for Tools')) ?></h2>
 <div class="row">
-    <div class="field"><label>DB Host</label><input type="text" id="tls_db_host" value="<?= h($db['host']) ?>"></div>
-    <div class="field"><label>DB Name</label><input type="text" id="tls_db_name" value="<?= h($db['name']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Host')) ?></label><input type="text" id="tls_db_host" value="<?= h($db['host']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Name')) ?></label><input type="text" id="tls_db_name" value="<?= h($db['name']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>DB User</label><input type="text" id="tls_db_user" value="<?= h($db['user']) ?>"></div>
-    <div class="field"><label>DB Password</label><input type="password" id="tls_db_pass" value="<?= h($db['pass']) ?>"></div>
+    <div class="field"><label><?= h(t('DB User')) ?></label><input type="text" id="tls_db_user" value="<?= h($db['user']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Password')) ?></label><input type="password" id="tls_db_pass" value="<?= h($db['pass']) ?>"></div>
 </div>
 <div class="row">
-    <div class="field"><label>Table prefix</label><input type="text" id="tls_db_prefix" value="<?= h($db['prefix']) ?>"></div>
+    <div class="field"><label><?= h(t('Table prefix')) ?></label><input type="text" id="tls_db_prefix" value="<?= h($db['prefix']) ?>"></div>
     <div class="field"><label>&nbsp;</label>
-        <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0;margin-top:22px" onclick="testDB('tls')">🔌 Test connection</button>
+        <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0;margin-top:22px" onclick="testDB('tls')">🔌 <?= h(t('Test connection')) ?></button>
     </div>
 </div>
 <div id="tls_db_status"></div>
 </div>
 
 <div class="card">
-<h2>🌐 Site URL Manager</h2>
+<h2>🌐 <?= h(t('Site URL Manager')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Updates <code>siteurl</code> and <code>home</code> in wp_options. Switch between http and https without touching wp-config.php.
 </p>
@@ -3952,7 +3971,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>🖼️ Media URL Scanner</h2>
+<h2>🖼️ <?= h(t('Media URL Scanner')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Scans posts, postmeta and options for absolute <code>http(s)://domain/wp-content/</code> URLs in images, icons and videos,
     then converts them to root-relative <code>/wp-content/</code> paths. Handles serialized data correctly.
@@ -4047,7 +4066,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>🔌 Plugin Manager</h2>
+<h2>🔌 <?= h(t('Plugin Manager')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Lists all installed plugins and lets you activate or deactivate them directly in the database.
     Useful when WP admin is inaccessible after a migration.
@@ -4062,7 +4081,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 <div class="card">
-<h2>⚙️ PHP Configuration</h2>
+<h2>⚙️ <?= h(t('PHP Configuration')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Current PHP settings vs. WordPress recommendations. Saves to <code>.htaccess</code> and/or <code>user.ini</code> in the site root.
     Changes apply on the next request (some hosts need a server restart).
@@ -4162,7 +4181,7 @@ foreach ($php_cfg_rows as $r):
 </div>
 
 <div class="card">
-<h2>🏥 Site Health Check</h2>
+<h2>🏥 <?= h(t('Site Health Check')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     Audits media files, active plugins, themes, DB tables, WP core files, filesystem permissions, and PHP environment.
     Uses the DB connection configured above.
