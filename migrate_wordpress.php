@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.4.0');
+define('TOOL_VERSION',  '2.5.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -113,6 +113,44 @@ $GLOBALS['__I18N'] = [
         'Import (Destination)'                => 'Importar (Destino)',
         'How to use'                          => 'Cómo usar',
         'DB Tools'                            => 'Herramientas DB',
+        'CLI available'                       => 'CLI disponible',
+        // How to use / info tab
+        'How to migrate'                      => 'Cómo migrar',
+        'Migration step by step'              => 'Migración paso a paso',
+        'On the <strong>origin</strong>: open the <strong>Export</strong> tab, set the source and target URLs, and export the database (optionally split into size-limited <code>.zip</code> parts for hosts with upload limits). Use <strong>Export Hosting</strong> for the full site zip.'
+            => 'En el <strong>origen</strong>: abrí la pestaña <strong>Exportar</strong>, definí las URLs de origen y destino, y exportá la base de datos (opcionalmente dividida en partes <code>.zip</code> con límite de tamaño para hostings con restricciones de subida). Usá <strong>Exportar Hosting</strong> para el zip completo del sitio.',
+        'On the <strong>destination</strong>: create the database and user in phpMyAdmin, upload and extract the site files, and update <code>wp-config.php</code> with the new credentials.'
+            => 'En el <strong>destino</strong>: creá la base de datos y el usuario en phpMyAdmin, subí y extraé los archivos del sitio, y actualizá <code>wp-config.php</code> con las nuevas credenciales.',
+        'Open the <strong>Import</strong> tab on the destination and import the <code>.sql</code>, <code>.gz</code> or <code>.zip</code> parts in order. The tool verifies the URL matches first.'
+            => 'Abrí la pestaña <strong>Importar</strong> en el destino e importá las partes <code>.sql</code>, <code>.gz</code> o <code>.zip</code> en orden. La herramienta verifica primero que la URL coincida.',
+        'For very large dumps, use the embedded <a href="?action=bigdump" style="color:#7dd3fc">BigDump</a> importer.'
+            => 'Para volcados muy grandes, usá el importador <a href="?action=bigdump" style="color:#7dd3fc">BigDump</a> integrado.',
+        'After migrating (DB Tools tab)'      => 'Después de migrar (pestaña Herramientas DB)',
+        '<strong>Domain Link Manager</strong> — rewrite links to the old site to root-relative paths, and verify the final/existing URLs resolve.'
+            => '<strong>Gestor de enlaces de dominio</strong> — reescribe los enlaces al sitio viejo como rutas relativas a la raíz, y verifica que las URLs finales/existentes resuelvan.',
+        '<strong>Media URL Scanner</strong> — convert absolute <code>wp-content</code> URLs to relative, serialized-data safe.'
+            => '<strong>Escáner de URLs de medios</strong> — convierte URLs absolutas de <code>wp-content</code> a relativas, de forma segura con datos serializados.',
+        '<strong>Site URL manager</strong> — switch between http and https.'
+            => '<strong>Gestor de URL del sitio</strong> — cambia entre http y https.',
+        '<strong>WordPress Users</strong> — list, create, edit and reset passwords without the WP admin.'
+            => '<strong>Usuarios de WordPress</strong> — listá, creá, editá y restablecé contraseñas sin el panel de WP.',
+        '<strong>SEO</strong> — audit, edit title/tagline, friendly permalinks, sitemap, indexing toggle and indexing checks.'
+            => '<strong>SEO</strong> — auditoría, editar título/descripción, enlaces permanentes amigables, sitemap, activar/desactivar indexación y verificación de indexación.',
+        '<strong>Security Audit</strong> and <strong>Site Health Check</strong> — review hardening and integrity.'
+            => '<strong>Auditoría de seguridad</strong> y <strong>Chequeo de salud del sitio</strong> — revisá endurecimiento e integridad.',
+        '<strong>Extras</strong> — regenerate <code>.htaccess</code>, repair/optimize tables, flush caches, toggle debug/maintenance.'
+            => '<strong>Extras</strong> — regenerá <code>.htaccess</code>, reparar/optimizar tablas, limpiar cachés, activar/desactivar depuración/mantenimiento.',
+        '<strong>Site Password</strong> — protect the whole site with HTTP Basic auth (tested safely first).'
+            => '<strong>Contraseña del sitio</strong> — protegé todo el sitio con autenticación HTTP Basic (probada sin riesgo primero).',
+        '<strong>phpMyAdmin</strong> — install it on demand to manage the database directly.'
+            => '<strong>phpMyAdmin</strong> — instalalo a demanda para administrar la base de datos directamente.',
+        'Divi / WordPress notes'              => 'Notas de Divi / WordPress',
+        'URL replacement handles <strong>serialized PHP strings</strong> (Divi/Elementor store layout data serialized).'
+            => 'El reemplazo de URLs maneja <strong>cadenas PHP serializadas</strong> (Divi/Elementor guardan datos de maquetación serializados).',
+        'If the layout looks broken after import, clear caches: <code>wp-content/cache/</code> and <code>wp-content/et-cache/</code> (or use Clear Cache above).'
+            => 'Si la maquetación se ve rota tras importar, limpiá las cachés: <code>wp-content/cache/</code> y <code>wp-content/et-cache/</code> (o usá Limpiar caché arriba).',
+        'Access to this tool requires the wp-config database password by default; set your own encrypted password from the Access Password card.'
+            => 'El acceso a esta herramienta requiere por defecto la contraseña de la base de datos de wp-config; establecé tu propia contraseña cifrada desde la tarjeta Contraseña de acceso.',
         'Environment Status'                  => 'Estado del entorno',
         'Clear Cache'                         => 'Limpiar caché',
         'Database Export'                     => 'Exportar base de datos',
@@ -3502,10 +3540,10 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
     <span class="badge <?= $wp_config_path ? 'badge-ok' : 'badge-err' ?>"><?= $wp_config_path ? '✓ found' : '✗ not found' ?></span>
 </div>
 <div class="info-row">
-    <span class="info-label">CLI available / CLI disponible</span>
+    <span class="info-label"><?= h(t('CLI available')) ?></span>
     <span class="info-val">
-        <?php foreach (['mysqldump','mysql','zip','unzip','tar'] as $cmd): ?>
-        <span class="badge <?= check_cmd($cmd) ? 'badge-ok' : 'badge-err' ?>"><?= $cmd ?></span>
+        <?php foreach (['mysqldump','mysql','zip','unzip','tar','wp','curl'] as $cmd): ?>
+        <span class="badge <?= check_cmd($cmd) ? 'badge-ok' : 'badge-err' ?>" title="<?= $cmd === 'wp' ? 'WP-CLI' : '' ?>"><?= $cmd ?></span>
         <?php endforeach; ?>
     </span>
 </div>
@@ -3529,8 +3567,8 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <div class="tabs">
     <button class="tab active" onclick="showTab('export')">📤 <?= h(t('Export (Origin)')) ?></button>
     <button class="tab" onclick="showTab('import')">📥 <?= h(t('Import (Destination)')) ?></button>
-    <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
     <button class="tab" onclick="showTab('tools')">🛠️ <?= h(t('DB Tools')) ?></button>
+    <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
 </div>
 
 <!-- ===== EXPORT TAB ===== -->
@@ -3675,38 +3713,39 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 <!-- ===== INFO TAB ===== -->
 <div id="tab-info" class="section">
 <div class="card">
-<h2>📖 How to migrate</h2>
+<h2>📖 <?= h(t('How to migrate')) ?></h2>
 
 <div class="instructions">
-<h4>Step by step</h4>
+<h4><?= h(t('Migration step by step')) ?></h4>
 <ol>
-<li>On the <strong>origin server</strong>: open this tool, go to <strong>Export</strong> tab.</li>
-<li>Set the source URL (origin) and target URL (destination). Click <strong>Export DB</strong>.</li>
-<li>Download the <code>.sql.gz</code> file.</li>
-<li>Click <strong>Export Hosting</strong> to download the full site zip.</li>
-<li>On the <strong>destination server</strong>:
-    <ol>
-        <li>Create a database in phpMyAdmin:<br>
-            <code>Databases → Create database → name it → Collation: utf8mb4_unicode_ci</code></li>
-        <li>Create a DB user and assign full privileges.</li>
-        <li>Upload and extract the hosting zip to the destination folder.</li>
-        <li>Update <code>wp-config.php</code> with the new DB credentials.</li>
-        <li>Open this tool on the destination, go to <strong>Import</strong> tab.</li>
-        <li>Upload the <code>.sql.gz</code> and click <strong>Import DB</strong>.</li>
-        <li>The tool will verify the URL matches before importing.</li>
-    </ol>
-</li>
-<li>If the SQL is very large (&gt;50MB), use <a href="?action=bigdump" style="color:#7dd3fc">BigDump</a> instead.</li>
+<li><?= t('On the <strong>origin</strong>: open the <strong>Export</strong> tab, set the source and target URLs, and export the database (optionally split into size-limited <code>.zip</code> parts for hosts with upload limits). Use <strong>Export Hosting</strong> for the full site zip.') ?></li>
+<li><?= t('On the <strong>destination</strong>: create the database and user in phpMyAdmin, upload and extract the site files, and update <code>wp-config.php</code> with the new credentials.') ?></li>
+<li><?= t('Open the <strong>Import</strong> tab on the destination and import the <code>.sql</code>, <code>.gz</code> or <code>.zip</code> parts in order. The tool verifies the URL matches first.') ?></li>
+<li><?= t('For very large dumps, use the embedded <a href="?action=bigdump" style="color:#7dd3fc">BigDump</a> importer.') ?></li>
 </ol>
 </div>
 
 <div class="instructions" style="margin-top:16px">
-<h4>⚠️ Divi / WordPress notes</h4>
+<h4><?= h(t('After migrating (DB Tools tab)')) ?></h4>
 <ul style="padding-left:18px">
-<li>The URL replacement handles <strong>serialized PHP strings</strong> (Divi stores layout data serialized).</li>
-<li>After import, if Divi looks broken: Dashboard → Divi → <strong>Clear All Caches</strong>.</li>
-<li>Also delete: <code>wp-content/cache/</code> and <code>wp-content/et-cache/</code>.</li>
-<li>If you see the old domain in the DB, run: <code>UPDATE wp_options SET option_value = REPLACE(option_value, 'old.com', 'new.com');</code></li>
+<li><?= t('<strong>Domain Link Manager</strong> — rewrite links to the old site to root-relative paths, and verify the final/existing URLs resolve.') ?></li>
+<li><?= t('<strong>Media URL Scanner</strong> — convert absolute <code>wp-content</code> URLs to relative, serialized-data safe.') ?></li>
+<li><?= t('<strong>Site URL manager</strong> — switch between http and https.') ?></li>
+<li><?= t('<strong>WordPress Users</strong> — list, create, edit and reset passwords without the WP admin.') ?></li>
+<li><?= t('<strong>SEO</strong> — audit, edit title/tagline, friendly permalinks, sitemap, indexing toggle and indexing checks.') ?></li>
+<li><?= t('<strong>Security Audit</strong> and <strong>Site Health Check</strong> — review hardening and integrity.') ?></li>
+<li><?= t('<strong>Extras</strong> — regenerate <code>.htaccess</code>, repair/optimize tables, flush caches, toggle debug/maintenance.') ?></li>
+<li><?= t('<strong>Site Password</strong> — protect the whole site with HTTP Basic auth (tested safely first).') ?></li>
+<li><?= t('<strong>phpMyAdmin</strong> — install it on demand to manage the database directly.') ?></li>
+</ul>
+</div>
+
+<div class="instructions" style="margin-top:16px">
+<h4><?= h(t('Divi / WordPress notes')) ?></h4>
+<ul style="padding-left:18px">
+<li><?= t('URL replacement handles <strong>serialized PHP strings</strong> (Divi/Elementor store layout data serialized).') ?></li>
+<li><?= t('If the layout looks broken after import, clear caches: <code>wp-content/cache/</code> and <code>wp-content/et-cache/</code> (or use Clear Cache above).') ?></li>
+<li><?= t('Access to this tool requires the wp-config database password by default; set your own encrypted password from the Access Password card.') ?></li>
 </ul>
 </div>
 </div>
