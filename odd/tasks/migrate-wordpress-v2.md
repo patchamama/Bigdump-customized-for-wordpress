@@ -61,7 +61,11 @@ Delivered in phases, one commit per phase. Release at the end.
       (robots.txt + blog_public). JS links: Google/Bing submit + ping, and site: checks on
       Google/Bing/DuckDuckGo/Yandex. Verified against wp_test with rollback (permalinks, blog_public,
       sitemap url count). -> 2.2.0
-- [ ] S3: full-site password (.htaccess+.htpasswd) with isolated anti-500 test + probe URL. -> 2.3.0
+- [x] S3: full-site password. site_pass_test (isolated subfolder with .htaccess Basic +
+      .htpasswd bcrypt + index, HTTP probe expecting 401 not 500, returns probe URL),
+      site_pass_apply (gated on passed test, backs up .htaccess), site_pass_remove. Bilingual
+      card, Apply disabled until test passes. htpasswd bcrypt verified. NOTE: 401/500 only real
+      on Apache; dev server inconclusive. -> 2.3.0
 - [ ] S4: README + tag v2.3.0-wp + GitHub release.
 
 ## P1 verification

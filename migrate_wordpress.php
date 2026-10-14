@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.2.0');
+define('TOOL_VERSION',  '2.3.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -181,6 +181,13 @@ $GLOBALS['__I18N'] = [
         'Block'                               => 'Bloquear',
         'Request indexing'                    => 'Solicitar indexación',
         'Check if indexed'                    => 'Verificar si está indexado',
+        // Site Password
+        'Site Password (HTTP Basic)'          => 'Contraseña del sitio (HTTP Basic)',
+        'Protect the whole site with an HTTP Basic password (.htaccess + .htpasswd). Before applying, a test writes the rule into an isolated subfolder and checks the host returns 401 (auth required), not 500. Open the test URL to confirm the login prompt appears; Apply stays disabled until the test passes.'
+            => 'Protegé todo el sitio con una contraseña HTTP Basic (.htaccess + .htpasswd). Antes de aplicar, una prueba escribe la regla en una subcarpeta aislada y verifica que el servidor devuelva 401 (pide autenticación), no 500. Abrí la URL de prueba para confirmar que aparece el diálogo de acceso; Aplicar queda deshabilitado hasta que la prueba pase.',
+        'Apply to whole site'                 => 'Aplicar a todo el sitio',
+        'Remove protection'                   => 'Quitar protección',
+        'open to confirm the login prompt'    => 'abrir para confirmar el diálogo de acceso',
     ],
 ];
 
@@ -2867,6 +2874,101 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SITE PASSWORD: isolated test (.htaccess + .htpasswd) ---
+    // Writes a throwaway subfolder protected with HTTP Basic auth and requests it
+    // over HTTP. The server should answer 401 (auth required), NOT 500 (the host
+    // does not allow AuthType in .htaccess). Returns a probe URL the user can open
+    // in the browser to confirm the login prompt appears before applying site-wide.
+    if ($action === 'site_pass_test') {
+        $root = rtrim($abspath, '/');
+        $user = trim($_POST['user'] ?? '');
+        $pass = (string)($_POST['pass'] ?? '');
+        if ($user === '' || $pass === '') { echo json_encode(['ok' => false, 'error' => 'User and password required']); exit; }
+        if (!preg_match('/^[A-Za-z0-9_.-]+$/', $user)) { echo json_encode(['ok' => false, 'error' => 'User may contain only letters, digits, . _ -']); exit; }
+        if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root is not writable; cannot create a test folder.']); exit; }
+
+        $dir = $root . '/_sitepass_test_' . bin2hex(random_bytes(4));
+        if (!@mkdir($dir, 0755)) { echo json_encode(['ok' => false, 'error' => 'Could not create test folder']); exit; }
+        $hash   = password_hash($pass, PASSWORD_BCRYPT); // Apache 2.4 accepts $2y$
+        $htpw   = $dir . '/.htpasswd';
+        file_put_contents($htpw, "$user:$hash\n");
+        // AuthUserFile needs an absolute server path.
+        $ht = "AuthType Basic\nAuthName \"Protected\"\nAuthUserFile \"" . $htpw . "\"\nRequire valid-user\n";
+        file_put_contents($dir . '/.htaccess', $ht);
+        file_put_contents($dir . '/index.html', '<!doctype html><title>OK</title><h1>Site-password test OK</h1><p>If you can read this only after entering the user/password, Basic auth works on this host.</p>');
+
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $base  = rtrim(dirname($proto . '://' . $host . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+        $probe_url = $base . '/' . basename($dir) . '/';
+
+        // Request the folder WITHOUT credentials: expect 401 (good) not 500 (bad).
+        $status = 0;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($probe_url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_SSL_VERIFYPEER => false]);
+            curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 8, 'ignore_errors' => true]]);
+            @file_get_contents($probe_url, false, $ctx);
+            $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+            if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+        }
+
+        // Keep the folder a short while so the user can open the probe URL, then
+        // schedule cleanup on shutdown is not reliable here — we leave it and the
+        // apply/remove actions (and a stale sweep) clean it. Return the verdict.
+        $breaks  = ($status >= 500);
+        $prompts = ($status === 401);
+        echo json_encode(['ok' => true, 'status' => $status, 'breaks' => $breaks, 'prompts_auth' => $prompts,
+            'supported' => ($prompts && !$breaks), 'probe_url' => $probe_url, 'test_dir' => basename($dir),
+            'note' => $breaks ? 'The host returned HTTP 500 — Basic auth via .htaccess is NOT supported here.'
+                     : ($prompts ? 'HTTP 401 — Basic auth works. Open the probe URL to try the login, then Apply.'
+                     : "HTTP $status — inconclusive (the dev server does not process .htaccess; test on the real host).")]);
+        exit;
+    }
+
+    // --- SITE PASSWORD: apply to the whole site ---
+    if ($action === 'site_pass_apply') {
+        $root = rtrim($abspath, '/');
+        $user = trim($_POST['user'] ?? '');
+        $pass = (string)($_POST['pass'] ?? '');
+        if ($user === '' || $pass === '' || !preg_match('/^[A-Za-z0-9_.-]+$/', $user)) { echo json_encode(['ok' => false, 'error' => 'Invalid user/password']); exit; }
+        if (!is_writable($root) && !(is_file($root . '/.htaccess') && is_writable($root . '/.htaccess'))) {
+            echo json_encode(['ok' => false, 'error' => 'Web root / .htaccess not writable']); exit;
+        }
+        $htpw = $root . '/.htpasswd';
+        file_put_contents($htpw, "$user:" . password_hash($pass, PASSWORD_BCRYPT) . "\n");
+        @chmod($htpw, 0644);
+        $htaccess = $root . '/.htaccess';
+        if (is_file($htaccess)) @copy($htaccess, $htaccess . '.bak-' . date('YmdHis'));
+        $ms = '# BEGIN WP-Migrate Site Password'; $me = '# END WP-Migrate Site Password';
+        $block = "$ms\nAuthType Basic\nAuthName \"Restricted\"\nAuthUserFile \"$htpw\"\nRequire valid-user\n$me";
+        $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
+        $existing = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', $existing));
+        @file_put_contents($htaccess, $block . ($existing ? "\n\n" . $existing : '') . "\n");
+        echo json_encode(['ok' => true, 'note' => 'Site password applied. The whole site now requires HTTP Basic auth.']);
+        exit;
+    }
+
+    // --- SITE PASSWORD: remove ---
+    if ($action === 'site_pass_remove') {
+        $root = rtrim($abspath, '/');
+        $htaccess = $root . '/.htaccess';
+        $ms = '# BEGIN WP-Migrate Site Password'; $me = '# END WP-Migrate Site Password';
+        if (is_file($htaccess)) {
+            $c = trim(preg_replace('/' . preg_quote($ms, '/') . '.*?' . preg_quote($me, '/') . '/s', '', file_get_contents($htaccess)));
+            @file_put_contents($htaccess, $c . ($c ? "\n" : ''));
+        }
+        @unlink($root . '/.htpasswd');
+        // Sweep any leftover test folders.
+        foreach (glob($root . '/_sitepass_test_*') ?: [] as $d) {
+            if (is_dir($d)) { foreach (glob($d . '/{,.}*', GLOB_BRACE) ?: [] as $f) { if (is_file($f)) @unlink($f); } @rmdir($d); }
+        }
+        echo json_encode(['ok' => true, 'note' => 'Site password removed.']);
+        exit;
+    }
+
     // --- INSTALL PHPMYADMIN ---
     // Downloads the latest phpMyAdmin and extracts it into ./phpmyadmin. No config
     // is written; the user configures the connection on first access.
@@ -3842,6 +3944,24 @@ foreach ($php_cfg_rows as $r):
 <div id="tls_pma_log" class="log" style="display:none;margin-top:12px"></div>
 </div>
 
+<div class="card" style="border-color:#7f1d1d44">
+<h2>🔒 <?= h(t('Site Password (HTTP Basic)')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:14px">
+    <?= h(t('Protect the whole site with an HTTP Basic password (.htaccess + .htpasswd). Before applying, a test writes the rule into an isolated subfolder and checks the host returns 401 (auth required), not 500. Open the test URL to confirm the login prompt appears; Apply stays disabled until the test passes.')) ?>
+</p>
+<div class="row">
+    <div class="field"><label><?= h(t('Username')) ?></label><input type="text" id="sp_user" value="admin"></div>
+    <div class="field"><label><?= h(t('Password')) ?></label><input type="text" id="sp_pass"></div>
+</div>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-warning" id="sp_test_btn" onclick="sitePassTest()">🧪 <?= h(t('Test safely')) ?></button>
+    <button class="btn btn-danger" id="sp_apply_btn" onclick="sitePassApply()" disabled style="opacity:.5;cursor:not-allowed">🔒 <?= h(t('Apply to whole site')) ?></button>
+    <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="sitePassRemove()"><?= h(t('Remove protection')) ?></button>
+</div>
+<div id="tls_sp_result" style="margin-bottom:8px"></div>
+<div id="tls_sp_log" class="log" style="display:none"></div>
+</div>
+
 </div><!-- /tools -->
 
 <?php endif; ?>
@@ -4739,6 +4859,68 @@ async function installPhpMyAdmin() {
     } catch(e) { log('tls_pma_log', '✗ ' + e.message, false); }
     btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin';
 }
+
+// --- Site Password (HTTP Basic) ---
+let SP_VALIDATED = false;
+function spDisableApply() {
+    SP_VALIDATED = false;
+    const b = document.getElementById('sp_apply_btn');
+    b.disabled = true; b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+}
+['sp_user','sp_pass'].forEach(id => document.addEventListener('input', e => { if (e.target && e.target.id === id) spDisableApply(); }));
+
+async function sitePassTest() {
+    const user = document.getElementById('sp_user').value.trim();
+    const pass = document.getElementById('sp_pass').value;
+    if (!user || !pass) { log('tls_sp_log', '✗ Enter a username and password'); return; }
+    const box = document.getElementById('tls_sp_result');
+    box.innerHTML = '<span style="color:#718096;font-size:12px">🧪 Testing in isolated folder…</span>';
+    spDisableApply();
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user', user); fd.append('pass', pass);
+    let j;
+    try { const r = await fetch('?action=site_pass_test', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e) { box.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok) { box.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    let badge;
+    if (j.breaks)        badge = `<span class="badge badge-err">✗ HTTP ${j.status} — not supported (would 500)</span>`;
+    else if (j.prompts_auth) badge = `<span class="badge badge-ok">✓ HTTP 401 — Basic auth works</span>`;
+    else                 badge = `<span class="badge badge-warn">? HTTP ${j.status || 'no reply'} — inconclusive (test on real host)</span>`;
+    box.innerHTML = `${badge}<div style="margin-top:6px;font-size:12px;color:#a0aec0">${esc(j.note)}</div>
+        <div style="margin-top:6px;font-size:12px">🔗 <a href="${j.probe_url}" target="_blank" style="color:#7dd3fc">${esc(j.probe_url)}</a> <span style="color:#718096">(${T_SP.openprobe})</span></div>`;
+    if (j.supported) {
+        SP_VALIDATED = true;
+        const b = document.getElementById('sp_apply_btn');
+        b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer';
+        log('tls_sp_log', '✓ Test passed. Apply enabled.', false);
+    } else {
+        log('tls_sp_log', 'ℹ Open the probe URL to confirm, or test on the real host. Apply stays disabled.', false);
+    }
+}
+
+async function sitePassApply() {
+    if (!SP_VALIDATED) { log('tls_sp_log', '✗ Run a successful Test first.'); return; }
+    if (!confirm('Apply HTTP Basic auth to the WHOLE site? You will need the username/password to access any page.')) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('user', document.getElementById('sp_user').value.trim());
+    fd.append('pass', document.getElementById('sp_pass').value);
+    const r = await fetch('?action=site_pass_apply', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_sp_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
+    if (j.ok) spDisableApply();
+}
+
+async function sitePassRemove() {
+    if (!confirm('Remove the site-wide password protection?')) return;
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const r = await fetch('?action=site_pass_remove', {method:'POST', body:fd});
+    const j = await r.json();
+    log('tls_sp_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
+}
+const T_SP = { openprobe: <?= json_encode(t('open to confirm the login prompt')) ?> };
 
 async function savePluginSelection() {
     const boxes    = document.querySelectorAll('#tls_plugins_list input[type=checkbox]:checked');
