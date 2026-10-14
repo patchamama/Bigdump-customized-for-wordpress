@@ -19,6 +19,8 @@ wp-config_.php
 .migrate_config
 .migrate_exports/
 _phpcfg_test_*/
+_perma_test_*/
+_sitepass_test_*/
 
 # Tooling / OS cruft
 .DS_Store

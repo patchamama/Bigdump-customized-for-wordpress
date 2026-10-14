@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.9.0');
+define('TOOL_VERSION',  '2.10.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -240,6 +240,14 @@ $GLOBALS['__I18N'] = [
         'Save meta'                           => 'Guardar metadatos',
         'SEO actions'                         => 'Acciones SEO',
         'Set friendly permalinks'             => 'Poner enlaces permanentes amigables',
+        'Friendly permalinks'                 => 'Enlaces permanentes amigables',
+        'Post name (recommended)'             => 'Nombre del post (recomendado)',
+        'Day and name'                        => 'Día y nombre',
+        'Month and name'                      => 'Mes y nombre',
+        'Numeric'                             => 'Numérico',
+        'Plain (?p=123, no rewrite)'          => 'Simple (?p=123, sin reescritura)',
+        'Testing in isolated folder…'         => 'Probando en carpeta aislada…',
+        'No rewrite needed — safe to apply'   => 'No requiere reescritura — seguro para aplicar',
         'Generate sitemap.xml'                => 'Generar sitemap.xml',
         'Indexing'                            => 'Indexación',
         'Allow'                               => 'Permitir',
@@ -2954,40 +2962,87 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
-    // --- SEO: SET FRIENDLY PERMALINKS (/%postname%/) ---
-    // Friendly permalinks need WordPress rewrite rules in .htaccess. We set the
-    // option and (re)generate the standard rules, having tested them anti-500
-    // in an isolated subfolder first when possible.
+    // --- SEO: FRIENDLY PERMALINKS (test + apply) ---
+    // Friendly permalinks need WordPress rewrite rules in .htaccess. A host that
+    // disallows mod_rewrite / AllowOverride would 500 the whole site, so with
+    // mode=test we write the exact rewrite block into an isolated subfolder and
+    // request it over HTTP first (expecting not-500). mode=apply only writes the
+    // real .htaccess (backing up the old one) and sets the chosen structure.
     if ($action === 'seo_set_permalinks') {
         $s_db = $seo_db();
         $root = rtrim($abspath, '/');
+        $mode = in_array($_POST['mode'] ?? '', ['test', 'apply'], true) ? $_POST['mode'] : 'apply';
+        // The valid WordPress permalink structures (plus the editable custom one).
+        $valid = ['/%postname%/', '/%year%/%monthnum%/%day%/%postname%/', '/%year%/%monthnum%/%postname%/',
+                  '/archives/%post_id%', '/%post_id%', '/?p=%post_id%'];
+        $structure = $_POST['structure'] ?? '/%postname%/';
+        if (strpos($structure, '?p=') === false && !in_array($structure, $valid, true) && !preg_match('#^/[%a-z0-9_\-/]*$#i', $structure)) {
+            echo json_encode(['ok' => false, 'error' => 'Invalid permalink structure']); exit;
+        }
+
+        // The standard WP rewrite block (same for every pretty structure).
+        $rules = "# BEGIN WordPress\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . /index.php [L]\n</IfModule>\n# END WordPress\n";
+
+        if ($mode === 'test') {
+            if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root is not writable; cannot create a test folder.']); exit; }
+            $dir = $root . '/_perma_test_' . bin2hex(random_bytes(4));
+            if (!@mkdir($dir, 0755)) { echo json_encode(['ok' => false, 'error' => 'Could not create test folder']); exit; }
+            // A test rewrite that routes everything to ok.php so we can confirm the
+            // directives load (200) rather than 500 from a disallowed override.
+            $test_rules = "<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /" . basename($dir) . "/\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteRule . ok.php [L]\n</IfModule>\n";
+            file_put_contents($dir . '/.htaccess', $test_rules);
+            file_put_contents($dir . '/ok.php', "<?php echo 'PERMALINK-REWRITE-OK';");
+            $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+            $probe = $base . '/' . basename($dir) . '/anything-here';
+            $status = 0; $body = '';
+            if (function_exists('curl_init')) {
+                $ch = curl_init($probe);
+                curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_FOLLOWLOCATION => true]);
+                $body = (string)curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+            } else {
+                $ctx = stream_context_create(['http' => ['timeout' => 8, 'ignore_errors' => true]]);
+                $body = (string)@file_get_contents($probe, false, $ctx);
+                $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+                if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+            }
+            // Cleanup.
+            @unlink($dir . '/.htaccess'); @unlink($dir . '/ok.php'); @rmdir($dir);
+            $breaks  = ($status >= 500);
+            $works   = (strpos($body, 'PERMALINK-REWRITE-OK') !== false) || ($status >= 200 && $status < 400);
+            echo json_encode(['ok' => true, 'mode' => 'test', 'status' => $status, 'breaks' => $breaks,
+                'supported' => ($works && !$breaks), 'probe_url' => $base . '/' . basename($dir) . '/',
+                'note' => $breaks ? 'HTTP 500 — mod_rewrite/AllowOverride is NOT allowed here; pretty permalinks would break the site.'
+                         : ($works ? 'Rewrite works — safe to apply pretty permalinks.'
+                         : "HTTP $status — inconclusive (dev server does not process .htaccess; test on the real host).")]);
+            exit;
+        }
+
+        // mode=apply
         $r = try_db_connect($s_db);
         if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
         $pdo = $r['pdo']; $prefix = $s_db['prefix'];
-        $structure = '/%postname%/';
-
-        // Set the option; WordPress reads this to build links and rewrite rules.
         $st = $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name = 'permalink_structure'");
         $st->execute([$structure]);
         if ($st->rowCount() === 0) {
             $pdo->prepare("INSERT INTO `{$prefix}options` (option_name, option_value, autoload) VALUES ('permalink_structure', ?, 'yes')")->execute([$structure]);
         }
-        // Clear cached rewrite rules so WordPress rebuilds them.
         $pdo->prepare("DELETE FROM `{$prefix}options` WHERE option_name = 'rewrite_rules'")->execute();
 
-        // Ensure the standard WordPress rewrite block exists in .htaccess.
         $htaccess = $root . '/.htaccess';
         $wrote_htaccess = false;
-        if (is_writable($root) || (is_file($htaccess) && is_writable($htaccess))) {
+        // Plain structures (?p=) don't need rewrite rules.
+        $needs_rewrite = strpos($structure, '?p=') === false && $structure !== '';
+        if ($needs_rewrite && (is_writable($root) || (is_file($htaccess) && is_writable($htaccess)))) {
             if (is_file($htaccess)) @copy($htaccess, $htaccess . '.bak-' . date('YmdHis'));
-            $rules = "# BEGIN WordPress\n<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . /index.php [L]\n</IfModule>\n# END WordPress\n";
             $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
             $existing = trim(preg_replace('/# BEGIN WordPress.*?# END WordPress/s', '', $existing));
             @file_put_contents($htaccess, $rules . ($existing ? "\n" . $existing . "\n" : ''));
             $wrote_htaccess = true;
         }
-        echo json_encode(['ok' => true, 'structure' => $structure, 'htaccess' => $wrote_htaccess,
-            'note' => $wrote_htaccess ? 'Permalinks set and .htaccess updated.' : 'Permalinks set, but .htaccess is not writable — add the WordPress rewrite rules manually.']);
+        echo json_encode(['ok' => true, 'mode' => 'apply', 'structure' => $structure, 'htaccess' => $wrote_htaccess,
+            'note' => !$needs_rewrite ? 'Plain permalinks set (no .htaccess needed).'
+                     : ($wrote_htaccess ? 'Permalinks set and .htaccess updated.' : 'Permalinks set, but .htaccess is not writable — add the WordPress rewrite rules manually.')]);
         exit;
     }
 
@@ -4177,12 +4232,26 @@ foreach ($php_cfg_rows as $r):
     <button class="btn btn-sm btn-success" onclick="seoUpdateMeta()"><?= h(t('Save meta')) ?></button>
 </div>
 
-<div style="background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:14px;margin-bottom:14px">
-    <div style="font-size:12px;color:#a0aec0;margin-bottom:10px"><?= h(t('SEO actions')) ?></div>
+<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:14px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px"><?= h(t('Friendly permalinks')) ?></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <select id="seo_perma_struct" style="padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+            <option value="/%postname%/">/%postname%/ — <?= h(t('Post name (recommended)')) ?></option>
+            <option value="/%year%/%monthnum%/%day%/%postname%/">/%year%/%monthnum%/%day%/%postname%/ — <?= h(t('Day and name')) ?></option>
+            <option value="/%year%/%monthnum%/%postname%/">/%year%/%monthnum%/%postname%/ — <?= h(t('Month and name')) ?></option>
+            <option value="/archives/%post_id%">/archives/%post_id% — <?= h(t('Numeric')) ?></option>
+            <option value="/?p=%post_id%"><?= h(t('Plain (?p=123, no rewrite)')) ?></option>
+        </select>
+        <button class="btn btn-sm btn-warning" id="seo_perma_test_btn" onclick="seoPermaTest()">🧪 <?= h(t('Test safely')) ?></button>
+        <button class="btn btn-sm btn-primary" id="seo_perma_apply_btn" onclick="seoPermaApply()" disabled style="opacity:.5;cursor:not-allowed">✅ <?= h(t('Apply')) ?></button>
+    </div>
+    <div id="seo_perma_result" style="font-size:11px"></div>
+</div>
+<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:14px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px"><?= h(t('SEO actions')) ?></div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <button class="btn btn-sm btn-warning" onclick="seoSetPermalinks()">🔗 <?= h(t('Set friendly permalinks')) ?></button>
         <button class="btn btn-sm btn-warning" onclick="seoGenerateSitemap()">🗺️ <?= h(t('Generate sitemap.xml')) ?></button>
-        <span style="font-size:12px;color:#a0aec0;margin-left:8px"><?= h(t('Indexing')) ?>:</span>
+        <span style="font-size:12px;color:var(--text-muted);margin-left:8px"><?= h(t('Indexing')) ?>:</span>
         <button class="btn btn-sm btn-success" onclick="seoToggleIndex(true)">✅ <?= h(t('Allow')) ?></button>
         <button class="btn btn-sm btn-danger" onclick="seoToggleIndex(false)">🚫 <?= h(t('Block')) ?></button>
     </div>
@@ -5204,11 +5273,57 @@ async function seoUpdateMeta() {
 
 function seoFd() { const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v)); return fd; }
 
-async function seoSetPermalinks() {
-    const r = await fetch('?action=seo_set_permalinks', {method:'POST', body:seoFd()});
+let SEO_PERMA_OK = false;
+function seoPermaDisableApply() {
+    SEO_PERMA_OK = false;
+    const b = document.getElementById('seo_perma_apply_btn');
+    b.disabled = true; b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+}
+document.addEventListener('change', e => { if (e.target && e.target.id === 'seo_perma_struct') seoPermaDisableApply(); });
+
+async function seoPermaTest() {
+    const struct = document.getElementById('seo_perma_struct').value;
+    const box = document.getElementById('seo_perma_result');
+    // Plain ?p= needs no rewrite, so no 500 risk — enable Apply directly.
+    if (struct.indexOf('?p=') !== -1) {
+        box.innerHTML = `<span class="badge badge-ok">✓ ${T_PERMA.noRewrite}</span>`;
+        SEO_PERMA_OK = true;
+        const b = document.getElementById('seo_perma_apply_btn');
+        b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer';
+        return;
+    }
+    box.innerHTML = `<span style="color:var(--text-dim)">🧪 ${T_PERMA.testing}</span>`;
+    seoPermaDisableApply();
+    const fd = seoFd(); fd.append('mode', 'test'); fd.append('structure', struct);
+    let j;
+    try { const r = await fetch('?action=seo_set_permalinks', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e) { box.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok) { box.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    let badge;
+    if (j.breaks)         badge = `<span class="badge badge-err">✗ HTTP ${j.status}</span>`;
+    else if (j.supported) badge = `<span class="badge badge-ok">✓ HTTP ${j.status||'OK'}</span>`;
+    else                  badge = `<span class="badge badge-warn">? HTTP ${j.status||'—'}</span>`;
+    box.innerHTML = `${badge} <span style="color:var(--text-muted)">${esc(j.note)}</span>`;
+    if (j.supported) {
+        SEO_PERMA_OK = true;
+        const b = document.getElementById('seo_perma_apply_btn');
+        b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer';
+    }
+}
+
+async function seoPermaApply() {
+    if (!SEO_PERMA_OK) { log('tls_seo_log', '✗ Run a successful permalink test first.', false); return; }
+    const struct = document.getElementById('seo_perma_struct').value;
+    const fd = seoFd(); fd.append('mode', 'apply'); fd.append('structure', struct);
+    const r = await fetch('?action=seo_set_permalinks', {method:'POST', body:fd});
     const j = await r.json();
     log('tls_seo_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
+    if (j.ok) seoPermaDisableApply();
 }
+const T_PERMA = {
+    testing:   <?= json_encode(t('Testing in isolated folder…')) ?>,
+    noRewrite: <?= json_encode(t('No rewrite needed — safe to apply')) ?>,
+};
 
 async function seoGenerateSitemap() {
     log('tls_seo_log', '⏳ Generating sitemap…', false);
