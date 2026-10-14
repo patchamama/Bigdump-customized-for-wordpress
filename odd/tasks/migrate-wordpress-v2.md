@@ -123,6 +123,23 @@ Delivered in phases, one commit per phase. Release at the end.
       in batches via verify_url with a progress bar; only reachable targets kept) + "Replace verified in DB".
 - Verified vs real test db: analyze found 353 distinct igs-bonn.de URLs; exact swap updated 25 rows (rollback). -> 3.3.0
 
+## v3.4 — fixes + broken-link find&replace (DONE)
+- [x] FIX Split export performance: the splitter wrote a throwaway .zip per statement to measure
+      size — O(n²), a 733KB dump took 104s and large dumps hung. Rewrote to O(n): track raw length,
+      estimate compressed size via a periodically-refreshed ratio (gzencode sampled every 500 stmts
+      or every 25 near the budget, never per-statement), write each .zip once per part. 4.4MB
+      incompressible dump: 161s→9s; multi-part size compliance + 40000 stmts intact verified.
+- [x] FIX Split parts not downloadable from Export files: list_exports token regex '_([a-f0-9]{12})\.'
+      missed 'db_TS_TOKEN_part_001.zip' → now '_([a-f0-9]{12})[._]'. exportDB now calls loadExports()
+      so parts show in the Export files card.
+- [x] FIX Media URL Scanner false positives: scan counted via LIKE '%http%://%.%/wp-content%' which
+      matched rows having a plain http link AND a separate relative /wp-content/ path, reporting rows
+      Fix then left untouched (262 found / 0 fixed). Scan now confirms each row with the SAME regex the
+      fix uses, so count == what Fix rewrites (test: 0, the honest answer — those URLs are relative).
+- [x] NEW Broken Link find & replace: blreplace_analyze finds absolute URLs containing a substring and
+      computes the replaced URL; the browser HTTP-verifies each result and only reachable ones are
+      saved via dburl_apply (serialized-safe, reversible log). Verified vs test: 353 pairs found. -> 3.4.0
+
 ## v2.5–v2.7 follow-ups
 - [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
       bilingual covering the full v2 feature set.

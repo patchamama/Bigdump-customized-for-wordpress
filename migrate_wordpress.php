@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.3.0');
+define('TOOL_VERSION',  '3.4.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -349,6 +349,13 @@ $GLOBALS['__I18N'] = [
         'Broken links found'                  => 'Enlaces rotos encontrados',
         'broken'                              => 'rotos',
         'Open in WordPress admin'             => 'Abrir en el panel de WordPress',
+        // Broken-link find & replace
+        'Find & replace in links'             => 'Buscar y reemplazar en enlaces',
+        'Replace a substring inside links across the database. Before saving, the resulting URL is checked over HTTP and the change is applied only if it responds (exists). Serialized-safe, reversible log.'
+            => 'Reemplaza un texto dentro de los enlaces en toda la base de datos. Antes de guardar, la URL resultante se verifica por HTTP y el cambio se aplica solo si responde (existe). Seguro con datos serializados, registro reversible.',
+        'Find (text in the link)'             => 'Buscar (texto en el enlace)',
+        'Replace with'                        => 'Reemplazar por',
+        'Find, verify & replace'              => 'Buscar, verificar y reemplazar',
         'Code'                                => 'Código',
         'Location in WordPress'               => 'Ubicación en WordPress',
         // Site Password
@@ -533,14 +540,14 @@ function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
 
     $parts      = [];       // committed part file paths
     $part_index = 0;
-    $buffer     = $header;   // statements already committed to the current part
+    $buffer     = $header;   // statements already in the current part
     $in_part    = 0;         // statements in current part (beyond header)
     $stmt       = '';        // statement being read
     $in_string  = false;
     $quote      = '';
     $escaped    = false;
 
-    // Write $content as a .zip and return its real on-disk size (-1 on failure).
+    // Write $content as a .zip once (only when a part is finalized).
     $write_zip = function ($content, $idx) use ($out_dir, $base_name) {
         $part_path = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $idx);
         $sql_entry = sprintf('%s_part_%03d.sql', $base_name, $idx);
@@ -551,6 +558,16 @@ function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
         clearstatcache(true, $part_path);
         return [filesize($part_path), $part_path];
     };
+
+    // Size tracking in O(n): track the raw byte length and estimate the compressed
+    // size as rawLen * ratio. The ratio is refined from a real gzencode sample only
+    // periodically (every N statements), never per-statement, so incompressible data
+    // can't degrade this to O(n²). A conservative budget absorbs estimation error.
+    $budget    = (int)max(16384, $max_bytes * 0.90 - 2048); // room for zip overhead + estimate slack
+    $ratio     = 1.0;                 // start pessimistic (assume incompressible)
+    $rawLen    = strlen($buffer);     // raw bytes currently in the part
+    $footerZ   = strlen($footer);
+    $sinceSample = 0;                 // statements since last real sample
 
     while (true) {
         $line = fgets($fh, 1048576);
@@ -576,44 +593,43 @@ function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
         // At EOF, flush any trailing non-terminated statement with the buffer.
         if ($eof) { if (trim($stmt) !== '') { $buffer .= $stmt; $in_part++; $stmt = ''; } break; }
 
-        // We have one complete statement in $stmt. Measure the real .zip of
-        // buffer + this statement. If it exceeds the limit AND the part already
-        // holds at least one statement, commit the part WITHOUT this statement
-        // and start a fresh part. A single statement bigger than the limit forms
-        // its own (unavoidably oversized) part.
-        $candidate_content = $buffer . $stmt . $footer;
-        [$csize, ] = $write_zip($candidate_content, $part_index + 1);
-        if ($csize === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
-
-        if ($csize > $max_bytes && $in_part > 0) {
-            // Commit current buffer (without the new statement) as the part.
+        // Refresh the ratio from a real sample periodically (bounded cost): every
+        // 500 statements normally, or every 25 when near the budget for a precise
+        // cut. Never per-statement, so incompressible data stays O(n).
+        $candRaw = $rawLen + strlen($stmt) + $footerZ;
+        $est     = $candRaw * $ratio;
+        $sinceSample++;
+        $near    = ($est > $budget * 0.80);
+        if ($in_part > 0 && ($sinceSample >= 500 || ($near && $sinceSample >= 25))) {
+            $ratio = strlen(gzencode($buffer . $stmt . $footer, 6)) / max(1, $candRaw);
+            $est   = $candRaw * $ratio;
+            $sinceSample = 0;
+        }
+        if ($in_part > 0 && $est > $budget) {
             $part_index++;
             [$sz, $path] = $write_zip($buffer . $footer, $part_index);
             if ($sz === -1) { fclose($fh); return ['ok' => false, 'error' => 'Failed writing a zip part']; }
             $parts[] = $path;
-            // Start new part with the pending statement.
             $buffer  = $header . $stmt;
             $in_part = 1;
+            $rawLen  = strlen($buffer);
         } else {
             $buffer .= $stmt;
             $in_part++;
+            $rawLen  = $rawLen + strlen($stmt);
         }
         $stmt = '';
     }
 
     fclose($fh);
 
-    // Commit the final part (buffer always holds the header + remaining stmts).
+    // Write the final part (buffer holds the header + remaining statements).
     if ($in_part > 0 || $buffer !== $header) {
         $part_index++;
         [$sz, $path] = $write_zip($buffer . $footer, $part_index);
         if ($sz === -1) return ['ok' => false, 'error' => 'Failed writing the final zip part'];
         $parts[] = $path;
     }
-
-    // Clean up the probe file left at index+1 if it was never committed.
-    $probe = sprintf('%s/%s_part_%03d.zip', $out_dir, $base_name, $part_index + 1);
-    if (is_file($probe)) @unlink($probe);
 
     return ['ok' => true, 'parts' => $parts, 'count' => count($parts)];
 }
@@ -1613,7 +1629,8 @@ if ($authenticated && isset($_GET['action'])) {
         foreach (glob($dl_dir . '/*.{zip,gz,sql}', GLOB_BRACE) ?: [] as $f) {
             $name   = basename($f);
             $token  = '';
-            if (preg_match('/_([a-f0-9]{12})\./', $name, $m)) $token = $m[1];
+            // Token is 12 hex chars followed by "." or "_" (split parts add _part_NNN).
+            if (preg_match('/_([a-f0-9]{12})[._]/', $name, $m)) $token = $m[1];
             $files[] = [
                 'name'    => $name,
                 'size'    => human_size(filesize($f)),
@@ -2245,6 +2262,49 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- BROKEN LINK FIND & REPLACE: analyze (find substring, compute new URL) ---
+    // Finds absolute URLs containing the "find" substring, computes the URL after
+    // replacing find->replace, and returns the pairs for the browser to HTTP-verify.
+    if ($action === 'blreplace_analyze') {
+        @set_time_limit(0);
+        $u_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $find    = (string)($_POST['find'] ?? '');
+        $replace = (string)($_POST['replace'] ?? '');
+        if ($find === '' || $find === $replace) { echo json_encode(['ok' => false, 'error' => 'Provide a non-empty "find" different from "replace"']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        // Absolute URLs that contain the find substring.
+        $rx = '#https?://[^\s"\'<>()\[\]\\\\]*' . preg_quote($find, '#') . '[^\s"\'<>()\[\]\\\\]*#i';
+        $pairs = [];
+        foreach ([[$prefix.'posts','post_content'],[$prefix.'postmeta','meta_value'],[$prefix.'options','option_value']] as [$tbl,$col]) {
+            try {
+                $st = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE " . $pdo->quote('%' . $find . '%'));
+                while (($v = $st->fetchColumn()) !== false) {
+                    if (!preg_match_all($rx, $v, $m)) continue;
+                    foreach ($m[0] as $u) {
+                        $u = rtrim(str_replace('\\/', '/', $u), '.,;:)\'"');
+                        if (strpos($u, $find) === false) continue;
+                        $to = str_replace($find, $replace, $u);
+                        if ($u !== $to && !isset($pairs[$u])) $pairs[$u] = $to;
+                        if (count($pairs) >= 5000) break 2;
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+        $out = [];
+        foreach ($pairs as $from => $to) $out[] = ['from' => $from, 'to' => $to];
+        echo json_encode(['ok' => true, 'count' => count($out), 'urls' => $out]);
+        exit;
+    }
+
+    // Note: the actual replacement reuses the dburl_apply endpoint (same {from,to}
+    // verified-pairs contract); the browser calls it directly after verification.
+
     // --- SCAN MEDIA URLS ---
     if ($action === 'scan_media_urls') {
         $scan_db = [
@@ -2259,7 +2319,13 @@ if ($authenticated && isset($_GET['action'])) {
         if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
         $pdo    = $r['pdo'];
         $prefix = $scan_db['prefix'];
-        $like   = '%http%://%.%/wp-content%';
+        // SQL prefilter (fast), then confirm per row with the SAME pattern the fix
+        // uses, so the reported count matches exactly what Fix will rewrite. The
+        // previous LIKE-only count produced false positives (rows with a plain http
+        // link AND a separate relative /wp-content/ path), reporting rows the fix
+        // then left untouched.
+        $like    = '%http%://%/wp-content%';
+        $pattern = '#https?://[^\s\'"<>]*?/wp-content/[^\s\'"<>()\[\]\\\\]*#i';
 
         $tables = [
             ['table' => $prefix . 'posts',    'col' => 'post_content', 'id' => 'ID'],
@@ -2273,19 +2339,17 @@ if ($authenticated && isset($_GET['action'])) {
 
         foreach ($tables as $t) {
             try {
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ?");
+                $stmt = $pdo->prepare("SELECT `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ?");
                 $stmt->execute([$like]);
-                $count = (int)$stmt->fetchColumn();
+                $count = 0;
+                while (($val = $stmt->fetchColumn()) !== false) {
+                    if (!preg_match_all($pattern, $val, $m)) continue; // confirm a real absolute URL
+                    $count++;
+                    foreach (array_slice($m[0], 0, 2) as $url) { if (count($samples) < 10) $samples[$url] = true; }
+                }
                 if ($count > 0) {
                     $results[] = ['table' => $t['table'], 'col' => $t['col'], 'count' => $count];
                     $total    += $count;
-                    $ss = $pdo->prepare("SELECT `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ? LIMIT 3");
-                    $ss->execute([$like]);
-                    while ($row = $ss->fetch(PDO::FETCH_NUM)) {
-                        // Allow a subfolder between host and /wp-content/ (e.g. /wordpress/).
-                        preg_match_all('/https?:\/\/[^\s\'"<>]*?\/wp-content\/[^\s\'"<>]{1,80}/', $row[0], $m);
-                        foreach (array_slice($m[0], 0, 2) as $url) $samples[] = $url;
-                    }
                 }
             } catch (Exception $e) {}
         }
@@ -2294,7 +2358,7 @@ if ($authenticated && isset($_GET['action'])) {
             'ok'      => true,
             'total'   => $total,
             'tables'  => $results,
-            'samples' => array_values(array_unique(array_slice($samples, 0, 10))),
+            'samples' => array_values(array_keys($samples)),
         ]);
         exit;
     }
@@ -5240,6 +5304,22 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <div id="bl_progress_txt" style="font-size:11px;color:#718096;margin-top:4px"></div>
 </div>
 <div id="bl_results"></div>
+
+<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">🔁 <?= h(t('Find & replace in links')) ?></div>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+        <?= h(t('Replace a substring inside links across the database. Before saving, the resulting URL is checked over HTTP and the change is applied only if it responds (exists). Serialized-safe, reversible log.')) ?>
+    </p>
+    <div class="row">
+        <div class="field" style="margin:0"><label><?= h(t('Find (text in the link)')) ?></label><input type="text" id="blr_find" placeholder="http://old-domain.com/old-path"></div>
+        <div class="field" style="margin:0"><label><?= h(t('Replace with')) ?></label><input type="text" id="blr_replace" placeholder="https://new-domain.com/new-path"></div>
+    </div>
+    <div class="actions" style="margin-top:8px">
+        <button class="btn btn-sm btn-primary" id="blr_btn" onclick="blrFindReplace()">🔁 <?= h(t('Find, verify & replace')) ?></button>
+    </div>
+    <div id="blr_progress" style="display:none;margin-top:8px"><div class="progress"><div class="progress-bar" id="blr_bar" style="width:0%"></div></div><div id="blr_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="blr_result" style="font-size:12px;margin-top:6px"></div>
+</div>
 </div>
 
 <div class="card">
@@ -5943,6 +6023,8 @@ async function exportDB(){
         const el = document.getElementById('exp_log');
         el.innerHTML += `\n✓ DB exported via ${j.method} — ${j.size}\n📥 <a href="${j.url}" style="color:#7dd3fc" target="_blank">${j.filename}</a>\n`;
     }
+    // Refresh the "Export files" list so the new file(s)/parts show up there too.
+    if (typeof loadExports === 'function') loadExports();
 }
 
 async function exportZip(){
@@ -6385,6 +6467,55 @@ const T_BL = {
     openwp:  <?= json_encode(t('Open in WordPress admin')) ?>,
     code:    <?= json_encode(t('Code')) ?>,
     location:<?= json_encode(t('Location in WordPress')) ?>,
+};
+
+// --- Broken Link find & replace (verify target exists before saving) ---
+function blrCreds(fd){ ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('exp_db_'+k)?.value || document.getElementById('tls_db_'+k)?.value || '')); return fd; }
+async function blrFindReplace(){
+    const find = document.getElementById('blr_find').value;
+    const repl = document.getElementById('blr_replace').value;
+    if (!find || find === repl){ alert('Enter a "find" value different from "replace".'); return; }
+    const out = document.getElementById('blr_result');
+    const btn = document.getElementById('blr_btn'); btn.disabled = true; btn.textContent = '⏳';
+    out.innerHTML = '<span style="color:var(--text-dim)">⏳ ' + T_BLR.finding + '</span>';
+    // 1) find candidate URLs + their replaced form
+    const fd = blrCreds(new FormData()); fd.append('find', find); fd.append('replace', repl);
+    let j;
+    try { j = await (await fetch('?action=blreplace_analyze', {method:'POST', body:fd})).json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; btn.disabled=false; btn.textContent='🔁 '+T_BLR.btn; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; btn.disabled=false; btn.textContent='🔁 '+T_BLR.btn; return; }
+    if (!j.count){ out.innerHTML = `<span style="color:#6ee7b7">✓ ${T_BLR.none}</span>`; btn.disabled=false; btn.textContent='🔁 '+T_BLR.btn; return; }
+    // 2) HTTP-verify each resulting URL in batches; keep only reachable ones
+    document.getElementById('blr_progress').style.display = 'block';
+    const bar = document.getElementById('blr_bar'), ptxt = document.getElementById('blr_ptxt');
+    const verified = []; let done = 0, ok = 0, fail = 0; const B = 10;
+    for (let i=0; i<j.urls.length; i+=B){
+        const slice = j.urls.slice(i, i+B);
+        const vf = new FormData(); vf.append('urls', JSON.stringify(slice.map(x => x.to)));
+        let v; try { v = await (await fetch('?action=verify_url', {method:'POST', body:vf})).json(); } catch(e){ v={ok:false}; }
+        slice.forEach(x => { const res=(v.ok&&v.results[x.to])?v.results[x.to]:{ok:false}; if(res.ok){verified.push(x);ok++;}else fail++; });
+        done += slice.length; const pct=Math.round(done/j.urls.length*100); bar.style.width=pct+'%';
+        ptxt.textContent = `${T_BLR.verifying} ${done}/${j.urls.length} — ${ok} ✓ / ${fail} ✗`;
+    }
+    if (!verified.length){ out.innerHTML = `<span style="color:#fcd34d">${T_BLR.foundButNone} (${j.count} ${T_BLR.foundN}, 0 ${T_BLR.reachable})</span>`; btn.disabled=false; btn.textContent='🔁 '+T_BLR.btn; return; }
+    if (!confirm(T_BLR.confirm.replace('%d', verified.length))){ btn.disabled=false; btn.textContent='🔁 '+T_BLR.btn; return; }
+    // 3) apply only the verified pairs (reuses dburl_apply)
+    let rows = 0; done = 0;
+    for (let i=0; i<verified.length; i+=50){
+        const slice = verified.slice(i, i+50);
+        const af = blrCreds(new FormData()); af.append('pairs', JSON.stringify(slice));
+        try { const a = await (await fetch('?action=dburl_apply', {method:'POST', body:af})).json(); if (a.ok) rows += a.updated_rows||0; } catch(e){}
+        done += slice.length; bar.style.width = Math.round(done/verified.length*100)+'%'; ptxt.textContent = `${T_BLR.applying} ${done}/${verified.length}`;
+    }
+    out.innerHTML = `<span style="color:#6ee7b7">✓ ${T_BLR.done}: ${verified.length} URL(s), ${rows} ${T_BLR.rows} (${fail} ${T_BLR.skipped})</span>`;
+    btn.disabled = false; btn.textContent = '🔁 ' + T_BLR.btn;
+}
+const T_BLR = {
+    btn: <?= json_encode(t('Find, verify & replace')) ?>, finding: <?= json_encode(t('Finding links…')) ?>,
+    verifying: <?= json_encode(t('Verifying')) ?>, applying: <?= json_encode(t('Applying')) ?>,
+    none: <?= json_encode(t('No links contain that text.')) ?>, foundButNone: <?= json_encode(t('No replaced URL responds — nothing changed')) ?>,
+    foundN: <?= json_encode(t('found')) ?>, reachable: <?= json_encode(t('reachable')) ?>, skipped: <?= json_encode(t('skipped (unreachable)')) ?>,
+    confirm: <?= json_encode(t('Replace in %d verified link(s) in the database?')) ?>, done: <?= json_encode(t('Done')) ?>, rows: <?= json_encode(t('rows updated')) ?>,
 };
 
 // --- WordPress Users ---
