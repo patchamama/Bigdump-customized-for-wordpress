@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.8.1');
+define('TOOL_VERSION',  '2.9.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -260,6 +260,9 @@ $GLOBALS['__I18N'] = [
         'checked'                             => 'verificadas',
         'Broken links found'                  => 'Enlaces rotos encontrados',
         'broken'                              => 'rotos',
+        'Open in WordPress admin'             => 'Abrir en el panel de WordPress',
+        'Code'                                => 'Código',
+        'Location in WordPress'               => 'Ubicación en WordPress',
         // Site Password
         'Site Password (HTTP Basic)'          => 'Contraseña del sitio (HTTP Basic)',
         'Protect the whole site with an HTTP Basic password (.htaccess + .htpasswd). Before applying, a test writes the rule into an isolated subfolder and checks the host returns 401 (auth required), not 500. Open the test URL to confirm the login prompt appears; Apply stays disabled until the test passes.'
@@ -1951,37 +1954,56 @@ if ($authenticated && isset($_GET['action'])) {
         $pdo = $r['pdo']; $prefix = $c_db['prefix'];
 
         $cur_host = preg_replace('#^www\.#', '', strtolower(parse_url(current_url(), PHP_URL_HOST) ?? ''));
-        $tables = [
-            [$prefix . 'posts', 'post_content'],
-            [$prefix . 'postmeta', 'meta_value'],
-            [$prefix . 'options', 'option_value'],
-        ];
+        // Base WP admin URL to build "edit this post" links shown next to each URL.
+        $home = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='siteurl' LIMIT 1")->fetchColumn(), '/');
         $url_rx = '#https?://[^\s"\'<>()\[\]\\\\]+#i';
-        $urls = []; // url => host
-        foreach ($tables as [$tbl, $col]) {
-            try {
-                $stmt = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE '%http%'");
-                while (($val = $stmt->fetchColumn()) !== false) {
-                    if (strpos($val, 'http') === false) continue;
-                    if (!preg_match_all($url_rx, $val, $m)) continue;
-                    foreach ($m[0] as $u) {
-                        $u = rtrim($u, '.,;:)\'"');
-                        $host = preg_replace('#^www\.#', '', strtolower(parse_url($u, PHP_URL_HOST) ?? ''));
-                        if ($host === '') continue;
-                        if ($scope === 'site' && $host !== $cur_host) {
-                            // In "site" scope keep only the current host (legacy hosts
-                            // the user is migrating from are usually the current one's
-                            // old URLs — those are covered once rewritten). Skip pure externals.
-                            continue;
-                        }
-                        if (!isset($urls[$u])) $urls[$u] = $host;
-                        if (count($urls) >= $cap) break 3;
-                    }
-                }
-            } catch (Exception $e) {}
-        }
+        $urls = []; // url => ['host'=>, 'where'=>, 'edit'=>, 'type'=>]
+
+        // Capture the source: which post/page/meta/option each URL came from, plus a
+        // WP-admin edit link when it is a post/page, so the user can locate it.
+        $add = function ($u, $where, $edit, $type) use (&$urls, $scope, $cur_host, $cap) {
+            $u = rtrim($u, '.,;:)\'"');
+            $host = preg_replace('#^www\.#', '', strtolower(parse_url($u, PHP_URL_HOST) ?? ''));
+            if ($host === '') return true;
+            if ($scope === 'site' && $host !== $cur_host) return true;
+            if (!isset($urls[$u])) $urls[$u] = ['host' => $host, 'where' => $where, 'edit' => $edit, 'type' => $type];
+            return count($urls) < $cap;
+        };
+
+        // 1) posts/pages — content with title + edit link.
+        try {
+            $stmt = $pdo->query("SELECT ID, post_title, post_type, post_content FROM `{$prefix}posts` WHERE post_content LIKE '%http%' AND post_status IN ('publish','draft','private','pending')");
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                if (!preg_match_all($url_rx, $row['post_content'], $m)) continue;
+                $title = $row['post_title'] !== '' ? $row['post_title'] : ('#' . $row['ID']);
+                $where = ucfirst($row['post_type']) . ': ' . $title;
+                $edit  = $home . '/wp-admin/post.php?post=' . (int)$row['ID'] . '&action=edit';
+                foreach ($m[0] as $u) { if (!$add($u, $where, $edit, 'post')) break 2; }
+            }
+        } catch (Exception $e) {}
+        // 2) postmeta — attach to the owning post (Elementor/ACF/Divi data).
+        try {
+            $stmt = $pdo->query("SELECT pm.post_id, pm.meta_key, pm.meta_value, p.post_title, p.post_type FROM `{$prefix}postmeta` pm LEFT JOIN `{$prefix}posts` p ON p.ID = pm.post_id WHERE pm.meta_value LIKE '%http%'");
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                if (!preg_match_all($url_rx, $row['meta_value'], $m)) continue;
+                $title = ($row['post_title'] ?? '') !== '' ? $row['post_title'] : ('#' . (int)$row['post_id']);
+                $where = 'Meta (' . $row['meta_key'] . ') · ' . ucfirst((string)($row['post_type'] ?? 'post')) . ': ' . $title;
+                $edit  = $row['post_id'] ? $home . '/wp-admin/post.php?post=' . (int)$row['post_id'] . '&action=edit' : '';
+                foreach ($m[0] as $u) { if (!$add($u, $where, $edit, 'meta')) break 2; }
+            }
+        } catch (Exception $e) {}
+        // 3) options — settings/widgets, no edit link.
+        try {
+            $stmt = $pdo->query("SELECT option_name, option_value FROM `{$prefix}options` WHERE option_value LIKE '%http%'");
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                if (!preg_match_all($url_rx, $row['option_value'], $m)) continue;
+                $where = 'Option: ' . $row['option_name'];
+                foreach ($m[0] as $u) { if (!$add($u, $where, '', 'option')) break 2; }
+            }
+        } catch (Exception $e) {}
+
         $out = [];
-        foreach ($urls as $u => $host) $out[] = ['url' => $u, 'host' => $host];
+        foreach ($urls as $u => $meta) $out[] = ['url' => $u] + $meta;
         echo json_encode(['ok' => true, 'scope' => $scope, 'cap' => $cap, 'total' => count($out), 'urls' => $out]);
         exit;
     }
@@ -4815,7 +4837,7 @@ async function checkBrokenLinks() {
         catch(e) { j = {ok:false}; }
         slice.forEach(x => {
             const res = (j.ok && j.results[x.url]) ? j.results[x.url] : {ok:false, status:0};
-            if (!res.ok) { (broken[x.host] = broken[x.host] || []).push({url:x.url, status:res.status}); }
+            if (!res.ok) { (broken[x.host] = broken[x.host] || []).push({url:x.url, status:res.status, where:x.where||'', edit:x.edit||'', type:x.type||''}); }
         });
         done += slice.length;
         const pct = Math.round(done / c.urls.length * 100);
@@ -4829,18 +4851,35 @@ async function checkBrokenLinks() {
     const hosts = Object.keys(broken).sort((a,b) => broken[b].length - broken[a].length);
     if (!hosts.length) { out.innerHTML = `<div style="color:#6ee7b7;font-size:13px">✓ ${T_BL.allok} (${done} ${T_BL.checked}).</div>`; return; }
     let html = `<div style="font-size:12px;color:#fcd34d;margin-bottom:8px">${T_BL.found}: ${hosts.reduce((a,h)=>a+broken[h].length,0)} (${done} ${T_BL.checked})</div>`;
-    html += '<div style="border:1px solid #2d3148;border-radius:6px;overflow:hidden">';
+    html += '<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">';
+    const typeIcon = {post:'📝', meta:'🧩', option:'⚙️'};
     hosts.forEach(h => {
-        const items = broken[h].map(b =>
-            `<div style="padding:4px 14px;font-size:11px;font-family:monospace;border-top:1px solid #1a1d2733">
-                <span class="badge badge-err">${b.status||'—'}</span>
-                <a href="${esc(b.url)}" target="_blank" style="color:#7dd3fc;word-break:break-all">${esc(b.url)}</a>
-            </div>`).join('');
-        html += `<details style="border-bottom:1px solid #2d3148">
-            <summary style="padding:8px 14px;cursor:pointer;font-size:13px;background:#1a1d27;list-style:none">
-                <span style="font-family:monospace;color:#e2e8f0">${esc(h)}</span>
+        const items = broken[h].map(b => {
+            // "Where" cell: location text + an edit icon that opens WP admin in a new tab.
+            const icon = typeIcon[b.type] || '🔗';
+            const whereHtml = b.where
+                ? `<span style="color:var(--text-muted)">${icon} ${esc(b.where)}</span>` +
+                  (b.edit ? ` <a href="${esc(b.edit)}" target="_blank" title="${T_BL.openwp}" style="color:#7dd3fc;text-decoration:none">✎</a>` : '')
+                : '<span style="color:var(--text-dim)">—</span>';
+            return `<tr style="border-top:1px solid var(--border)">
+                <td style="padding:5px 10px;vertical-align:top"><span class="badge badge-err">${b.status||'—'}</span></td>
+                <td style="padding:5px 10px;font-size:11px;font-family:monospace;vertical-align:top">
+                    <a href="${esc(b.url)}" target="_blank" style="color:#7dd3fc;word-break:break-all">${esc(b.url)}</a></td>
+                <td style="padding:5px 10px;font-size:11px;vertical-align:top">${whereHtml}</td>
+            </tr>`;
+        }).join('');
+        html += `<details style="border-bottom:1px solid var(--border)">
+            <summary style="padding:8px 14px;cursor:pointer;font-size:13px;background:var(--surface);list-style:none">
+                <span style="font-family:monospace;color:var(--text)">${esc(h)}</span>
                 <span class="badge badge-err" style="margin-left:6px">${broken[h].length} ${T_BL.broken}</span>
-            </summary>${items}</details>`;
+            </summary>
+            <table style="width:100%;border-collapse:collapse;background:var(--surface2)">
+                <tr style="color:var(--text-dim);font-size:10px;text-transform:uppercase">
+                    <th style="padding:4px 10px;text-align:left">${T_BL.code}</th>
+                    <th style="padding:4px 10px;text-align:left">URL</th>
+                    <th style="padding:4px 10px;text-align:left">${T_BL.location}</th>
+                </tr>${items}
+            </table></details>`;
     });
     html += '</div>';
     out.innerHTML = html;
@@ -4850,6 +4889,9 @@ const T_BL = {
     checked: <?= json_encode(t('checked')) ?>,
     found:   <?= json_encode(t('Broken links found')) ?>,
     broken:  <?= json_encode(t('broken')) ?>,
+    openwp:  <?= json_encode(t('Open in WordPress admin')) ?>,
+    code:    <?= json_encode(t('Code')) ?>,
+    location:<?= json_encode(t('Location in WordPress')) ?>,
 };
 
 // --- WordPress Users ---
