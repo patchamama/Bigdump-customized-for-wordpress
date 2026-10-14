@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.6.0');
+define('TOOL_VERSION',  '2.7.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -201,9 +201,14 @@ $GLOBALS['__I18N'] = [
         'On'                                  => 'Activar',
         'Off'                                 => 'Desactivar',
         'Maintenance mode'                    => 'Modo mantenimiento',
-        'Download the latest phpMyAdmin and extract it into a /phpmyadmin folder. No config is written — set the connection on first access. Remove the folder when you are done.'
-            => 'Descarga la última versión de phpMyAdmin y la extrae en una carpeta /phpmyadmin. No se escribe configuración — definí la conexión en el primer acceso. Eliminá la carpeta al terminar.',
+        'Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after 30 seconds so afterwards you must log in manually.'
+            => 'Descarga la última versión de phpMyAdmin en una carpeta con nombre aleatorio (más difícil de encontrar para bots). El path se muestra abajo. "Acceso temporal" escribe una configuración con las credenciales de la base de datos y abre phpMyAdmin ya autenticado; la configuración se autodestruye a los 30 segundos, así que después hay que iniciar sesión manualmente.',
         'Download & install phpMyAdmin'       => 'Descargar e instalar phpMyAdmin',
+        'Installed at'                        => 'Instalado en',
+        'Not installed yet.'                  => 'Aún no instalado.',
+        'Temporary access (30s)'              => 'Acceso temporal (30s)',
+        'Remove credentials now'              => 'Quitar credenciales ahora',
+        'Credentials expire in'               => 'Las credenciales expiran en',
         // SEO
         'SEO'                                 => 'SEO',
         'Audit SEO basics (indexability, title/tagline, friendly permalinks, sitemap, robots.txt, HTTPS), edit the title and tagline, toggle indexing, generate a sitemap, request indexing and check if the site is indexed. Uses the DB connection configured above.'
@@ -3084,16 +3089,20 @@ if ($authenticated && isset($_GET['action'])) {
     }
 
     // --- INSTALL PHPMYADMIN ---
-    // Downloads the latest phpMyAdmin and extracts it into ./phpmyadmin. No config
-    // is written; the user configures the connection on first access.
+    // Downloads the latest phpMyAdmin into a randomly-named folder (phpmyadmin_<rand>)
+    // so the admin path is not guessable by bots/scanners. No config is written at
+    // install time; credentials are placed on demand by pma_config_on and auto-expire.
     if ($action === 'pma_install') {
         @set_time_limit(0);
         @ini_set('memory_limit', '512M');
-        $dest    = rtrim($abspath, '/') . '/phpmyadmin';
+        $root    = rtrim($abspath, '/');
+        // Reuse an existing random folder if present; otherwise create a new one.
+        $existing = glob($root . '/phpmyadmin_*', GLOB_ONLYDIR);
+        $dest    = ($existing && is_dir($existing[0])) ? $existing[0] : $root . '/phpmyadmin_' . bin2hex(random_bytes(5));
         $tmp_zip = sys_get_temp_dir() . '/pma_' . time() . '.zip';
         // Latest stable English build.
         $url     = 'https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-english.zip';
-        if (is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'A /phpmyadmin folder already exists. Remove it first.']); exit; }
+        if (is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'phpMyAdmin is already installed at ' . basename($dest) . '. Remove it first to reinstall.']); exit; }
 
         $downloaded = false; $dl_method = '';
         if (check_cmd('curl')) {
@@ -3139,11 +3148,58 @@ if ($authenticated && isset($_GET['action'])) {
             foreach (glob($tmp_dir . '/*') ?: [] as $f) { if (is_dir($f)) @rmdir($f); else @unlink($f); }
             @rmdir($tmp_dir);
         }
-        if (!is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'Extraction succeeded but moving to /phpmyadmin failed.']); exit; }
+        if (!is_dir($dest)) { echo json_encode(['ok' => false, 'error' => 'Extraction succeeded but moving to the phpMyAdmin folder failed.']); exit; }
 
         $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
         $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
-        echo json_encode(['ok' => true, 'dl_method' => $dl_method, 'ex_method' => $ex_method, 'url' => $base . '/phpmyadmin/']);
+        $folder = basename($dest);
+        echo json_encode(['ok' => true, 'dl_method' => $dl_method, 'ex_method' => $ex_method, 'folder' => $folder, 'url' => $base . '/' . $folder . '/']);
+        exit;
+    }
+
+    // --- PHPMYADMIN: write an auto-expiring config with credentials ---
+    // Drops a config.inc.php carrying the DB credentials plus a self-destruct guard:
+    // the file deletes itself when loaded more than TTL seconds after creation, so
+    // credentials never linger even if the browser tab is closed. Returns the URL.
+    if ($action === 'pma_config_on') {
+        $root = rtrim($abspath, '/');
+        $dirs = glob($root . '/phpmyadmin_*', GLOB_ONLYDIR);
+        if (!$dirs) { echo json_encode(['ok' => false, 'error' => 'phpMyAdmin is not installed yet.']); exit; }
+        $dir = $dirs[0];
+        $ttl = 30;
+        $host = $_POST['db_host'] ?? $db['host'];
+        $user = $_POST['db_user'] ?? $db['user'];
+        $pass = $_POST['db_pass'] ?? $db['pass'];
+        $created = time();
+        $secret  = bin2hex(random_bytes(16));
+        $self    = $dir . '/config.inc.php';
+        // The guard runs first: past TTL it unlinks this very file and stops.
+        $php  = "<?php\n";
+        $php .= "\$__pma_created = $created; \$__pma_ttl = $ttl;\n";
+        $php .= "if (time() - \$__pma_created > \$__pma_ttl) { @unlink(__FILE__); header('Location: index.php'); exit; }\n";
+        $php .= "\$cfg['blowfish_secret'] = '$secret';\n";
+        $php .= "\$i = 0; \$i++;\n";
+        $php .= "\$cfg['Servers'][\$i]['auth_type'] = 'config';\n";
+        $php .= "\$cfg['Servers'][\$i]['host'] = " . var_export($host, true) . ";\n";
+        $php .= "\$cfg['Servers'][\$i]['user'] = " . var_export($user, true) . ";\n";
+        $php .= "\$cfg['Servers'][\$i]['password'] = " . var_export($pass, true) . ";\n";
+        $php .= "\$cfg['Servers'][\$i]['AllowNoPassword'] = true;\n";
+        if (@file_put_contents($self, $php) === false) { echo json_encode(['ok' => false, 'error' => 'Could not write config.inc.php (folder not writable)']); exit; }
+        @chmod($self, 0600);
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+        echo json_encode(['ok' => true, 'ttl' => $ttl, 'url' => $base . '/' . basename($dir) . '/']);
+        exit;
+    }
+
+    // --- PHPMYADMIN: remove the credentials config now ---
+    if ($action === 'pma_config_off') {
+        $root = rtrim($abspath, '/');
+        $removed = 0;
+        foreach (glob($root . '/phpmyadmin_*', GLOB_ONLYDIR) ?: [] as $dir) {
+            if (@unlink($dir . '/config.inc.php')) $removed++;
+        }
+        echo json_encode(['ok' => true, 'removed' => $removed]);
         exit;
     }
 
@@ -3413,6 +3469,10 @@ $abspath_size = is_dir($abspath) ? dir_size($abspath) : 0;
 // Is bigdump.php already present next to the site? If so we can link to open it.
 $bigdump_present = is_file(rtrim($abspath, '/') . '/bigdump.php');
 $bigdump_url     = rtrim(dirname($current_url), '/') . '/bigdump.php';
+// Detect an installed phpMyAdmin folder (random name) to always show its path.
+$pma_dirs    = glob(rtrim($abspath, '/') . '/phpmyadmin_*', GLOB_ONLYDIR) ?: [];
+$pma_folder  = $pma_dirs ? basename($pma_dirs[0]) : '';
+$pma_url     = $pma_folder ? rtrim(dirname($current_url), '/') . '/' . $pma_folder . '/' : '';
 
 ?><!DOCTYPE html>
 <html lang="en">
@@ -4116,11 +4176,21 @@ foreach ($php_cfg_rows as $r):
 <div class="card">
 <h2>🗃️ phpMyAdmin</h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
-    <?= h(t('Download the latest phpMyAdmin and extract it into a /phpmyadmin folder. No config is written — set the connection on first access. Remove the folder when you are done.')) ?>
+    <?= h(t('Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after 30 seconds so afterwards you must log in manually.')) ?>
 </p>
-<div class="actions">
-    <button id="tls_pma_btn" class="btn btn-primary" onclick="installPhpMyAdmin()">⬇️ <?= h(t('Download & install phpMyAdmin')) ?></button>
+<div id="tls_pma_path" style="font-size:12px;margin-bottom:12px">
+    <?php if ($pma_folder): ?>
+        <?= h(t('Installed at')) ?>: <a href="<?= h($pma_url) ?>" target="_blank" style="color:#7dd3fc;font-family:monospace"><?= h($pma_folder) ?>/</a>
+    <?php else: ?>
+        <span style="color:#718096"><?= h(t('Not installed yet.')) ?></span>
+    <?php endif; ?>
 </div>
+<div class="actions">
+    <button id="tls_pma_btn" class="btn btn-primary" onclick="installPhpMyAdmin()"<?= $pma_folder ? ' style="display:none"' : '' ?>>⬇️ <?= h(t('Download & install phpMyAdmin')) ?></button>
+    <button id="tls_pma_cfg_btn" class="btn btn-warning" onclick="pmaTempAccess()"<?= $pma_folder ? '' : ' style="display:none"' ?>>⏱️ <?= h(t('Temporary access (30s)')) ?></button>
+    <button id="tls_pma_off_btn" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;<?= $pma_folder ? '' : 'display:none' ?>" onclick="pmaConfigOff()"><?= h(t('Remove credentials now')) ?></button>
+</div>
+<div id="tls_pma_countdown" style="font-size:12px;color:#fcd34d;margin-top:10px"></div>
 <div id="tls_pma_log" class="log" style="display:none;margin-top:12px"></div>
 </div>
 
@@ -5108,13 +5178,59 @@ async function installPhpMyAdmin() {
         const r = await fetch('?action=pma_install', {method:'POST', body:fd});
         const j = await r.json();
         if (j.ok) {
-            log('tls_pma_log', `✓ Installed via ${j.dl_method}/${j.ex_method}.\n🔗 <a href="${j.url}" target="_blank" style="color:#7dd3fc">${j.url}</a>\n⚠ Remove the /phpmyadmin folder when done.`, false);
+            log('tls_pma_log', `✓ Installed (${j.dl_method}/${j.ex_method}) at ${j.folder}/`, false);
+            // Reveal path + temporary-access controls, hide the install button.
+            document.getElementById('tls_pma_path').innerHTML =
+                `${T_PMA.installed}: <a href="${j.url}" target="_blank" style="color:#7dd3fc;font-family:monospace">${esc(j.folder)}/</a>`;
+            btn.style.display = 'none';
+            document.getElementById('tls_pma_cfg_btn').style.display = 'inline-flex';
+            document.getElementById('tls_pma_off_btn').style.display = 'inline-flex';
         } else {
             log('tls_pma_log', '✗ ' + j.error, false);
+            btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin';
         }
-    } catch(e) { log('tls_pma_log', '✗ ' + e.message, false); }
-    btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin';
+    } catch(e) { log('tls_pma_log', '✗ ' + e.message, false); btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin'; }
 }
+
+let PMA_TIMER = null;
+async function pmaTempAccess() {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    log('tls_pma_log', '⏱️ Writing temporary credentials…', false);
+    let j;
+    try { const r = await fetch('?action=pma_config_on', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e) { log('tls_pma_log', '✗ ' + e.message, false); return; }
+    if (!j.ok) { log('tls_pma_log', '✗ ' + j.error, false); return; }
+    // Open phpMyAdmin (already logged in via the config) in a new tab.
+    window.open(j.url, '_blank');
+    log('tls_pma_log', `✓ Opened ${j.url} — credentials self-destruct in ${j.ttl}s.`, false);
+    // Countdown; at the end remove the config as reinforcement (server also self-expires).
+    let left = j.ttl;
+    const cd = document.getElementById('tls_pma_countdown');
+    clearInterval(PMA_TIMER);
+    PMA_TIMER = setInterval(() => {
+        left--;
+        cd.textContent = left > 0 ? `${T_PMA.expiring} ${left}s…` : '';
+        if (left <= 0) { clearInterval(PMA_TIMER); pmaConfigOff(true); }
+    }, 1000);
+    cd.textContent = `${T_PMA.expiring} ${left}s…`;
+}
+
+async function pmaConfigOff(silent) {
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    try {
+        const r = await fetch('?action=pma_config_off', {method:'POST', body:fd});
+        const j = await r.json();
+        if (!silent) log('tls_pma_log', j.ok ? `✓ Credentials removed (${j.removed}). Manual login required now.` : `✗ ${j.error}`, false);
+        else log('tls_pma_log', '🔒 Temporary credentials expired and removed.', false);
+    } catch(e) { if (!silent) log('tls_pma_log', '✗ ' + e.message, false); }
+    document.getElementById('tls_pma_countdown').textContent = '';
+}
+const T_PMA = {
+    installed: <?= json_encode(t('Installed at')) ?>,
+    expiring:  <?= json_encode(t('Credentials expire in')) ?>,
+};
 
 // --- Site Password (HTTP Basic) ---
 let SP_VALIDATED = false;

@@ -76,7 +76,18 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] S3c: "Get BigDump" header button (fetch_bigdump downloads bigdump.php from the repo into
       the site root) + auto-revealed "Open BigDump" link (also shown when bigdump.php already
       present). -> 2.4.0
-- [ ] S4: README + tag v2.4.0-wp + GitHub release.
+- [x] S4: README + tag v2.4.0-wp + GitHub release (created once GITHUB_TOKEN env var removed).
+
+## v2.5–v2.7 follow-ups
+- [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
+      bilingual covering the full v2 feature set.
+- [x] v2.6.0: Broken Link Checker — scan_broken_collect extracts linked URLs (scope site/all,
+      capped), browser verifies in batches with a stoppable progress bar, broken links (400+/no
+      reply) grouped by domain, each opening in a new tab. Verified collection vs real `test` db.
+- [x] v2.7.0: phpMyAdmin hardening — random folder name phpmyadmin_<rand> (detected on load to
+      always show the path), pma_config_on writes an auto-EXPIRING config.inc.php (self-deletes
+      server-side after 30s even if the tab closes; verified), auto-opens phpMyAdmin logged in,
+      JS countdown + pma_config_off reinforcement. Config self-destruct unit-tested.
 
 ## P1 verification
 - php -l OK, HTTP 200.
