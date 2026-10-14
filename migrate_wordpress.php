@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.1.0');
+define('TOOL_VERSION',  '3.2.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -181,6 +181,27 @@ $GLOBALS['__I18N'] = [
             => 'Detecta qué archivos de wp-content/uploads se usan realmente (referenciados en la base de datos, con sus miniaturas de WordPress) y crea una carpeta uploads nueva solo con esos. La carpeta actual se renombra a uploads_old-remove-it_* (se conserva como respaldo, no se borra) y se escribe un registro para restaurar. Analizá primero para ver cuánto espacio se liberaría; nada cambia hasta que apliques.',
         'Analyze (dry-run)'                   => 'Analizar (simulación)',
         'Build clean uploads (keep old as backup)' => 'Crear uploads limpio (conservar el viejo como respaldo)',
+        // Optimize uploads
+        'Optimize uploads (organize / dedupe / sanitize)' => 'Optimizar uploads (organizar / deduplicar / sanear)',
+        'Three safe optimizations for a crowded wp-content/uploads. Each one locates files in the database first, moves/renames/merges them on disk, updates every reference, and writes a reversible JSON log. Analyze first (dry-run); apply runs in batches with a progress bar.'
+            => 'Tres optimizaciones seguras para un wp-content/uploads saturado. Cada una localiza primero los archivos en la base de datos, los mueve/renombra/fusiona en disco, actualiza todas las referencias, y escribe un registro JSON reversible. Analizá primero (simulación); aplicar corre por lotes con barra de progreso.',
+        'WordPress will keep uploading new files to its own year/month layout; this reorganizes existing files and updates their references. Changes are logged and reversible.'
+            => 'WordPress seguirá subiendo archivos nuevos a su propia estructura año/mes; esto reorganiza los archivos existentes y actualiza sus referencias. Los cambios se registran y son reversibles.',
+        'Organize into subfolders'            => 'Organizar en subcarpetas',
+        'YYYYMMDD_name → YYYY/MM/name; otherwise → FirstLetter/name. Moves thumbnails too.'
+            => 'YYYYMMDD_nombre → AAAA/MM/nombre; si no → PrimeraLetra/nombre. Mueve también las miniaturas.',
+        'Deduplicate identical files'         => 'Deduplicar archivos idénticos',
+        'Same size + same hash → keep one, repoint references, delete the rest.'
+            => 'Mismo tamaño + mismo hash → conservar uno, reapuntar referencias, borrar el resto.',
+        'Sanitize special-character names'    => 'Sanear nombres con caracteres especiales',
+        'Accents, spaces and symbols → safe ASCII names. Updates references too.'
+            => 'Acentos, espacios y símbolos → nombres ASCII seguros. Actualiza también las referencias.',
+        'Found'                               => 'Encontrados',
+        'Nothing to optimize'                 => 'Nada que optimizar',
+        'Hashing files…'                      => 'Calculando hash…',
+        'Apply this optimization? Files on disk and database references will change (logged and reversible).'
+            => '¿Aplicar esta optimización? Cambiarán archivos en disco y referencias en la base de datos (registrado y reversible).',
+        'Changes written to a reversible log.' => 'Cambios escritos en un registro reversible.',
         // Test Environment (sandbox)
         'Test Environment (sandbox)'          => 'Entorno de prueba (sandbox)',
         'Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.'
@@ -1715,6 +1736,66 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- UPLOADS OPTIMIZATION: shared helpers (organize / dedupe / sanitize) ---
+    // Replace an uploads-relative path with a new one across posts/postmeta/options,
+    // serialized-safe (recalculates s:LENGTH). Returns the number of rows updated.
+    // $from and $to are relative to wp-content/uploads (e.g. "2023/foto.jpg").
+    $uploads_replace_ref = function ($pdo, $prefix, $from, $to) {
+        if ($from === $to) return 0;
+        $tables = [[$prefix.'posts','post_content','ID'],[$prefix.'postmeta','meta_value','meta_id'],[$prefix.'options','option_value','option_id']];
+        $updated = 0;
+        // Match the path with or without a leading /wp-content/uploads/ and with escaped slashes.
+        $needles = ['wp-content/uploads/' . $from];
+        $swap = function ($s) use ($from, $to) {
+            $a = 'wp-content/uploads/' . $from;
+            $b = 'wp-content/uploads/' . $to;
+            // Handle both plain and JSON-escaped (\/) slashes.
+            return str_replace([$a, str_replace('/', '\\/', $a)], [$b, str_replace('/', '\\/', $b)], $s);
+        };
+        foreach ($tables as [$tbl,$col,$id]) {
+            try {
+                $st = $pdo->prepare("SELECT `$id`,`$col` FROM `$tbl` WHERE `$col` LIKE ?");
+                $st->execute(['%' . $needles[0] . '%']);
+                while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                    $old = $row[$col];
+                    // Serialized strings first (recalc length), then plain.
+                    $new = preg_replace_callback('/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s', function($m) use ($swap){ $x=$swap($m[2]); return $x===$m[2]?$m[0]:'s:'.strlen($x).':"'.$x.'"'; }, $old);
+                    $new = $swap($new);
+                    if ($new !== $old) { $pdo->prepare("UPDATE `$tbl` SET `$col`=? WHERE `$id`=?")->execute([$new,$row[$id]]); $updated++; }
+                }
+            } catch (Exception $e) {}
+        }
+        return $updated;
+    };
+    // The thumbnails of an uploads file: same dir, <base>-WxH.<ext>.
+    $uploads_siblings = function ($root, $rel) {
+        $uploads = $root . '/wp-content/uploads';
+        $dir = (strpos($rel, '/') !== false) ? substr($rel, 0, strrpos($rel, '/')) : '';
+        $file = basename($rel);
+        if (!preg_match('/^(.+?)(\.[a-z0-9]+)$/i', $file, $m)) return [$rel];
+        $base = preg_replace('/-\d+x\d+$/', '', $m[1]); $ext = $m[2];
+        $out = [];
+        $glob = $uploads . ($dir !== '' ? '/' . $dir : '') . '/' . $base . '*' . $ext;
+        foreach (glob($glob) ?: [] as $f) {
+            $fn = basename($f);
+            if ($fn === $base . $ext || preg_match('/^' . preg_quote($base, '/') . '-\d+x\d+' . preg_quote($ext, '/') . '$/i', $fn))
+                $out[] = ($dir !== '' ? $dir . '/' : '') . $fn;
+        }
+        return $out ?: [$rel];
+    };
+    // WordPress-style filename sanitizer (ASCII, dashes, lowercase-safe).
+    $sanitize_name = function ($name) {
+        $ext = '';
+        if (preg_match('/^(.*)(\.[A-Za-z0-9]+)$/', $name, $m)) { $name = $m[1]; $ext = strtolower($m[2]); }
+        $tr = ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ñ'=>'n','ü'=>'u','à'=>'a','è'=>'e','ì'=>'i','ò'=>'o','ù'=>'u','ä'=>'a','ë'=>'e','ï'=>'i','ö'=>'o','Á'=>'a','É'=>'e','Í'=>'i','Ó'=>'o','Ú'=>'u','Ñ'=>'n','Ü'=>'u'];
+        $name = strtr($name, $tr);
+        $name = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $name) ?: $name;
+        $name = strtolower($name);
+        $name = preg_replace('/[^a-z0-9._-]+/', '-', $name);  // spaces & symbols -> dash
+        $name = preg_replace('/-+/', '-', trim($name, '-. '));
+        return ($name === '' ? 'file' : $name) . $ext;
+    };
+
     // --- CLEAN SITE: shared helper to collect USED uploads ---
     // A file in wp-content/uploads is "used" when its path is referenced in the DB,
     // OR it is a WordPress-generated thumbnail of a referenced original
@@ -1855,6 +1936,208 @@ if ($authenticated && isset($_GET['action'])) {
         $ok = @rename($old, $uploads);
         echo json_encode(['ok' => $ok, 'restored_from' => $log['old_folder'] ?? '', 'cleaned_moved_to' => $ok ? basename($discard) : null,
             'error' => $ok ? '' : 'Could not restore']);
+        exit;
+    }
+
+    // --- OPTIMIZE: shared — connect + list referenced uploads (with source rows) ---
+    $opt_db = [
+        'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+        'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+        'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+    ];
+    // Append one entry to a rotating optimize log and return its file path.
+    $opt_log = function ($root, $kind, $entry) {
+        $f = $root . '/wp-content/.optimize-' . $kind . '.json';
+        $data = is_file($f) ? (json_decode(file_get_contents($f), true) ?: []) : [];
+        $data[] = $entry;
+        @file_put_contents($f, json_encode($data, JSON_PRETTY_PRINT));
+        return '.optimize-' . $kind . '.json';
+    };
+
+    // ============ 1) ORGANIZE uploads into subfolders ============
+    // Target: YYYYMMDD_name -> YYYY/MM/name ; otherwise -> <FirstCharUpper>/name.
+    // Only files REFERENCED in the DB are moved (so we don't touch orphans), together
+    // with their thumbnails, updating every reference. Reversible via log.
+    if ($action === 'organize_analyze' || $action === 'organize_apply') {
+        @set_time_limit(0);
+        $r = try_db_connect($opt_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $opt_db['prefix']; $root = rtrim($abspath, '/');
+        $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($uploads)) { echo json_encode(['ok' => false, 'error' => 'wp-content/uploads not found']); exit; }
+
+        // Destination (relative to uploads) for a referenced file basename.
+        $dest_for = function ($rel) {
+            $base = basename($rel);
+            if (preg_match('/^(\d{4})(\d{2})(\d{2})[_-]?(.*)$/', $base, $m)
+                && $m[1] >= '1990' && $m[1] <= '2099' && $m[2] >= '01' && $m[2] <= '12') {
+                return $m[1] . '/' . $m[2] . '/' . ($m[4] !== '' ? $m[4] : $base);
+            }
+            $first = strtoupper(substr($base, 0, 1));
+            if (!preg_match('/[A-Z0-9]/', $first)) $first = '_';
+            return $first . '/' . $base;
+        };
+
+        // Collect referenced files that live directly under uploads/ (depth 0) — those
+        // not already organized. Files already in YYYY/MM or Letter/ folders are skipped.
+        [$used] = $clean_collect($pdo, $prefix, $root);
+        $candidates = [];
+        foreach (array_keys($used) as $rel) {
+            if (strpos($rel, '/') !== false) continue;          // only top-level files
+            $dst = $dest_for($rel);
+            if ($dst === $rel) continue;
+            $candidates[$rel] = $dst;
+        }
+
+        if ($action === 'organize_analyze') {
+            $sample = array_slice($candidates, 0, 20, true);
+            $preview = [];
+            foreach ($sample as $from => $to) $preview[] = ['from' => $from, 'to' => $to];
+            echo json_encode(['ok' => true, 'count' => count($candidates), 'preview' => $preview,
+                'files' => array_keys($candidates)]);
+            exit;
+        }
+
+        // organize_apply — process a batch passed by the browser.
+        $batch = json_decode($_POST['files'] ?? '', true);
+        $batch = is_array($batch) ? array_slice($batch, 0, 50) : [];
+        $moved = 0; $errors = 0; $logname = '';
+        foreach ($batch as $rel) {
+            if (!isset($candidates[$rel])) continue;
+            $to = $candidates[$rel];
+            // Move the file and its thumbnails together.
+            $siblings = $uploads_siblings($root, $rel);
+            foreach ($siblings as $sib) {
+                $sibDir = (strpos($rel,'/')!==false)?substr($rel,0,strrpos($rel,'/')+1):'';
+                $sibDst = dirname($to) . '/' . basename($sib);
+                $src = $uploads . '/' . $sib; $dst = $uploads . '/' . $sibDst;
+                if (!is_file($src)) continue;
+                // 1) locate in DB first (confirm it's referenced), 2) copy, 3) update DB, 4) delete original.
+                $refs = $uploads_replace_ref($pdo, $prefix, $sib, $sibDst);
+                @mkdir(dirname($dst), 0755, true);
+                if (@copy($src, $dst)) { @unlink($src); $moved++; $logname = $opt_log($root, 'organize', ['from' => $sib, 'to' => $sibDst, 'refs' => $refs, 'at' => date('c')]); }
+                else { $errors++; }
+            }
+        }
+        echo json_encode(['ok' => true, 'moved' => $moved, 'errors' => $errors, 'log' => $logname]);
+        exit;
+    }
+
+    // ============ 2) DEDUPLICATE identical files ============
+    // Group uploads files by size, then by SHA-1; for each duplicate group keep one
+    // (most-referenced, else shortest path), repoint refs of the rest, delete them.
+    if ($action === 'dedupe_analyze' || $action === 'dedupe_apply') {
+        @set_time_limit(0);
+        $r = try_db_connect($opt_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $opt_db['prefix']; $root = rtrim($abspath, '/');
+        $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($uploads)) { echo json_encode(['ok' => false, 'error' => 'wp-content/uploads not found']); exit; }
+
+        // Build size buckets first (cheap), then hash only within collisions.
+        $bySize = [];
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($uploads, FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) {
+            if (!$f->isFile()) continue;
+            $rel = str_replace('\\','/', ltrim(str_replace($uploads,'',$f->getPathname()),'/\\'));
+            $bySize[$f->getSize()][] = $rel;
+        }
+        $groups = []; // sha1 => [rel,...]
+        foreach ($bySize as $size => $files) {
+            if (count($files) < 2) continue;              // unique size -> not a dup
+            foreach ($files as $rel) {
+                $h = @sha1_file($uploads . '/' . $rel);
+                if ($h) $groups[$h][] = $rel;
+            }
+        }
+        $dupGroups = array_values(array_filter($groups, fn($g) => count($g) > 1));
+
+        // Reference counter to pick the keeper.
+        $ref_count = function ($rel) use ($pdo, $prefix) {
+            $n = 0; $needle = '%wp-content/uploads/' . str_replace('%','\%',$rel) . '%';
+            foreach ([[$prefix.'posts','post_content'],[$prefix.'postmeta','meta_value'],[$prefix.'options','option_value']] as [$t,$c]) {
+                try { $st=$pdo->prepare("SELECT COUNT(*) FROM `$t` WHERE `$c` LIKE ?"); $st->execute([$needle]); $n += (int)$st->fetchColumn(); } catch (Exception $e) {}
+            }
+            return $n;
+        };
+
+        if ($action === 'dedupe_analyze') {
+            $preview = []; $dupFiles = 0; $wasteBytes = 0; $all = [];
+            foreach ($dupGroups as $g) {
+                // keeper = most referenced, tie -> shortest path
+                usort($g, fn($a,$b) => ($ref_count($b) <=> $ref_count($a)) ?: (strlen($a) <=> strlen($b)));
+                $keep = $g[0]; $dups = array_slice($g, 1);
+                $dupFiles += count($dups);
+                $sz = @filesize($uploads . '/' . $keep) ?: 0; $wasteBytes += $sz * count($dups);
+                $all[] = $g; // full group (ordered keeper-first) for apply
+                if (count($preview) < 20) $preview[] = ['keep' => $keep, 'dups' => $dups];
+            }
+            echo json_encode(['ok' => true, 'groups' => count($dupGroups), 'dup_files' => $dupFiles,
+                'reclaimable' => human_size($wasteBytes), 'preview' => $preview, 'all_groups' => $all]);
+            exit;
+        }
+
+        // dedupe_apply — process a batch of groups.
+        $batch = json_decode($_POST['groups'] ?? '', true);
+        $batch = is_array($batch) ? array_slice($batch, 0, 50) : [];
+        $repointed = 0; $deleted = 0; $logname = '';
+        foreach ($batch as $g) {
+            if (!is_array($g) || count($g) < 2) continue;
+            usort($g, fn($a,$b) => ($ref_count($b) <=> $ref_count($a)) ?: (strlen($a) <=> strlen($b)));
+            $keep = $g[0];
+            foreach (array_slice($g, 1) as $dup) {
+                if (!is_file($uploads . '/' . $dup)) continue;
+                $refs = $uploads_replace_ref($pdo, $prefix, $dup, $keep);  // repoint refs to keeper
+                $repointed += $refs;
+                @unlink($uploads . '/' . $dup); $deleted++;
+                $logname = $opt_log($root, 'dedupe', ['deleted' => $dup, 'kept' => $keep, 'refs' => $refs, 'at' => date('c')]);
+            }
+        }
+        echo json_encode(['ok' => true, 'deleted' => $deleted, 'refs_repointed' => $repointed, 'log' => $logname]);
+        exit;
+    }
+
+    // ============ 3) SANITIZE special-character filenames ============
+    if ($action === 'sanitize_analyze' || $action === 'sanitize_apply') {
+        @set_time_limit(0);
+        $r = try_db_connect($opt_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $opt_db['prefix']; $root = rtrim($abspath, '/');
+        $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($uploads)) { echo json_encode(['ok' => false, 'error' => 'wp-content/uploads not found']); exit; }
+
+        // Files whose basename changes under sanitization.
+        $candidates = []; // rel => newRel
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($uploads, FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) {
+            if (!$f->isFile()) continue;
+            $rel = str_replace('\\','/', ltrim(str_replace($uploads,'',$f->getPathname()),'/\\'));
+            $dir = (strpos($rel,'/')!==false)?substr($rel,0,strrpos($rel,'/')+1):'';
+            $clean = $sanitize_name(basename($rel));
+            if ($clean !== basename($rel)) $candidates[$rel] = $dir . $clean;
+        }
+
+        if ($action === 'sanitize_analyze') {
+            $preview = []; foreach (array_slice($candidates, 0, 20, true) as $from => $to) $preview[] = ['from' => $from, 'to' => $to];
+            echo json_encode(['ok' => true, 'count' => count($candidates), 'preview' => $preview, 'files' => array_keys($candidates)]);
+            exit;
+        }
+
+        // sanitize_apply — batch.
+        $batch = json_decode($_POST['files'] ?? '', true);
+        $batch = is_array($batch) ? array_slice($batch, 0, 50) : [];
+        $renamed = 0; $errors = 0; $logname = '';
+        foreach ($batch as $rel) {
+            if (!isset($candidates[$rel])) continue;
+            $to = $candidates[$rel];
+            $src = $uploads . '/' . $rel; $dst = $uploads . '/' . $to;
+            if (!is_file($src) || is_file($dst)) { $errors++; continue; }
+            // locate+update DB first, then rename on disk.
+            $refs = $uploads_replace_ref($pdo, $prefix, $rel, $to);
+            if (@rename($src, $dst)) { $renamed++; $logname = $opt_log($root, 'sanitize', ['from' => $rel, 'to' => $to, 'refs' => $refs, 'at' => date('c')]); }
+            else { $errors++; }
+        }
+        echo json_encode(['ok' => true, 'renamed' => $renamed, 'errors' => $errors, 'log' => $logname]);
         exit;
     }
 
@@ -5030,6 +5313,45 @@ foreach ($php_cfg_rows as $r):
 <div id="cs_log" class="log" style="display:none"></div>
 </div>
 
+<!-- OPTIMIZE UPLOADS -->
+<div class="card" style="border-color:#1e3a5f">
+<h2>🗂️ <?= h(t('Optimize uploads (organize / dedupe / sanitize)')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:6px">
+    <?= h(t('Three safe optimizations for a crowded wp-content/uploads. Each one locates files in the database first, moves/renames/merges them on disk, updates every reference, and writes a reversible JSON log. Analyze first (dry-run); apply runs in batches with a progress bar.')) ?>
+</p>
+<div class="alert alert-warn" style="margin-bottom:14px;font-size:12px">
+    ⚠ <?= h(t('WordPress will keep uploading new files to its own year/month layout; this reorganizes existing files and updates their references. Changes are logged and reversible.')) ?>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">📁 <?= h(t('Organize into subfolders')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('YYYYMMDD_name → YYYY/MM/name; otherwise → FirstLetter/name. Moves thumbnails too.')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" id="org_btn" onclick="optOrganizeAnalyze()">📊 <?= h(t('Analyze') ) ?></button>
+        <button class="btn btn-sm btn-warning" id="org_apply" onclick="optApply('organize')" style="display:none">▶ <?= h(t('Apply') ) ?></button></div>
+    <div id="org_progress" style="display:none;margin-top:8px"><div class="progress"><div class="progress-bar" id="org_bar" style="width:0%"></div></div><div id="org_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="org_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">🧬 <?= h(t('Deduplicate identical files')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Same size + same hash → keep one, repoint references, delete the rest.')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" id="dedup_btn" onclick="optDedupeAnalyze()">📊 <?= h(t('Analyze') ) ?></button>
+        <button class="btn btn-sm btn-warning" id="dedup_apply" onclick="optApply('dedupe')" style="display:none">▶ <?= h(t('Apply') ) ?></button></div>
+    <div id="dedup_progress" style="display:none;margin-top:8px"><div class="progress"><div class="progress-bar" id="dedup_bar" style="width:0%"></div></div><div id="dedup_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="dedup_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">🔤 <?= h(t('Sanitize special-character names')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Accents, spaces and symbols → safe ASCII names. Updates references too.')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" id="san_btn" onclick="optSanitizeAnalyze()">📊 <?= h(t('Analyze') ) ?></button>
+        <button class="btn btn-sm btn-warning" id="san_apply" onclick="optApply('sanitize')" style="display:none">▶ <?= h(t('Apply') ) ?></button></div>
+    <div id="san_progress" style="display:none;margin-top:8px"><div class="progress"><div class="progress-bar" id="san_bar" style="width:0%"></div></div><div id="san_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="san_result" style="font-size:12px;margin-top:6px"></div>
+</div>
+<div id="opt_log" class="log" style="display:none;margin-top:12px"></div>
+</div>
+
 <div class="card">
 <h2>🧰 <?= h(t('WordPress Extras')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
@@ -6303,6 +6625,80 @@ const T_CS = {
     restoreHint: <?= json_encode(t('Verify the site, then delete the old folder manually.')) ?>,
     restore: <?= json_encode(t('Restore (undo)')) ?>, restored: <?= json_encode(t('Restored')) ?>,
     confirmRestore: <?= json_encode(t('Restore the original uploads folder from backup?')) ?>,
+};
+
+// --- Optimize uploads (organize / dedupe / sanitize) ---
+// Each optimization: analyze (dry-run) stores the work items, apply runs them in
+// batches via its endpoint, updating a progress bar.
+const OPT = { organize: {items:[]}, dedupe: {items:[]}, sanitize: {items:[]} };
+function optCreds(fd){ Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v)); return fd; }
+
+async function optOrganizeAnalyze(){
+    const out = document.getElementById('org_result');
+    out.innerHTML = '⏳';
+    const r = await fetch('?action=organize_analyze', {method:'POST', body:optCreds(new FormData())});
+    const j = await r.json();
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    OPT.organize.items = j.files || [];
+    out.innerHTML = optPreview(j.count, (j.preview||[]).map(p => `${esc(p.from)} → ${esc(p.to)}`));
+    document.getElementById('org_apply').style.display = j.count ? 'inline-flex' : 'none';
+}
+async function optDedupeAnalyze(){
+    const out = document.getElementById('dedup_result');
+    out.innerHTML = '⏳ ' + T_OPT.hashing;
+    const r = await fetch('?action=dedupe_analyze', {method:'POST', body:optCreds(new FormData())});
+    const j = await r.json();
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    OPT.dedupe.items = j.all_groups || []; // full groups (keeper-first) for apply
+    out.innerHTML = optPreview(j.dup_files + ' dup / ' + j.groups + ' groups · ↓' + j.reclaimable,
+        (j.preview||[]).map(p => `keep ${esc(p.keep)} — drop ${esc(p.dups.join(', '))}`));
+    document.getElementById('dedup_apply').style.display = j.groups ? 'inline-flex' : 'none';
+}
+async function optSanitizeAnalyze(){
+    const out = document.getElementById('san_result');
+    out.innerHTML = '⏳';
+    const r = await fetch('?action=sanitize_analyze', {method:'POST', body:optCreds(new FormData())});
+    const j = await r.json();
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    OPT.sanitize.items = j.files || [];
+    out.innerHTML = optPreview(j.count, (j.preview||[]).map(p => `${esc(p.from)} → ${esc(p.to)}`));
+    document.getElementById('san_apply').style.display = j.count ? 'inline-flex' : 'none';
+}
+function optPreview(count, lines){
+    let h = `<div style="color:var(--text-muted);margin-bottom:4px">${T_OPT.found}: ${count}</div>`;
+    if (lines.length) h += '<div style="font-family:monospace;font-size:11px;color:var(--text-dim);max-height:160px;overflow:auto">' + lines.map(l=>'• '+l).join('<br>') + (count>lines.length?'<br>…':'') + '</div>';
+    else h += `<span style="color:#6ee7b7">✓ ${T_OPT.nothing}</span>`;
+    return h;
+}
+
+async function optApply(kind){
+    if (!confirm(T_OPT.confirm)) return;
+    const map = {organize:{btn:'org_apply',prog:'org_progress',bar:'org_bar',ptxt:'org_ptxt',action:'organize_apply',param:'files',items:OPT.organize.items},
+                 dedupe:{btn:'dedup_apply',prog:'dedup_progress',bar:'dedup_bar',ptxt:'dedup_ptxt',action:'dedupe_apply',param:'groups',items:OPT.dedupe.items},
+                 sanitize:{btn:'san_apply',prog:'san_progress',bar:'san_bar',ptxt:'san_ptxt',action:'sanitize_apply',param:'files',items:OPT.sanitize.items}};
+    const c = map[kind];
+    if (!c.items || !c.items.length){ return; }
+    document.getElementById(c.prog).style.display = 'block';
+    const bar = document.getElementById(c.bar), ptxt = document.getElementById(c.ptxt);
+    const BATCH = kind==='dedupe' ? 10 : 50;
+    let done = 0, total = c.items.length, agg = {};
+    for (let i=0; i<total; i+=BATCH){
+        const slice = c.items.slice(i, i+BATCH);
+        const fd = optCreds(new FormData()); fd.append(c.param, JSON.stringify(slice));
+        try { const r = await fetch('?action='+c.action, {method:'POST', body:fd}); const j = await r.json();
+            if (j.ok) Object.keys(j).forEach(k => { if (typeof j[k]==='number') agg[k]=(agg[k]||0)+j[k]; });
+        } catch(e){}
+        done += slice.length;
+        const pct = Math.round(done/total*100); bar.style.width = pct+'%'; ptxt.textContent = `${done}/${total} (${pct}%)`;
+    }
+    const summary = Object.entries(agg).map(([k,v]) => `${k}: ${v}`).join(', ');
+    log('opt_log', `✓ ${kind}: ${summary}. ${T_OPT.logged}`, false);
+    document.getElementById(c.btn).style.display = 'none';
+}
+const T_OPT = {
+    found: <?= json_encode(t('Found')) ?>, nothing: <?= json_encode(t('Nothing to optimize')) ?>,
+    hashing: <?= json_encode(t('Hashing files…')) ?>, confirm: <?= json_encode(t('Apply this optimization? Files on disk and database references will change (logged and reversible).')) ?>,
+    logged: <?= json_encode(t('Changes written to a reversible log.')) ?>,
 };
 
 async function runSecurityAudit() {

@@ -72,6 +72,16 @@ vs used files, reclaimable space); applying copies the used files into a fresh f
 current one to `uploads_old-remove-it_*` (kept as a backup, not deleted) and writes a restore log
 so the change can be undone.
 
+### Uploads optimization
+
+Three safe cleanups for a crowded `wp-content/uploads`, each one locating files in the database
+first, updating every reference and writing a reversible log:
+- **Organize** referenced files into subfolders — `YYYYMMDD_name` → `YYYY/MM/name`, otherwise
+  grouped by first letter — moving their WordPress thumbnails alongside.
+- **Deduplicate** identical files (compared by size, then SHA-1): keep one, repoint references and
+  delete the rest.
+- **Sanitize** filenames with accents, spaces or symbols into safe ASCII names.
+
 ### Test Environment (isolated sandbox)
 
 Builds a runnable WordPress sandbox in a subfolder without risking the live site: it **replicates
@@ -262,6 +272,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.2.0` | Uploads optimization: organize files into subfolders (YYYY/MM for dated names, else by first letter), deduplicate identical files (size + hash, repointing references), and sanitize special-character filenames — each locating files in the database first, updating all references, and writing a reversible log |
 | `migrate 3.1.0` | Health check links missing media/assets to the recovery flow; Clean Site rebuilds wp-content/uploads with only used files (DB references + WordPress thumbnails), keeping the old folder as a backup with a restore log and a summary of reclaimed space |
 | `migrate 3.0.0` | Quick Update one-click post-migration (wp-config, siteurl, relativize, cache, plugins); asset recovery that downloads missing wp-content files from the original site; isolated Test Environment sandbox (table replication with progress bar, symlinked core/plugins/themes/uploads, per-plugin smoke test, wordpress.org plugin vetting, PHP-compat report) |
 | `migrate 2.10.0` | Light/dark theme; fuller Spanish translation; broken link checker now shows each link's location in WordPress (post/meta/option) with an edit shortcut and covers page links, not just assets; friendly-permalink chooser with an isolated anti-500 test; WP-CLI shown in the CLI list; How-to-use tab reordered and rewritten; phpMyAdmin random folder with auto-expiring temporary credentials |

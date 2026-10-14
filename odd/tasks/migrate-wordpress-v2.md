@@ -104,6 +104,17 @@ Delivered in phases, one commit per phase. Release at the end.
       fresh uploads/, renames the old to uploads_old-remove-it_* (kept, not deleted), writes a JSON
       restore log; restore undoes it. Thumbnail-keep logic + apply/restore cycle unit-tested. -> 3.1.0
 
+## v3.2 — Uploads optimization (organize / dedupe / sanitize) (DONE)
+- [x] Shared helpers: uploads_replace_ref (serialized-safe path swap across posts/postmeta/options),
+      uploads_siblings (thumbnails), sanitize_name (WP-style ASCII). Verified vs real DB w/ rollback.
+- [x] Organize (organize_analyze/apply): referenced top-level files → YYYY/MM/name (if YYYYMMDD_)
+      else FirstLetter/name; moves thumbnails; locate-in-DB → copy → update refs → delete; batch + log.
+- [x] Dedupe (dedupe_analyze/apply): size buckets then sha1; keep most-referenced/shortest, repoint
+      refs of the rest, delete; reclaimable-space preview; batch + log. Size+hash grouping unit-tested.
+- [x] Sanitize (sanitize_analyze/apply): accents/spaces/symbols → ASCII; locate-in-DB → update → rename; batch + log.
+- [x] Unified "Optimize uploads" card: 3 sub-sections, each analyze(dry-run)+apply(progress bar), reversible JSON logs. -> 3.2.0
+- All destructive ops order: locate in DB first → confirm → move/copy → update DB refs → delete original.
+
 ## v2.5–v2.7 follow-ups
 - [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
       bilingual covering the full v2 feature set.
