@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.3.0');
+define('TOOL_VERSION',  '2.4.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -103,6 +103,8 @@ $GLOBALS['__I18N'] = [
             => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
         // Header
         'Download tool'                       => 'Descargar herramienta',
+        'Get BigDump'                         => 'Obtener BigDump',
+        'Open BigDump'                        => 'Abrir BigDump',
         'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
         'Running on live server.'             => 'Ejecutándose en un servidor en producción.',
         'Delete this file after use!'         => '¡Eliminá este archivo después de usarlo!',
@@ -188,6 +190,8 @@ $GLOBALS['__I18N'] = [
         'Apply to whole site'                 => 'Aplicar a todo el sitio',
         'Remove protection'                   => 'Quitar protección',
         'open to confirm the login prompt'    => 'abrir para confirmar el diálogo de acceso',
+        'Only rewrite URLs whose file exists on disk (use on the destination with files already uploaded)'
+            => 'Solo reescribir URLs cuyo archivo exista en disco (usar en el destino con los archivos ya subidos)',
     ],
 ];
 
@@ -1593,7 +1597,8 @@ if ($authenticated && isset($_GET['action'])) {
                     $ss = $pdo->prepare("SELECT `{$t['col']}` FROM `{$t['table']}` WHERE `{$t['col']}` LIKE ? LIMIT 3");
                     $ss->execute([$like]);
                     while ($row = $ss->fetch(PDO::FETCH_NUM)) {
-                        preg_match_all('/https?:\/\/[^\/\s\'"<>]+\/wp-content\/[^\s\'"<>]{1,80}/', $row[0], $m);
+                        // Allow a subfolder between host and /wp-content/ (e.g. /wordpress/).
+                        preg_match_all('/https?:\/\/[^\s\'"<>]*?\/wp-content\/[^\s\'"<>]{1,80}/', $row[0], $m);
                         foreach (array_slice($m[0], 0, 2) as $url) $samples[] = $url;
                     }
                 }
@@ -1627,19 +1632,22 @@ if ($authenticated && isset($_GET['action'])) {
         // Capture the full absolute asset URL so we can verify the target file
         // exists on disk before rewriting it to a relative /wp-content/ path.
         // Group 1 = everything from /wp-content/ onwards (the kept relative path).
-        $pattern = '#https?://[^/\s\'"<>]+(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
+        // The host may be followed by a subfolder (e.g. /wordpress/wp-content/…),
+        // so match any path segment before /wp-content/ and drop it too.
+        $pattern = '#https?://[^\s\'"<>]*?(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
         $root    = rtrim($abspath, '/');
 
-        // Rewrite only when the resulting relative path points to a real file.
-        // When it does not, leave the URL untouched and count it as unverified so
-        // we never create a relative link to a missing asset.
+        // Disk verification is OPT-IN. By default every absolute wp-content URL is
+        // rewritten to a relative path. With verify_disk=1, a URL is only rewritten
+        // when its target file exists on disk (useful on the destination where the
+        // files are already uploaded); others are left absolute and counted.
+        $verify_disk = ($_POST['verify_disk'] ?? '') === '1';
         $unverified = 0;
-        $rewrite = function ($str) use ($pattern, $root, &$unverified) {
-            return preg_replace_callback($pattern, function ($m) use ($root, &$unverified) {
+        $rewrite = function ($str) use ($pattern, $root, $verify_disk, &$unverified) {
+            return preg_replace_callback($pattern, function ($m) use ($root, $verify_disk, &$unverified) {
+                if (!$verify_disk) return $m[1]; // always rewrite to the relative path
                 $rel = preg_replace('/[?#].*$/', '', $m[1]); // strip query/hash for the disk check
-                if (is_file($root . $rel)) {
-                    return $m[1]; // keep original query/hash by returning full captured path
-                }
+                if (is_file($root . $rel)) return $m[1];
                 $unverified++;
                 return $m[0]; // leave the absolute URL as-is
             }, $str);
@@ -3149,6 +3157,37 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- FETCH bigdump.php INTO THE SITE ---
+    // Downloads bigdump.php from the project repo into the WordPress root so it
+    // can be opened directly. Returns the URL to open it in a new tab.
+    if ($action === 'fetch_bigdump') {
+        $dest = rtrim($abspath, '/') . '/bigdump.php';
+        $url  = 'https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/bigdump.php';
+        if (!is_writable(dirname($dest)) && !is_file($dest)) { echo json_encode(['ok' => false, 'error' => 'WordPress root is not writable']); exit; }
+
+        $data = false; $method = '';
+        if (check_cmd('curl')) {
+            exec(sprintf('curl -L --silent -o %s %s 2>&1', escapeshellarg($dest), escapeshellarg($url)), $o, $ret);
+            if ($ret === 0 && is_file($dest) && filesize($dest) > 1000) { $data = true; $method = 'curl CLI'; }
+        }
+        if (!$data && function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 60, CURLOPT_SSL_VERIFYPEER => false]);
+            $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+            if ($code === 200 && $body && strlen($body) > 1000) { file_put_contents($dest, $body); $data = true; $method = 'curl PHP'; }
+        }
+        if (!$data && ini_get('allow_url_fopen')) {
+            $body = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 60, 'follow_location' => true]]));
+            if ($body && strlen($body) > 1000) { file_put_contents($dest, $body); $data = true; $method = 'file_get_contents'; }
+        }
+        if (!$data || !is_file($dest)) { echo json_encode(['ok' => false, 'error' => 'Could not download bigdump.php. Check server connectivity.']); exit; }
+
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+        echo json_encode(['ok' => true, 'method' => $method, 'size' => human_size(filesize($dest)), 'url' => $base . '/bigdump.php']);
+        exit;
+    }
+
     // --- INSTALL WORDPRESS ---
     if ($action === 'wp_install') {
         @set_time_limit(0);
@@ -3265,6 +3304,9 @@ $site_url    = detect_site_url($db);
 $current_url = current_url();
 $db_test     = try_db_connect($db);
 $abspath_size = is_dir($abspath) ? dir_size($abspath) : 0;
+// Is bigdump.php already present next to the site? If so we can link to open it.
+$bigdump_present = is_file(rtrim($abspath, '/') . '/bigdump.php');
+$bigdump_url     = rtrim(dirname($current_url), '/') . '/bigdump.php';
 
 ?><!DOCTYPE html>
 <html lang="en">
@@ -3379,6 +3421,8 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
     <a href="?lang=es" style="padding:5px 10px;text-decoration:none;<?= $LANG==='es'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">ES</a>
 </span>
 <a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ <?= h(t('Download tool')) ?></a>
+<button id="bigdump_btn" class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="fetchBigdump()">⬇️ <?= h(t('Get BigDump')) ?></button>
+<a id="bigdump_open" href="<?= h($bigdump_url) ?>" target="_blank" class="btn btn-sm" style="background:#1e3a2f;color:#6ee7b7;text-decoration:none;<?= $bigdump_present ? '' : 'display:none' ?>">↗ <?= h(t('Open BigDump')) ?></a>
 <a href="?logout" class="btn btn-sm" style="background:#2d3148;color:#a0aec0"><?= h(t('Logout')) ?></a>
 </div>
 </div>
@@ -3716,6 +3760,10 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
     Scans posts, postmeta and options for absolute <code>http(s)://domain/wp-content/</code> URLs in images, icons and videos,
     then converts them to root-relative <code>/wp-content/</code> paths. Handles serialized data correctly.
 </p>
+<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#a0aec0;margin-bottom:10px;cursor:pointer">
+    <input type="checkbox" id="media_verify_disk">
+    <?= h(t('Only rewrite URLs whose file exists on disk (use on the destination with files already uploaded)')) ?>
+</label>
 <div class="actions">
     <button class="btn btn-primary" onclick="scanMediaUrls()">🔍 Scan DB for absolute URLs</button>
     <button id="tls_fix_btn" class="btn btn-danger" onclick="fixMediaUrls()" style="display:none">⚡ Fix — Convert to /wp-content/</button>
@@ -4323,12 +4371,14 @@ async function fixMediaUrls() {
     if (!confirm('Convert all absolute http(s)://domain/wp-content/ URLs to /wp-content/ paths?\n\nThis modifies posts, postmeta and options. Make sure you have a DB backup.')) return;
     const fd = new FormData();
     Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    if (document.getElementById('media_verify_disk').checked) fd.append('verify_disk', '1');
     log('tls_media_log', '\n⏳ Fixing...', true);
     const r = await fetch('?action=fix_media_urls', {method:'POST', body:fd});
     const j = await r.json();
     if (j.ok) {
         let m = `✓ Done. Updated ${j.updated} row(s).`;
-        if (j.unverified) m += `\n⏭ Skipped ${j.unverified} URL(s): target file not found on disk (left absolute to avoid broken links).`;
+        if (j.unverified) m += `\n⏭ Skipped ${j.unverified} URL(s): "verify on disk" is on and the target file was not found (left absolute to avoid broken links). Uncheck it to rewrite anyway.`;
+        if (j.updated === 0 && !j.unverified) m += `\n(Nothing matched — the values may already be relative.)`;
         if (j.errors) m += `\n⚠ ${j.errors} error(s).`;
         log('tls_media_log', m, true);
         document.getElementById('tls_fix_btn').style.display = 'none';
@@ -4921,6 +4971,24 @@ async function sitePassRemove() {
     log('tls_sp_log', j.ok ? `✓ ${j.note}` : `✗ ${j.error}`, false);
 }
 const T_SP = { openprobe: <?= json_encode(t('open to confirm the login prompt')) ?> };
+
+// Download bigdump.php into the site; on success reveal the "Open BigDump" link.
+async function fetchBigdump() {
+    const btn = document.getElementById('bigdump_btn');
+    btn.disabled = true; const prev = btn.textContent; btn.textContent = '⏳';
+    try {
+        const r = await fetch('?action=fetch_bigdump', {method:'POST'});
+        const j = await r.json();
+        if (j.ok) {
+            const open = document.getElementById('bigdump_open');
+            open.href = j.url; open.style.display = '';
+            btn.textContent = '✓ ' + j.size;
+            window.open(j.url, '_blank');
+        } else {
+            alert(j.error); btn.textContent = prev; btn.disabled = false;
+        }
+    } catch(e) { alert(e.message); btn.textContent = prev; btn.disabled = false; }
+}
 
 async function savePluginSelection() {
     const boxes    = document.querySelectorAll('#tls_plugins_list input[type=checkbox]:checked');

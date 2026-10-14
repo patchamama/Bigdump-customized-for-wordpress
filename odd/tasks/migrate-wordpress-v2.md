@@ -66,7 +66,17 @@ Delivered in phases, one commit per phase. Release at the end.
       site_pass_apply (gated on passed test, backs up .htaccess), site_pass_remove. Bilingual
       card, Apply disabled until test passes. htpasswd bcrypt verified. NOTE: 401/500 only real
       on Apache; dev server inconclusive. -> 2.3.0
-- [ ] S4: README + tag v2.3.0-wp + GitHub release.
+- [x] S3b: FIX Media URL Scanner "Updated 0" bug. Root cause (verified on real `test` db,
+      4867 absolute rows): the fix/scan regex required /wp-content/ immediately after the host,
+      but real URLs have a subfolder (igs-bonn.de/wordpress/wp-content/…) → 0 matches; AND the
+      earlier disk-verification blocked everything when files aren't local. Fixes: pattern now
+      allows any path before /wp-content/ (rewrote 4844/4867 rows in a rolled-back test,
+      serialized stayed valid, header_image → /wp-content/uploads/…); disk verification made
+      opt-in via a checkbox (default off); clearer result message. -> 2.4.0
+- [x] S3c: "Get BigDump" header button (fetch_bigdump downloads bigdump.php from the repo into
+      the site root) + auto-revealed "Open BigDump" link (also shown when bigdump.php already
+      present). -> 2.4.0
+- [ ] S4: README + tag v2.4.0-wp + GitHub release.
 
 ## P1 verification
 - php -l OK, HTTP 200.
