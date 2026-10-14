@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.0.0');
+define('TOOL_VERSION',  '3.1.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -173,6 +173,14 @@ $GLOBALS['__I18N'] = [
         'Save origin'                         => 'Guardar origen',
         'Scan for missing assets'             => 'Buscar archivos faltantes',
         'Download missing from origin'        => 'Descargar faltantes del origen',
+        'Missing files detected. You can download them from the original site.' => 'Se detectaron archivos faltantes. Podés descargarlos del sitio original.',
+        'Go to asset recovery'                => 'Ir a recuperación de archivos',
+        // Clean Site
+        'Clean Site (remove unused uploads)'  => 'Limpiar sitio (quitar archivos sin usar)',
+        'Finds which files in wp-content/uploads are actually used (referenced in the database, with their WordPress thumbnails) and builds a fresh uploads folder with only those. The current folder is renamed to uploads_old-remove-it_* (kept as backup, not deleted) and a restore log is written. Analyze first to see how much space would be freed; nothing changes until you apply.'
+            => 'Detecta qué archivos de wp-content/uploads se usan realmente (referenciados en la base de datos, con sus miniaturas de WordPress) y crea una carpeta uploads nueva solo con esos. La carpeta actual se renombra a uploads_old-remove-it_* (se conserva como respaldo, no se borra) y se escribe un registro para restaurar. Analizá primero para ver cuánto espacio se liberaría; nada cambia hasta que apliques.',
+        'Analyze (dry-run)'                   => 'Analizar (simulación)',
+        'Build clean uploads (keep old as backup)' => 'Crear uploads limpio (conservar el viejo como respaldo)',
         // Test Environment (sandbox)
         'Test Environment (sandbox)'          => 'Entorno de prueba (sandbox)',
         'Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.'
@@ -1704,6 +1712,149 @@ if ($authenticated && isset($_GET['action'])) {
         }
         @file_put_contents($wp_root . '/wp-content/et-cache/.cache-cleared-at', time());
         echo json_encode(['ok' => true, 'deleted' => $deleted, 'errors' => $errors]);
+        exit;
+    }
+
+    // --- CLEAN SITE: shared helper to collect USED uploads ---
+    // A file in wp-content/uploads is "used" when its path is referenced in the DB,
+    // OR it is a WordPress-generated thumbnail of a referenced original
+    // (<base>-<W>x<H>.<ext>), OR the referenced file is a thumbnail whose original we keep.
+    // Returns [usedRelSet, allFiles, totals].
+    $clean_collect = function ($pdo, $prefix, $root) {
+        $uploads = $root . '/wp-content/uploads';
+        // 1) Gather referenced upload paths from the DB.
+        $refRx = '#(?:/)?wp-content/uploads/([^\s"\'<>()\[\]\\\\?#]+?\.[a-z0-9]{2,5})#i';
+        $referenced = []; // relative-to-uploads => true
+        foreach ([[$prefix.'posts','post_content'],[$prefix.'postmeta','meta_value'],[$prefix.'options','option_value']] as $tc) {
+            [$tbl,$col] = $tc;
+            try {
+                $st = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE '%wp-content/uploads/%'");
+                while (($v = $st->fetchColumn()) !== false) {
+                    if (!preg_match_all($refRx, $v, $m)) continue;
+                    foreach ($m[1] as $rel) { $referenced[str_replace('\\/', '/', $rel)] = true; }
+                }
+            } catch (Exception $e) {}
+        }
+        // 2) Build the set of base names to keep: each referenced file AND its
+        //    originals/thumbnails sharing the same base (strip a -WxH suffix).
+        $keepBase = [];
+        foreach (array_keys($referenced) as $rel) {
+            $dir = (strpos($rel, '/') !== false) ? substr($rel, 0, strrpos($rel, '/') + 1) : '';
+            $file = basename($rel);
+            $base = preg_replace('/-\d+x\d+(?=\.[a-z0-9]+$)/i', '', $file); // original of a thumbnail
+            $keepBase[$dir . $base] = true;
+        }
+        // 3) Walk uploads; a file is used if it equals a kept base or is a thumbnail of one.
+        $all = []; $used = []; $usedBytes = 0; $totalBytes = 0;
+        if (is_dir($uploads)) {
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($uploads, FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $f) {
+                if (!$f->isFile()) continue;
+                $rel = ltrim(str_replace($uploads, '', $f->getPathname()), '/\\');
+                $rel = str_replace('\\', '/', $rel);
+                $size = $f->getSize();
+                $all[$rel] = $size; $totalBytes += $size;
+                $dir = (strpos($rel, '/') !== false) ? substr($rel, 0, strrpos($rel, '/') + 1) : '';
+                $file = basename($rel);
+                $base = preg_replace('/-\d+x\d+(?=\.[a-z0-9]+$)/i', '', $file);
+                // keep if the file itself OR its stripped-base is referenced/kept
+                if (isset($referenced[$rel]) || isset($keepBase[$dir . $file]) || isset($keepBase[$dir . $base])) {
+                    $used[$rel] = $size; $usedBytes += $size;
+                }
+            }
+        }
+        return [$used, $all, $usedBytes, $totalBytes];
+    };
+
+    // --- CLEAN SITE: analyze (dry-run, changes nothing) ---
+    if ($action === 'clean_site_analyze') {
+        @set_time_limit(0);
+        $cs_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($cs_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $root = rtrim($abspath, '/');
+        if (!is_dir($root . '/wp-content/uploads')) { echo json_encode(['ok' => false, 'error' => 'wp-content/uploads not found']); exit; }
+        [$used, $all, $usedBytes, $totalBytes] = $clean_collect($r['pdo'], $cs_db['prefix'], $root);
+        $unusedCount = count($all) - count($used);
+        $isImg = fn($p) => (bool)preg_match('/\.(jpe?g|png|gif|webp|svg|avif|bmp|ico|tiff?)$/i', $p);
+        $usedImg = count(array_filter(array_keys($used), $isImg));
+        echo json_encode(['ok' => true,
+            'total_files' => count($all), 'used_files' => count($used), 'unused_files' => $unusedCount,
+            'used_images' => $usedImg,
+            'total_size' => human_size($totalBytes), 'used_size' => human_size($usedBytes),
+            'reclaimable' => human_size($totalBytes - $usedBytes), 'reclaimable_bytes' => $totalBytes - $usedBytes,
+        ]);
+        exit;
+    }
+
+    // --- CLEAN SITE: apply (destructive — copies used, moves old aside) ---
+    if ($action === 'clean_site_apply') {
+        @set_time_limit(0);
+        $cs_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($cs_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $root = rtrim($abspath, '/');
+        $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($uploads) || !is_writable($root . '/wp-content')) { echo json_encode(['ok' => false, 'error' => 'uploads missing or wp-content not writable']); exit; }
+        [$used] = $clean_collect($r['pdo'], $cs_db['prefix'], $root);
+
+        $ts    = date('YmdHis');
+        $clean = $root . '/wp-content/uploads_clean_' . $ts;
+        $oldnm = 'uploads_old-remove-it_' . $ts;
+        $old   = $root . '/wp-content/' . $oldnm;
+        if (!@mkdir($clean, 0755, true)) { echo json_encode(['ok' => false, 'error' => 'Could not create the clean folder']); exit; }
+
+        // Copy each used file into the clean folder, preserving structure.
+        $copied = 0; $copyErr = 0;
+        foreach (array_keys($used) as $rel) {
+            $src = $uploads . '/' . $rel; $dst = $clean . '/' . $rel;
+            @mkdir(dirname($dst), 0755, true);
+            if (@copy($src, $dst)) $copied++; else $copyErr++;
+        }
+        // Swap: uploads -> uploads_old-remove-it_TS ; uploads_clean_TS -> uploads.
+        if (!@rename($uploads, $old)) {
+            // Roll back the clean folder.
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($clean, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+            foreach ($it as $f) { $f->isDir() ? @rmdir($f->getRealPath()) : @unlink($f->getRealPath()); }
+            @rmdir($clean);
+            echo json_encode(['ok' => false, 'error' => 'Could not move the current uploads aside; nothing changed']); exit;
+        }
+        @rename($clean, $uploads);
+
+        // Restore log (JSON) so the change can be undone.
+        $log = ['ts' => $ts, 'old_folder' => $oldnm, 'copied' => $copied, 'copy_errors' => $copyErr,
+                'created' => date('c'), 'uploads' => 'wp-content/uploads'];
+        @file_put_contents($root . '/wp-content/.clean-site-' . $ts . '.json', json_encode($log, JSON_PRETTY_PRINT));
+
+        echo json_encode(['ok' => true, 'copied' => $copied, 'copy_errors' => $copyErr,
+            'old_folder' => 'wp-content/' . $oldnm, 'log' => 'wp-content/.clean-site-' . $ts . '.json', 'ts' => $ts]);
+        exit;
+    }
+
+    // --- CLEAN SITE: restore from a log (undo) ---
+    if ($action === 'clean_site_restore') {
+        $root = rtrim($abspath, '/');
+        $ts = preg_replace('/[^0-9]/', '', $_POST['ts'] ?? '');
+        $logf = $root . '/wp-content/.clean-site-' . $ts . '.json';
+        if (!$ts || !is_file($logf)) { echo json_encode(['ok' => false, 'error' => 'Restore log not found']); exit; }
+        $log = json_decode(file_get_contents($logf), true) ?: [];
+        $old = $root . '/wp-content/' . ($log['old_folder'] ?? '');
+        $uploads = $root . '/wp-content/uploads';
+        if (!is_dir($old)) { echo json_encode(['ok' => false, 'error' => 'Backup folder ' . ($log['old_folder'] ?? '') . ' not found']); exit; }
+        // Move the current (cleaned) uploads out of the way, restore the old one.
+        $discard = $root . '/wp-content/uploads_discarded_' . date('YmdHis');
+        if (is_dir($uploads)) @rename($uploads, $discard);
+        $ok = @rename($old, $uploads);
+        echo json_encode(['ok' => $ok, 'restored_from' => $log['old_folder'] ?? '', 'cleaned_moved_to' => $ok ? basename($discard) : null,
+            'error' => $ok ? '' : 'Could not restore']);
         exit;
     }
 
@@ -4865,6 +5016,20 @@ foreach ($php_cfg_rows as $r):
 <div id="tls_health_results"></div>
 </div>
 
+<!-- CLEAN SITE -->
+<div class="card" style="border-color:#78350f44">
+<h2>🧹 <?= h(t('Clean Site (remove unused uploads)')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+    <?= h(t('Finds which files in wp-content/uploads are actually used (referenced in the database, with their WordPress thumbnails) and builds a fresh uploads folder with only those. The current folder is renamed to uploads_old-remove-it_* (kept as backup, not deleted) and a restore log is written. Analyze first to see how much space would be freed; nothing changes until you apply.')) ?>
+</p>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-primary" id="cs_analyze_btn" onclick="cleanSiteAnalyze()">📊 <?= h(t('Analyze (dry-run)')) ?></button>
+    <button class="btn btn-danger" id="cs_apply_btn" onclick="cleanSiteApply()" style="display:none">🧹 <?= h(t('Build clean uploads (keep old as backup)')) ?></button>
+</div>
+<div id="cs_result"></div>
+<div id="cs_log" class="log" style="display:none"></div>
+</div>
+
 <div class="card">
 <h2>🧰 <?= h(t('WordPress Extras')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
@@ -6042,10 +6207,103 @@ async function runHealthCheck() {
         const r = await fetch('?action=health_check', {method:'POST', body:fd});
         const j = await r.json();
         if (!j.ok) { out.innerHTML = `<p style="color:#f87171">✗ ${j.error}</p>`; }
-        else out.innerHTML = renderCategories(j.categories);
+        else {
+            out.innerHTML = renderCategories(j.categories);
+            // If media / asset categories reported missing files, offer to recover
+            // them from the original site using the existing recovery flow.
+            const hasMissing = j.categories.some(c =>
+                /Media|Asset|Medios|activos|Attachment|adjunto/i.test(c.label) && c.errors > 0);
+            if (hasMissing) {
+                out.innerHTML += `<div class="alert alert-warn" style="margin-top:12px">
+                    🩹 ${T_HC.missingAssets}
+                    <button class="btn btn-sm btn-warning" style="margin-left:8px" onclick="goToRecovery()">${T_HC.recoverBtn}</button>
+                </div>`;
+            }
+        }
     } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
     btn.disabled = false; btn.textContent = '🔍 Run Health Check';
 }
+// Jump to the asset recovery card and prefill its DB credentials from the tools card.
+function goToRecovery(){
+    ['host','name','user','pass','prefix'].forEach(k => {
+        const src = document.getElementById('tls_db_'+k), dst = document.getElementById('qu_db_'+k);
+        if (src && dst && !dst.value) dst.value = src.value;
+    });
+    const card = document.getElementById('ar_origin');
+    if (card){ card.scrollIntoView({behavior:'smooth', block:'center'}); card.focus(); }
+}
+const T_HC = {
+    missingAssets: <?= json_encode(t('Missing files detected. You can download them from the original site.')) ?>,
+    recoverBtn:    <?= json_encode(t('Go to asset recovery')) ?>,
+};
+
+// --- Clean Site (remove unused uploads) ---
+let CS_READY = false;
+async function cleanSiteAnalyze(){
+    const btn = document.getElementById('cs_analyze_btn');
+    btn.disabled = true; btn.textContent = '⏳';
+    const out = document.getElementById('cs_result');
+    out.innerHTML = '<span style="color:var(--text-dim);font-size:13px">⏳ ' + T_CS.analyzing + '</span>';
+    const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    let j;
+    try { const r = await fetch('?action=clean_site_analyze', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; btn.disabled=false; btn.textContent='📊 '+T_CS.analyze; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; btn.disabled=false; btn.textContent='📊 '+T_CS.analyze; return; }
+    out.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px;color:var(--text-dim)">${T_CS.totalFiles}</td><td style="padding:5px 8px;text-align:right">${j.total_files}</td><td style="padding:5px 8px;text-align:right;color:var(--text-dim)">${j.total_size}</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px;color:#6ee7b7">${T_CS.usedFiles}</td><td style="padding:5px 8px;text-align:right">${j.used_files}</td><td style="padding:5px 8px;text-align:right;color:var(--text-dim)">${j.used_size}</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px;color:#fcd34d">${T_CS.unusedFiles}</td><td style="padding:5px 8px;text-align:right">${j.unused_files}</td><td style="padding:5px 8px;text-align:right;color:#6ee7b7">↓ ${j.reclaimable}</td></tr>
+        <tr><td style="padding:5px 8px;color:var(--text-dim)">${T_CS.usedImages}</td><td style="padding:5px 8px;text-align:right">${j.used_images}</td><td></td></tr>
+    </table>`;
+    CS_READY = (j.unused_files > 0);
+    const ab = document.getElementById('cs_apply_btn');
+    ab.style.display = CS_READY ? 'inline-flex' : 'none';
+    if (!CS_READY) out.innerHTML += `<div style="color:#6ee7b7;font-size:12px;margin-top:8px">✓ ${T_CS.nothingToClean}</div>`;
+    btn.disabled = false; btn.textContent = '📊 ' + T_CS.analyze;
+}
+
+async function cleanSiteApply(){
+    if (!CS_READY){ return; }
+    if (!confirm(T_CS.confirmApply)) return;
+    const btn = document.getElementById('cs_apply_btn');
+    btn.disabled = true; btn.textContent = '⏳';
+    log('cs_log', '⏳ ' + T_CS.building, false);
+    const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    let j;
+    try { const r = await fetch('?action=clean_site_apply', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e){ log('cs_log','✗ '+e.message,false); btn.disabled=false; btn.textContent='🧹'; return; }
+    if (j.ok){
+        log('cs_log', `✓ ${T_CS.done}: ${j.copied} ${T_CS.filesCopied}${j.copy_errors?(' ('+j.copy_errors+' errors)'):''}.\n`
+            + `📦 ${T_CS.oldKept}: ${j.old_folder}\n🧾 ${T_CS.restoreLog}: ${j.log}\n`
+            + `↩ ${T_CS.restoreHint}`, false);
+        document.getElementById('cs_apply_btn').style.display = 'none';
+        // offer a restore button bound to this ts
+        const out = document.getElementById('cs_result');
+        out.innerHTML += `<div style="margin-top:10px"><button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="cleanSiteRestore('${j.ts}')">↩ ${T_CS.restore}</button></div>`;
+    } else { log('cs_log','✗ '+j.error,false); }
+    btn.disabled = false; btn.textContent = '🧹 ' + T_CS.build;
+}
+
+async function cleanSiteRestore(ts){
+    if (!confirm(T_CS.confirmRestore)) return;
+    const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v)); fd.append('ts', ts);
+    const r = await fetch('?action=clean_site_restore', {method:'POST', body:fd});
+    const j = await r.json();
+    log('cs_log', j.ok ? `✓ ${T_CS.restored} (${j.restored_from})` : `✗ ${j.error}`, false);
+}
+const T_CS = {
+    analyzing: <?= json_encode(t('Analyzing uploads…')) ?>, analyze: <?= json_encode(t('Analyze (dry-run)')) ?>,
+    build: <?= json_encode(t('Build clean uploads')) ?>, building: <?= json_encode(t('Building clean uploads…')) ?>,
+    totalFiles: <?= json_encode(t('Total files')) ?>, usedFiles: <?= json_encode(t('Used files')) ?>,
+    unusedFiles: <?= json_encode(t('Unused (reclaimable)')) ?>, usedImages: <?= json_encode(t('Used images')) ?>,
+    nothingToClean: <?= json_encode(t('Nothing to clean — all files are used.')) ?>,
+    confirmApply: <?= json_encode(t('Build a clean uploads folder with only used files? The current folder is kept as uploads_old-remove-it_* (not deleted).')) ?>,
+    done: <?= json_encode(t('Done')) ?>, filesCopied: <?= json_encode(t('files copied')) ?>,
+    oldKept: <?= json_encode(t('Old folder kept as backup')) ?>, restoreLog: <?= json_encode(t('Restore log')) ?>,
+    restoreHint: <?= json_encode(t('Verify the site, then delete the old folder manually.')) ?>,
+    restore: <?= json_encode(t('Restore (undo)')) ?>, restored: <?= json_encode(t('Restored')) ?>,
+    confirmRestore: <?= json_encode(t('Restore the original uploads folder from backup?')) ?>,
+};
 
 async function runSecurityAudit() {
     const btn = document.getElementById('tls_audit_btn');

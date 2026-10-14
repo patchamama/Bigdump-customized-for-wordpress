@@ -64,6 +64,14 @@ Scans the database for `/wp-content/` files the site references, detects which a
 disk**, and downloads them from the **original site** in batches with a progress bar — for when an
 FTP copy was incomplete. The original domain is auto-filled from the old site URL and remembered.
 
+### Clean Site
+
+Rebuilds `wp-content/uploads` with only the files the site actually uses (referenced in the
+database, together with their WordPress thumbnails). Analyze first for a dry-run summary (total
+vs used files, reclaimable space); applying copies the used files into a fresh folder, renames the
+current one to `uploads_old-remove-it_*` (kept as a backup, not deleted) and writes a restore log
+so the change can be undone.
+
 ### Test Environment (isolated sandbox)
 
 Builds a runnable WordPress sandbox in a subfolder without risking the live site: it **replicates
@@ -254,6 +262,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.1.0` | Health check links missing media/assets to the recovery flow; Clean Site rebuilds wp-content/uploads with only used files (DB references + WordPress thumbnails), keeping the old folder as a backup with a restore log and a summary of reclaimed space |
 | `migrate 3.0.0` | Quick Update one-click post-migration (wp-config, siteurl, relativize, cache, plugins); asset recovery that downloads missing wp-content files from the original site; isolated Test Environment sandbox (table replication with progress bar, symlinked core/plugins/themes/uploads, per-plugin smoke test, wordpress.org plugin vetting, PHP-compat report) |
 | `migrate 2.10.0` | Light/dark theme; fuller Spanish translation; broken link checker now shows each link's location in WordPress (post/meta/option) with an edit shortcut and covers page links, not just assets; friendly-permalink chooser with an isolated anti-500 test; WP-CLI shown in the CLI list; How-to-use tab reordered and rewritten; phpMyAdmin random folder with auto-expiring temporary credentials |
 | `migrate 2.4.0` | SEO suite (audit, meta, friendly permalinks, sitemap, indexing toggle, request/check-indexed links); full-site HTTP Basic password with isolated anti-500 test; Get BigDump into the site; fix Media URL Scanner to rewrite URLs that carry a subfolder before `/wp-content/`, with opt-in disk verification |

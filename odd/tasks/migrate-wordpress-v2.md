@@ -96,6 +96,14 @@ Delivered in phases, one commit per phase. Release at the end.
 - NOTE: plugin smoke test needs runnable WP (symlinks or copy + replica); on the dev server
   .htaccess/permalinks aren't processed so some verdicts are Apache-only. -> 3.0.0
 
+## v3.1 — Health-check asset recovery link + Clean Site (DONE)
+- [x] Health Check → asset recovery: when Media/Asset categories report missing files, a banner
+      button jumps to the existing recovery card (prefilling DB creds). Reuses asset_recover; no dup.
+- [x] Clean Site (clean_site_analyze/apply/restore): detects USED uploads (DB refs + WP thumbnails
+      via <base>-WxH stripping), dry-run shows totals/reclaimable space, apply copies used into a
+      fresh uploads/, renames the old to uploads_old-remove-it_* (kept, not deleted), writes a JSON
+      restore log; restore undoes it. Thumbnail-keep logic + apply/restore cycle unit-tested. -> 3.1.0
+
 ## v2.5–v2.7 follow-ups
 - [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
       bilingual covering the full v2 feature set.
