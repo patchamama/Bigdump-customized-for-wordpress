@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.10.0');
+define('TOOL_VERSION',  '2.11.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -153,6 +153,18 @@ $GLOBALS['__I18N'] = [
         'Access to this tool requires the wp-config database password by default; set your own encrypted password from the Access Password card.'
             => 'El acceso a esta herramienta requiere por defecto la contraseña de la base de datos de wp-config; establecé tu propia contraseña cifrada desde la tarjeta Contraseña de acceso.',
         'Environment Status'                  => 'Estado del entorno',
+        // Quick Update
+        'Quick Update (after moving the site)' => 'Actualización rápida (tras mover el sitio)',
+        'The tool reads the OLD site URL from the database and knows the CURRENT URL from your browser. With the real DB credentials below it can update wp-config, change the site URL, convert absolute URLs to relative, clear caches and deactivate plugins in one step. A backup of wp-config.php is made and every step is reported.'
+            => 'La herramienta lee la URL ANTIGUA del sitio desde la base de datos y conoce la URL ACTUAL por el navegador. Con las credenciales reales de la base de datos de abajo puede actualizar wp-config, cambiar la URL del sitio, convertir URLs absolutas a relativas, limpiar cachés y desactivar plugins en un solo paso. Se hace una copia de seguridad de wp-config.php y se informa cada paso.',
+        'Old URL (from database)'             => 'URL antigua (de la base de datos)',
+        'Current URL (this browser)'          => 'URL actual (este navegador)',
+        'Steps to run'                        => 'Pasos a ejecutar',
+        'Update wp-config.php with these credentials (backup first)' => 'Actualizar wp-config.php con estas credenciales (copia de seguridad primero)',
+        'Set siteurl/home to the current URL' => 'Fijar siteurl/home a la URL actual',
+        'Convert absolute wp-content URLs to relative + clear cache' => 'Convertir URLs absolutas de wp-content a relativas + limpiar caché',
+        'Deactivate all plugins'              => 'Desactivar todos los plugins',
+        'Run quick update'                    => 'Ejecutar actualización rápida',
         'Clear Cache'                         => 'Limpiar caché',
         'Database Export'                     => 'Exportar base de datos',
         'Import SQL'                          => 'Importar SQL',
@@ -2149,6 +2161,106 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- QUICK UPDATE (one-click post-migration) ---
+    // Orchestrates the common "just moved the site" steps and returns a per-step
+    // report. The DB already knows the OLD url (wp_options); the NEW url is passed
+    // from the browser. Each step is independent so a failure doesn't abort the rest.
+    if ($action === 'quick_update') {
+        @set_time_limit(0);
+        $qu_db = [
+            'host'    => trim($_POST['db_host']   ?? $db['host']),
+            'name'    => trim($_POST['db_name']   ?? $db['name']),
+            'user'    => trim($_POST['db_user']   ?? $db['user']),
+            'pass'    => (string)($_POST['db_pass'] ?? $db['pass']),
+            'prefix'  => trim($_POST['db_prefix'] ?? $db['prefix']),
+            'charset' => 'utf8mb4',
+        ];
+        $new_url = rtrim(trim($_POST['new_url'] ?? ''), '/');
+        $steps   = is_array($_POST['steps'] ?? null) ? $_POST['steps'] : explode(',', (string)($_POST['steps'] ?? ''));
+        $want = fn($s) => in_array($s, $steps, true);
+        $root = rtrim($abspath, '/');
+        $report = [];
+
+        // Step 1 — rewrite wp-config.php DB credentials (backup first).
+        if ($want('wpconfig')) {
+            if (!$wp_config_path || !is_writable($wp_config_path)) {
+                $report[] = ['step' => 'wpconfig', 'ok' => false, 'msg' => 'wp-config.php not found or not writable'];
+            } else {
+                @copy($wp_config_path, $wp_config_path . '.bak-' . date('YmdHis'));
+                $cfg = file_get_contents($wp_config_path);
+                $repl = ['DB_NAME' => $qu_db['name'], 'DB_USER' => $qu_db['user'], 'DB_PASSWORD' => $qu_db['pass'], 'DB_HOST' => $qu_db['host']];
+                foreach ($repl as $const => $val) {
+                    $cfg = preg_replace(
+                        "/(define\s*\(\s*['\"]" . $const . "['\"]\s*,\s*)['\"][^'\"]*['\"]/",
+                        '${1}' . var_export($val, true),
+                        $cfg, 1, $cnt
+                    );
+                }
+                $ok = @file_put_contents($wp_config_path, $cfg) !== false;
+                $report[] = ['step' => 'wpconfig', 'ok' => $ok, 'msg' => $ok ? 'wp-config.php updated (backup saved)' : 'Write failed'];
+            }
+        }
+
+        // Connect for the DB-side steps.
+        $pdo = null;
+        if ($want('siteurl') || $want('relativize') || $want('plugins')) {
+            $r = try_db_connect($qu_db);
+            if (!$r['ok']) {
+                $report[] = ['step' => 'db', 'ok' => false, 'msg' => 'DB connection failed: ' . $r['error']];
+            } else { $pdo = $r['pdo']; }
+        }
+        $prefix = $qu_db['prefix'];
+
+        // Step 2 — siteurl/home → current URL.
+        if ($want('siteurl') && $pdo) {
+            if ($new_url === '') { $report[] = ['step' => 'siteurl', 'ok' => false, 'msg' => 'No target URL provided']; }
+            else {
+                $old = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='siteurl' LIMIT 1")->fetchColumn(), '/');
+                $st = $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name IN ('siteurl','home')");
+                $st->execute([$new_url]);
+                $report[] = ['step' => 'siteurl', 'ok' => true, 'msg' => "siteurl/home: " . ($old ?: '(empty)') . " → $new_url"];
+            }
+        }
+
+        // Step 3 — absolute DB URLs → relative (+ clear cache). Serialized-safe.
+        if ($want('relativize') && $pdo) {
+            $pattern = '#https?://[^\s\'"<>]*?(/wp-content/[^\s\'"<>()\[\]\\\\]*)#i';
+            $rewrite = fn($s) => preg_replace_callback($pattern, fn($m) => $m[1], $s);
+            $tables = [[$prefix.'posts','post_content','ID'],[$prefix.'postmeta','meta_value','meta_id'],[$prefix.'options','option_value','option_id']];
+            $updated = 0;
+            foreach ($tables as [$tbl,$col,$id]) {
+                try {
+                    $st = $pdo->prepare("SELECT `$id`,`$col` FROM `$tbl` WHERE `$col` LIKE '%http%://%/wp-content%'");
+                    $st->execute();
+                    while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                        $old = $row[$col];
+                        $new = preg_replace_callback('/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s', function($m) use ($rewrite){ $x=$rewrite($m[2]); return $x===$m[2]?$m[0]:'s:'.strlen($x).':"'.$x.'"'; }, $old);
+                        $new = $rewrite($new);
+                        if ($new !== $old) { $pdo->prepare("UPDATE `$tbl` SET `$col`=? WHERE `$id`=?")->execute([$new,$row[$id]]); $updated++; }
+                    }
+                } catch (Exception $e) {}
+            }
+            $report[] = ['step' => 'relativize', 'ok' => true, 'msg' => "Rewrote $updated row(s) to relative /wp-content/ URLs"];
+            // Clear cache dirs.
+            $deleted = 0;
+            foreach ([$root.'/wp-content/cache', $root.'/wp-content/et-cache'] as $cdir) {
+                if (!is_dir($cdir)) continue;
+                $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($cdir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+                foreach ($it as $f) { $f->isFile() ? (@unlink($f->getRealPath()) && $deleted++) : @rmdir($f->getRealPath()); }
+            }
+            $report[] = ['step' => 'cache', 'ok' => true, 'msg' => "Cache cleared ($deleted file(s))"];
+        }
+
+        // Step 4 — deactivate all plugins.
+        if ($want('plugins') && $pdo) {
+            $pdo->prepare("UPDATE `{$prefix}options` SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize([])]);
+            $report[] = ['step' => 'plugins', 'ok' => true, 'msg' => 'All plugins deactivated (re-enable via the tested plugin flow)'];
+        }
+
+        echo json_encode(['ok' => true, 'report' => $report]);
+        exit;
+    }
+
     // --- LIST PLUGINS ---
     if ($action === 'list_plugins') {
         $list_db = [
@@ -3803,6 +3915,42 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 </div>
 
+<!-- QUICK UPDATE -->
+<div class="card" style="border-color:#4f6ef7">
+<h2>⚡ <?= h(t('Quick Update (after moving the site)')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+    <?= h(t('The tool reads the OLD site URL from the database and knows the CURRENT URL from your browser. With the real DB credentials below it can update wp-config, change the site URL, convert absolute URLs to relative, clear caches and deactivate plugins in one step. A backup of wp-config.php is made and every step is reported.')) ?>
+</p>
+<div class="info-row">
+    <span class="info-label"><?= h(t('Old URL (from database)')) ?></span>
+    <span class="info-val" id="qu_old_url"><?= h($site_url ?: '—') ?></span>
+</div>
+<div class="info-row">
+    <span class="info-label"><?= h(t('Current URL (this browser)')) ?></span>
+    <span class="info-val"><?= h($current_url) ?></span>
+</div>
+<div class="row" style="margin-top:14px">
+    <div class="field"><label><?= h(t('DB Host')) ?></label><input type="text" id="qu_db_host" value="<?= h($db['host']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Name')) ?></label><input type="text" id="qu_db_name" value="<?= h($db['name']) ?>"></div>
+</div>
+<div class="row">
+    <div class="field"><label><?= h(t('DB User')) ?></label><input type="text" id="qu_db_user" value="<?= h($db['user']) ?>"></div>
+    <div class="field"><label><?= h(t('DB Password')) ?></label><input type="password" id="qu_db_pass" value="<?= h($db['pass']) ?>"></div>
+</div>
+<div class="field"><label><?= h(t('Table prefix')) ?></label><input type="text" id="qu_db_prefix" value="<?= h($db['prefix']) ?>" style="max-width:200px"></div>
+<div style="font-size:12px;color:var(--text-muted);margin:10px 0 6px"><?= h(t('Steps to run')) ?>:</div>
+<div style="display:flex;flex-direction:column;gap:6px;font-size:13px;margin-bottom:14px">
+    <label><input type="checkbox" class="qu-step" value="wpconfig" checked> <?= h(t('Update wp-config.php with these credentials (backup first)')) ?></label>
+    <label><input type="checkbox" class="qu-step" value="siteurl" checked> <?= h(t('Set siteurl/home to the current URL')) ?></label>
+    <label><input type="checkbox" class="qu-step" value="relativize" checked> <?= h(t('Convert absolute wp-content URLs to relative + clear cache')) ?></label>
+    <label><input type="checkbox" class="qu-step" value="plugins"> <?= h(t('Deactivate all plugins')) ?></label>
+</div>
+<div class="actions">
+    <button class="btn btn-primary" id="qu_btn" onclick="runQuickUpdate()">⚡ <?= h(t('Run quick update')) ?></button>
+</div>
+<div id="qu_log" class="log" style="display:none"></div>
+</div>
+
 <!-- CACHE -->
 <div class="card" style="border-color:#78350f44">
 <h2 style="display:flex;justify-content:space-between;align-items:center">
@@ -4413,6 +4561,34 @@ function showTab(name){
     document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
     document.getElementById('tab-'+name).classList.add('active');
     event.target.classList.add('active');
+}
+
+// Quick Update: runs the guarded one-click post-migration flow with a per-step log.
+async function runQuickUpdate(){
+    const steps = Array.from(document.querySelectorAll('.qu-step:checked')).map(c => c.value);
+    if (!steps.length){ alert('Select at least one step.'); return; }
+    const summary = steps.map(s => '• ' + s).join('\n');
+    if (!confirm('Run quick update?\n\nThis will:\n' + summary + '\n\nwp-config.php is backed up first. Make sure you have a database backup too.')) return;
+    const btn = document.getElementById('qu_btn');
+    btn.disabled = true; btn.textContent = '⏳ Running…';
+    const fd = new FormData();
+    fd.append('db_host', document.getElementById('qu_db_host').value);
+    fd.append('db_name', document.getElementById('qu_db_name').value);
+    fd.append('db_user', document.getElementById('qu_db_user').value);
+    fd.append('db_pass', document.getElementById('qu_db_pass').value);
+    fd.append('db_prefix', document.getElementById('qu_db_prefix').value);
+    fd.append('new_url', window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, ''));
+    steps.forEach(s => fd.append('steps[]', s));
+    try {
+        const r = await fetch('?action=quick_update', {method:'POST', body:fd});
+        const j = await r.json();
+        if (!j.ok){ log('qu_log', '✗ ' + (j.error||'failed'), false); }
+        else {
+            const lines = j.report.map(s => (s.ok ? '✓' : '✗') + ' [' + s.step + '] ' + s.msg).join('\n');
+            log('qu_log', lines, false);
+        }
+    } catch(e){ log('qu_log', '✗ ' + e.message, false); }
+    btn.disabled = false; btn.textContent = '⚡ Run quick update';
 }
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read
