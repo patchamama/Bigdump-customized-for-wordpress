@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.11.0');
+define('TOOL_VERSION',  '2.12.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -165,6 +165,14 @@ $GLOBALS['__I18N'] = [
         'Convert absolute wp-content URLs to relative + clear cache' => 'Convertir URLs absolutas de wp-content a relativas + limpiar caché',
         'Deactivate all plugins'              => 'Desactivar todos los plugins',
         'Run quick update'                    => 'Ejecutar actualización rápida',
+        // Asset recovery
+        'Recover missing assets from the original site' => 'Recuperar archivos faltantes del sitio original',
+        'Scans the database for /wp-content/ files referenced by the site, checks which are missing on disk, and downloads them from the original site (useful when an FTP copy was incomplete). The original domain is auto-filled from the old site URL and remembered for later.'
+            => 'Escanea la base de datos por archivos de /wp-content/ referenciados por el sitio, verifica cuáles faltan en disco, y los descarga del sitio original (útil cuando una copia por FTP quedó incompleta). El dominio original se autocompleta desde la URL antigua del sitio y se recuerda para después.',
+        'Original site URL (domain + optional path)' => 'URL del sitio original (dominio + ruta opcional)',
+        'Save origin'                         => 'Guardar origen',
+        'Scan for missing assets'             => 'Buscar archivos faltantes',
+        'Download missing from origin'        => 'Descargar faltantes del origen',
         'Clear Cache'                         => 'Limpiar caché',
         'Database Export'                     => 'Exportar base de datos',
         'Import SQL'                          => 'Importar SQL',
@@ -557,9 +565,20 @@ session_start();
 
 $config_file = __DIR__ . '/.migrate_config';
 $stored_hash = '';
+$cfg_data = [];
 if (file_exists($config_file)) {
-    $cfg_data = json_decode(file_get_contents($config_file), true);
+    $cfg_data = json_decode(file_get_contents($config_file), true) ?: [];
     $stored_hash = $cfg_data['password_hash'] ?? '';
+}
+// Merge-and-save the tool's JSON config so writers never clobber other keys
+// (e.g. saving origin_domain must not drop password_hash).
+function migrate_config_set(array $kv) {
+    global $config_file;
+    $cur = file_exists($config_file) ? (json_decode(file_get_contents($config_file), true) ?: []) : [];
+    $cur = array_merge($cur, $kv);
+    file_put_contents($config_file, json_encode($cur));
+    @chmod($config_file, 0600);
+    return $cur;
 }
 
 $auth_error = '';
@@ -592,8 +611,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_password'])) {
         $auth_error = 'Passwords do not match / Las contraseñas no coinciden.';
     } else {
         $hash = hash('sha256', AUTH_SALT . $pw);
-        file_put_contents($config_file, json_encode(['password_hash' => $hash]));
-        @chmod($config_file, 0600);
+        migrate_config_set(['password_hash' => $hash]);
         $stored_hash       = $hash;
         $must_set_password = false;
         $_SESSION['migrate_auth'] = true;
@@ -2258,6 +2276,109 @@ if ($authenticated && isset($_GET['action'])) {
         }
 
         echo json_encode(['ok' => true, 'report' => $report]);
+        exit;
+    }
+
+    // --- SET ORIGIN DOMAIN (persist in .migrate_config) ---
+    // Remembers the original WordPress site (domain + optional base path) so missing
+    // assets can later be fetched from it. Kept for future processes too.
+    if ($action === 'set_origin_domain') {
+        $origin = trim($_POST['origin'] ?? '');
+        if ($origin !== '' && !preg_match('#^https?://[^\s]+#i', $origin)) {
+            echo json_encode(['ok' => false, 'error' => 'Origin must be a full URL (https://old-site.com[/path])']); exit;
+        }
+        migrate_config_set(['origin_domain' => rtrim($origin, '/')]);
+        echo json_encode(['ok' => true, 'origin' => rtrim($origin, '/')]);
+        exit;
+    }
+
+    // --- SCAN MISSING ASSETS ---
+    // Collects /wp-content/ asset references from the DB, keeps those whose file is
+    // NOT present on disk, so the browser can fetch them from the origin in batches.
+    if ($action === 'assets_scan') {
+        $a_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($a_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $a_db['prefix'];
+        $root = rtrim($abspath, '/');
+        // Asset paths under /wp-content/ with a real file extension.
+        $rx = '#/wp-content/[^\s"\'<>()\[\]\\\\]+?\.(?:jpe?g|png|gif|webp|svg|avif|ico|bmp|tiff?|mp4|webm|ogg|mp3|wav|pdf|docx?|xlsx?|pptx?|zip|css|js|woff2?|ttf|eot|otf)#i';
+        $paths = [];
+        foreach ([[$prefix.'posts','post_content'],[$prefix.'postmeta','meta_value'],[$prefix.'options','option_value']] as [$tbl,$col]) {
+            try {
+                $st = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE '%/wp-content/%'");
+                while (($val = $st->fetchColumn()) !== false) {
+                    if (!preg_match_all($rx, $val, $m)) continue;
+                    foreach ($m[0] as $p) {
+                        $p = preg_replace('/[?#].*$/', '', $p);        // drop query/hash
+                        $p = str_replace('\\/', '/', $p);              // unescape JSON slashes
+                        $paths[$p] = true;
+                        if (count($paths) >= 10000) break 2;
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+        // Keep only the ones missing on disk.
+        $missing = [];
+        foreach (array_keys($paths) as $p) {
+            if (!is_file($root . $p)) $missing[] = $p;
+        }
+        $origin = $cfg_data['origin_domain'] ?? '';
+        echo json_encode(['ok' => true, 'total_refs' => count($paths), 'missing' => $missing, 'missing_count' => count($missing), 'origin' => $origin]);
+        exit;
+    }
+
+    // --- RECOVER ASSETS (download a batch from the origin site) ---
+    // For each missing relative path, fetch originDomain + path and save it to the
+    // matching local path, creating directories as needed. Returns per-file results.
+    if ($action === 'asset_recover') {
+        @set_time_limit(0);
+        $root   = rtrim($abspath, '/');
+        $origin = rtrim(trim($_POST['origin'] ?? ($cfg_data['origin_domain'] ?? '')), '/');
+        $batch  = json_decode($_POST['paths'] ?? '', true);
+        $batch  = is_array($batch) ? array_slice($batch, 0, 25) : [];
+        if ($origin === '' || !preg_match('#^https?://#i', $origin)) { echo json_encode(['ok' => false, 'error' => 'No valid origin domain set']); exit; }
+        if (!$batch) { echo json_encode(['ok' => false, 'error' => 'No paths provided']); exit; }
+
+        $fetch = function ($url) {
+            if (function_exists('curl_init')) {
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 30,
+                    CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_USERAGENT => 'WP-Migration-Tool/recover']);
+                $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+                return [$code, $body];
+            }
+            $ctx = stream_context_create(['http' => ['timeout' => 30, 'follow_location' => 1, 'ignore_errors' => true]]);
+            $body = @file_get_contents($url, false, $ctx);
+            $code = 0;
+            $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+            if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $code = (int)$m[1];
+            return [$code, $body];
+        };
+
+        $results = [];
+        foreach ($batch as $path) {
+            $path = '/' . ltrim(preg_replace('/[?#].*$/', '', (string)$path), '/');
+            // Only allow wp-content asset paths (no traversal).
+            if (strpos($path, '/wp-content/') !== 0 || strpos($path, '..') !== false) {
+                $results[] = ['path' => $path, 'ok' => false, 'msg' => 'rejected path']; continue;
+            }
+            $url = $origin . $path;
+            [$code, $body] = $fetch($url);
+            if ($code === 200 && $body !== false && strlen($body) > 0) {
+                $dest = $root . $path;
+                @mkdir(dirname($dest), 0755, true);
+                $ok = @file_put_contents($dest, $body) !== false;
+                $results[] = ['path' => $path, 'ok' => $ok, 'status' => $code, 'size' => $ok ? strlen($body) : 0, 'msg' => $ok ? 'recovered' : 'write failed'];
+            } else {
+                $results[] = ['path' => $path, 'ok' => false, 'status' => $code, 'msg' => 'not found at origin (' . $code . ')'];
+            }
+        }
+        echo json_encode(['ok' => true, 'results' => $results]);
         exit;
     }
 
@@ -3951,6 +4072,31 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <div id="qu_log" class="log" style="display:none"></div>
 </div>
 
+<!-- ASSET RECOVERY -->
+<div class="card" style="border-color:#1e3a5f">
+<h2>🩹 <?= h(t('Recover missing assets from the original site')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+    <?= h(t('Scans the database for /wp-content/ files referenced by the site, checks which are missing on disk, and downloads them from the original site (useful when an FTP copy was incomplete). The original domain is auto-filled from the old site URL and remembered for later.')) ?>
+</p>
+<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
+    <div class="field" style="flex:1;min-width:260px;margin:0">
+        <label><?= h(t('Original site URL (domain + optional path)')) ?></label>
+        <input type="text" id="ar_origin" placeholder="https://old-site.com" value="<?= h($cfg_data['origin_domain'] ?? ($site_url ?: '')) ?>">
+    </div>
+    <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="saveOrigin()">💾 <?= h(t('Save origin')) ?></button>
+</div>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-primary" id="ar_scan_btn" onclick="scanMissingAssets()">🔍 <?= h(t('Scan for missing assets')) ?></button>
+    <button class="btn btn-success" id="ar_recover_btn" onclick="recoverAssets()" style="display:none">🩹 <?= h(t('Download missing from origin')) ?></button>
+    <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);display:none" id="ar_stop" onclick="AR_ABORT=true">⏹ <?= h(t('Stop')) ?></button>
+</div>
+<div id="ar_progress" style="display:none;margin-bottom:10px">
+    <div class="progress"><div class="progress-bar" id="ar_bar" style="width:0%"></div></div>
+    <div id="ar_progress_txt" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
+</div>
+<div id="ar_log" class="log" style="display:none"></div>
+</div>
+
 <!-- CACHE -->
 <div class="card" style="border-color:#78350f44">
 <h2 style="display:flex;justify-content:space-between;align-items:center">
@@ -4589,6 +4735,65 @@ async function runQuickUpdate(){
         }
     } catch(e){ log('qu_log', '✗ ' + e.message, false); }
     btn.disabled = false; btn.textContent = '⚡ Run quick update';
+}
+
+// --- Asset recovery from the original site ---
+let AR_ABORT = false;
+let AR_MISSING = [];
+function arCreds(fd){ ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('qu_db_'+k)?.value || '')); return fd; }
+
+async function saveOrigin(){
+    const fd = new FormData(); fd.append('origin', document.getElementById('ar_origin').value.trim());
+    const r = await fetch('?action=set_origin_domain', {method:'POST', body:fd});
+    const j = await r.json();
+    log('ar_log', j.ok ? '✓ Origin saved: ' + (j.origin||'(cleared)') : '✗ ' + j.error, false);
+}
+
+async function scanMissingAssets(){
+    const btn = document.getElementById('ar_scan_btn');
+    btn.disabled = true; btn.textContent = '⏳';
+    log('ar_log', '⏳ Scanning database for asset references…', false);
+    const fd = arCreds(new FormData());
+    try {
+        const r = await fetch('?action=assets_scan', {method:'POST', body:fd});
+        const j = await r.json();
+        if (!j.ok){ log('ar_log', '✗ ' + j.error, false); }
+        else {
+            AR_MISSING = j.missing || [];
+            log('ar_log', `Scanned ${j.total_refs} asset reference(s): ${j.missing_count} missing on disk.`, false);
+            const rbtn = document.getElementById('ar_recover_btn');
+            if (AR_MISSING.length && document.getElementById('ar_origin').value.trim()) rbtn.style.display = 'inline-flex';
+            else if (AR_MISSING.length) log('ar_log', 'Set the original site URL above to recover them.', false);
+        }
+    } catch(e){ log('ar_log', '✗ ' + e.message, false); }
+    btn.disabled = false; btn.textContent = '🔍 Scan for missing assets';
+}
+
+async function recoverAssets(){
+    if (!AR_MISSING.length){ return; }
+    const origin = document.getElementById('ar_origin').value.trim();
+    if (!origin){ alert('Set the original site URL first.'); return; }
+    AR_ABORT = false;
+    const stop = document.getElementById('ar_stop'); stop.style.display = 'inline-flex';
+    const prog = document.getElementById('ar_progress'); prog.style.display = 'block';
+    const bar = document.getElementById('ar_bar'); const ptxt = document.getElementById('ar_progress_txt');
+    let done = 0, ok = 0, fail = 0;
+    const BATCH = 5;
+    for (let i = 0; i < AR_MISSING.length && !AR_ABORT; i += BATCH){
+        const slice = AR_MISSING.slice(i, i + BATCH);
+        const fd = new FormData(); fd.append('origin', origin); fd.append('paths', JSON.stringify(slice));
+        try {
+            const r = await fetch('?action=asset_recover', {method:'POST', body:fd});
+            const j = await r.json();
+            if (j.ok) j.results.forEach(res => { res.ok ? ok++ : fail++; });
+        } catch(e){ fail += slice.length; }
+        done += slice.length;
+        const pct = Math.round(done / AR_MISSING.length * 100);
+        bar.style.width = pct + '%';
+        ptxt.textContent = `${done}/${AR_MISSING.length} (${pct}%) — ${ok} recovered, ${fail} not found`;
+    }
+    stop.style.display = 'none';
+    log('ar_log', `✓ Done. Recovered ${ok}, not found ${fail}${AR_ABORT ? ' (stopped)' : ''}. Re-scan to confirm.`, false);
 }
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read
