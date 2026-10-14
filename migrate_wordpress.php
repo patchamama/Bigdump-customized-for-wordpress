@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.7.0');
+define('TOOL_VERSION',  '3.8.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -238,6 +238,16 @@ $GLOBALS['__I18N'] = [
         'prefix'                              => 'prefijo',
         'symlinks'                            => 'symlinks',
         'files copied'                        => 'archivos copiados',
+        'Popular'                             => 'Populares',
+        'Install'                             => 'Instalar',
+        'incompatible PHP'                    => 'PHP incompatible',
+        'Loading popular plugins…'            => 'Cargando plugins populares…',
+        'Installing'                          => 'Instalando',
+        'No sandbox yet — install directly into the live site?' => 'Aún no hay sandbox — ¿instalar directamente en el sitio real?',
+        'breaks the sandbox'                  => 'rompe el sandbox',
+        'Not installing live.'                => 'No se instala en producción.',
+        'loads fine in the sandbox'           => 'carga bien en el sandbox',
+        '%s passed the test. Install it into the live site now?' => '%s pasó la prueba. ¿Instalarlo en el sitio real ahora?',
         'Vet in the sandbox before installing live.' => 'Evaluá en el sandbox antes de instalar en producción.',
         'Destroy the sandbox folder and its test tables?' => '¿Destruir la carpeta del sandbox y sus tablas de prueba?',
         'Clear Cache'                         => 'Limpiar caché',
@@ -3356,10 +3366,15 @@ if ($authenticated && isset($_GET['action'])) {
 
     // --- PLUGIN SEARCH (wordpress.org API) ---
     // Lets the user find a plugin to vet in the sandbox before installing it live.
-    if ($action === 'plugin_search') {
-        $q = trim($_POST['q'] ?? '');
-        if ($q === '') { echo json_encode(['ok' => false, 'error' => 'Empty query']); exit; }
-        $api = 'https://api.wordpress.org/plugins/info/1.2/?action=query_plugins&request[search]=' . urlencode($q) . '&request[per_page]=10';
+    if ($action === 'plugin_search' || $action === 'plugin_popular') {
+        // Search by term, or browse the most popular plugins (empty/absent query).
+        if ($action === 'plugin_popular') {
+            $api = 'https://api.wordpress.org/plugins/info/1.2/?action=query_plugins&request[browse]=popular&request[per_page]=12';
+        } else {
+            $q = trim($_POST['q'] ?? '');
+            if ($q === '') { echo json_encode(['ok' => false, 'error' => 'Empty query']); exit; }
+            $api = 'https://api.wordpress.org/plugins/info/1.2/?action=query_plugins&request[search]=' . urlencode($q) . '&request[per_page]=12';
+        }
         $body = false;
         if (function_exists('curl_init')) {
             $ch = curl_init($api);
@@ -3377,11 +3392,70 @@ if ($authenticated && isset($_GET['action'])) {
             $out[] = [
                 'slug' => $p['slug'] ?? '', 'name' => strip_tags($p['name'] ?? ''),
                 'version' => $p['version'] ?? '', 'requires_php' => $req,
+                'active_installs' => $p['active_installs'] ?? 0, 'rating' => $p['rating'] ?? 0,
                 'php_ok' => ($req === '' || version_compare($server_php, $req, '>=')),
                 'download' => $p['download_link'] ?? '',
             ];
         }
         echo json_encode(['ok' => true, 'server_php' => $server_php, 'plugins' => $out]);
+        exit;
+    }
+
+    // --- PLUGIN INSTALL (download a wordpress.org plugin into sandbox or live) ---
+    // target=sandbox installs into the newest test_env_* /wp-content/plugins (its
+    // symlink points to the live plugins dir, so "sandbox" and "live" may share it
+    // unless copied); target=live installs into the real wp-content/plugins.
+    if ($action === 'plugin_install') {
+        @set_time_limit(0);
+        $slug   = preg_replace('/[^a-z0-9\-]/', '', strtolower($_POST['slug'] ?? ''));
+        $dl     = trim($_POST['download'] ?? '');
+        $target = ($_POST['target'] ?? 'sandbox') === 'live' ? 'live' : 'sandbox';
+        if ($slug === '') { echo json_encode(['ok' => false, 'error' => 'Invalid plugin slug']); exit; }
+        if (!preg_match('#^https?://downloads\.wordpress\.org/plugin/#i', $dl)) {
+            // Rebuild the canonical download URL from the slug if not provided/trusted.
+            $dl = 'https://downloads.wordpress.org/plugin/' . $slug . '.latest-stable.zip';
+        }
+        $root = rtrim($abspath, '/');
+        if ($target === 'sandbox') {
+            $envs = glob($root . '/test_env_*', GLOB_ONLYDIR);
+            if (!$envs) { echo json_encode(['ok' => false, 'error' => 'No sandbox found — build the Test Environment first']); exit; }
+            $plugins_dir = $envs[0] . '/wp-content/plugins';
+            // If plugins is a symlink to live, resolve to the real dir.
+            if (is_link($plugins_dir)) $plugins_dir = readlink($plugins_dir);
+        } else {
+            $plugins_dir = $root . '/wp-content/plugins';
+        }
+        if (!is_dir($plugins_dir) || !is_writable($plugins_dir)) { echo json_encode(['ok' => false, 'error' => 'plugins directory not writable']); exit; }
+
+        // Download the zip.
+        $tmp = sys_get_temp_dir() . '/plugin_' . $slug . '_' . time() . '.zip';
+        $okdl = false;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($dl); $fp = fopen($tmp, 'wb');
+            curl_setopt_array($ch, [CURLOPT_FILE => $fp, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 120, CURLOPT_SSL_VERIFYPEER => false]);
+            curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch); fclose($fp);
+            $okdl = ($code === 200 && is_file($tmp) && filesize($tmp) > 100);
+        } elseif (ini_get('allow_url_fopen')) {
+            $data = @file_get_contents($dl, false, stream_context_create(['http' => ['timeout' => 120, 'follow_location' => 1]]));
+            if ($data) { file_put_contents($tmp, $data); $okdl = filesize($tmp) > 100; }
+        }
+        if (!$okdl) { @unlink($tmp); echo json_encode(['ok' => false, 'error' => 'Could not download plugin from wordpress.org']); exit; }
+
+        // Extract into the plugins dir.
+        $extracted = false;
+        if (class_exists('ZipArchive')) {
+            $zip = new ZipArchive();
+            if ($zip->open($tmp) === true) { $zip->extractTo($plugins_dir); $zip->close(); $extracted = true; }
+        }
+        @unlink($tmp);
+        if (!$extracted) { echo json_encode(['ok' => false, 'error' => 'Could not extract the plugin zip']); exit; }
+        // Find the main plugin file to activate later.
+        $main = '';
+        foreach (glob($plugins_dir . '/' . $slug . '/*.php') ?: [] as $php) {
+            if (strpos(@file_get_contents($php, false, null, 0, 4096) ?: '', 'Plugin Name:') !== false) { $main = $slug . '/' . basename($php); break; }
+        }
+        echo json_encode(['ok' => true, 'slug' => $slug, 'target' => $target, 'main' => $main,
+            'note' => $target === 'sandbox' ? 'Installed into the sandbox — smoke-test it before installing live.' : 'Installed into the live site.']);
         exit;
     }
 
@@ -5845,6 +5919,7 @@ foreach ($php_cfg_rows as $r):
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="text" id="te_plugin_q" placeholder="<?= h(t('Plugin name…')) ?>" style="flex:1;min-width:200px;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px">
         <button class="btn btn-sm btn-primary" onclick="tePluginSearch()">🔍 <?= h(t('Search')) ?></button>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="tePluginPopular()">⭐ <?= h(t('Popular')) ?></button>
     </div>
     <div id="te_plugin_results" style="margin-top:8px;font-size:12px"></div>
 </div>
@@ -6124,23 +6199,65 @@ async function teSmokeTestPlugins(){
     log('te_log', `✓ Smoke test done: ${breakers.length} plugin(s) break the sandbox.`, false);
 }
 
-async function tePluginSearch(){
-    const q = document.getElementById('te_plugin_q').value.trim();
-    if (!q) return;
+function teDecode(s){ const t=document.createElement('textarea'); t.innerHTML=s; return t.value; } // HTML entities in plugin names
+function teRenderPlugins(j){
     const out = document.getElementById('te_plugin_results');
-    out.innerHTML = '<span style="color:var(--text-dim)">⏳</span>';
-    const fd = new FormData(); fd.append('q', q);
-    let j;
-    try { const r = await fetch('?action=plugin_search', {method:'POST', body:fd}); j = await r.json(); }
-    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
     if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
     let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
     j.plugins.forEach(p => {
         const php = p.requires_php ? (p.php_ok ? `<span class="badge badge-ok">PHP ≥${p.requires_php}</span>` : `<span class="badge badge-err">needs PHP ${p.requires_php}</span>`) : '';
-        html += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${esc(p.name)} <span style="color:var(--text-dim)">v${esc(p.version)}</span></td><td style="padding:4px 8px">${php}</td></tr>`;
+        const inst = p.active_installs ? `<span style="color:var(--text-dim)">${Number(p.active_installs).toLocaleString()}+</span>` : '';
+        const canInstall = p.php_ok && p.slug;
+        const btn = canInstall
+            ? `<button class="btn btn-sm btn-primary" onclick="tePluginInstall('${esc(p.slug)}','${esc(p.download)}')">⬇️ ${T_TE.installBtn}</button>`
+            : `<span style="color:#fca5a5;font-size:11px">${T_TE.incompatible}</span>`;
+        html += `<tr style="border-top:1px solid var(--border)">
+            <td style="padding:4px 8px">${esc(teDecode(p.name))} <span style="color:var(--text-dim)">v${esc(p.version)}</span></td>
+            <td style="padding:4px 8px">${php} ${inst}</td>
+            <td style="padding:4px 8px;text-align:right">${btn}</td></tr>`;
     });
     html += '</table><div style="font-size:11px;color:var(--text-dim);margin-top:4px">' + T_TE.vetNote + '</div>';
     out.innerHTML = html;
+}
+async function tePluginSearch(){
+    const q = document.getElementById('te_plugin_q').value.trim();
+    if (!q) return;
+    document.getElementById('te_plugin_results').innerHTML = '<span style="color:var(--text-dim)">⏳</span>';
+    const fd = new FormData(); fd.append('q', q);
+    try { teRenderPlugins(await (await fetch('?action=plugin_search', {method:'POST', body:fd})).json()); }
+    catch(e){ document.getElementById('te_plugin_results').innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; }
+}
+async function tePluginPopular(){
+    document.getElementById('te_plugin_results').innerHTML = '<span style="color:var(--text-dim)">⏳ ' + T_TE.loadingPopular + '</span>';
+    try { teRenderPlugins(await (await fetch('?action=plugin_popular', {method:'POST'})).json()); }
+    catch(e){ document.getElementById('te_plugin_results').innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; }
+}
+async function tePluginInstall(slug, download){
+    // Install into the sandbox first (vet), then offer to install live if it passes.
+    if (!TE_SANDBOX){ if (!confirm(T_TE.noSandboxInstall)) return; }
+    const target = TE_SANDBOX ? 'sandbox' : 'live';
+    const fd = new FormData(); fd.append('slug', slug); fd.append('download', download || ''); fd.append('target', target);
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    log('te_log', `⏳ ${T_TE.installing} ${slug} (${target})…`, false);
+    let j; try { j = await (await fetch('?action=plugin_install', {method:'POST', body:fd})).json(); } catch(e){ log('te_log','✗ '+e.message,false); return; }
+    if (!j.ok){ log('te_log', '✗ ' + j.error, false); return; }
+    log('te_log', `✓ ${slug}: ${j.note}`, false);
+    // If installed in the sandbox, smoke-test just this plugin right away.
+    if (target === 'sandbox' && j.main && TE_SANDBOX){
+        const tf = teCreds(new FormData()); tf.append('plugin', j.main); tf.append('sandbox_url', TE_SANDBOX.url);
+        let t; try { t = await (await fetch('?action=sandbox_plugin_test', {method:'POST', body:tf})).json(); } catch(e){ return; }
+        if (t && t.ok){
+            if (t.breaks){ log('te_log', `⚠ ${slug} ${T_TE.breaksSandbox} (HTTP ${t.status}). ${T_TE.notLive}`, false); }
+            else {
+                log('te_log', `✓ ${slug} ${T_TE.loadsSandbox}.`, false);
+                if (confirm(T_TE.offerLive.replace('%s', slug))){
+                    const lf = new FormData(); lf.append('slug', slug); lf.append('download', download||''); lf.append('target','live');
+                    const l = await (await fetch('?action=plugin_install', {method:'POST', body:lf})).json();
+                    log('te_log', l.ok ? `✓ ${slug}: ${l.note}` : `✗ ${l.error}`, false);
+                }
+            }
+        }
+    }
 }
 
 async function teDestroy(){
@@ -6161,6 +6278,11 @@ const T_TE = {
     vetNote: <?= json_encode(t('Vet in the sandbox before installing live.')) ?>, confirmDestroy: <?= json_encode(t('Destroy the sandbox folder and its test tables?')) ?>,
     relativized: <?= json_encode(t('URLs relativized')) ?>, prefix: <?= json_encode(t('prefix')) ?>,
     symlinks: <?= json_encode(t('symlinks')) ?>, copiedFiles: <?= json_encode(t('files copied')) ?>,
+    installBtn: <?= json_encode(t('Install')) ?>, incompatible: <?= json_encode(t('incompatible PHP')) ?>,
+    loadingPopular: <?= json_encode(t('Loading popular plugins…')) ?>, installing: <?= json_encode(t('Installing')) ?>,
+    noSandboxInstall: <?= json_encode(t('No sandbox yet — install directly into the live site?')) ?>,
+    breaksSandbox: <?= json_encode(t('breaks the sandbox')) ?>, notLive: <?= json_encode(t('Not installing live.')) ?>,
+    loadsSandbox: <?= json_encode(t('loads fine in the sandbox')) ?>, offerLive: <?= json_encode(t('%s passed the test. Install it into the live site now?')) ?>,
 };
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read
