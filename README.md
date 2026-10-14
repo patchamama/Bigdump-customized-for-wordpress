@@ -51,6 +51,28 @@ A password-protected control panel for migrating and maintaining a WordPress sit
 It reads database credentials from `wp-config.php` automatically and drives every
 operation over PDO/mysqli.
 
+### Quick update (one-click post-migration)
+
+Given only the real DB credentials, the tool knows the **old** site URL (from the database) and
+the **current** URL (from the browser), so a freshly-moved site can be fixed in one guarded step:
+rewrite `wp-config.php` (backed up first), set `siteurl`/`home`, convert absolute `wp-content`
+URLs to relative, clear caches and optionally deactivate all plugins — each step reported.
+
+### Asset recovery
+
+Scans the database for `/wp-content/` files the site references, detects which are **missing on
+disk**, and downloads them from the **original site** in batches with a progress bar — for when an
+FTP copy was incomplete. The original domain is auto-filled from the old site URL and remembered.
+
+### Test Environment (isolated sandbox)
+
+Builds a runnable WordPress sandbox in a subfolder without risking the live site: it **replicates
+the database** tables under a test prefix (progress bar), and links the core, plugins, themes and
+uploads (symlink, falling back to copy) with its own `wp-config.php`. Then it can **smoke-test each
+plugin** one by one against the sandbox (flagging any that 500 / fatal), **vet new plugins** from the
+wordpress.org API before installing them live, run a **PHP-compatibility** check, and produce a
+report. Tables and folder are disposable.
+
 ### Database export and import
 
 - **Export** the full database via `mysqldump` (when available) or a pure-PHP PDO
@@ -232,6 +254,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.0.0` | Quick Update one-click post-migration (wp-config, siteurl, relativize, cache, plugins); asset recovery that downloads missing wp-content files from the original site; isolated Test Environment sandbox (table replication with progress bar, symlinked core/plugins/themes/uploads, per-plugin smoke test, wordpress.org plugin vetting, PHP-compat report) |
 | `migrate 2.10.0` | Light/dark theme; fuller Spanish translation; broken link checker now shows each link's location in WordPress (post/meta/option) with an edit shortcut and covers page links, not just assets; friendly-permalink chooser with an isolated anti-500 test; WP-CLI shown in the CLI list; How-to-use tab reordered and rewritten; phpMyAdmin random folder with auto-expiring temporary credentials |
 | `migrate 2.4.0` | SEO suite (audit, meta, friendly permalinks, sitemap, indexing toggle, request/check-indexed links); full-site HTTP Basic password with isolated anti-500 test; Get BigDump into the site; fix Media URL Scanner to rewrite URLs that carry a subfolder before `/wp-content/`, with opt-in disk verification |
 | `migrate 2.0.0` | DB-password-based access with custom encrypted override; bilingual EN/ES UI; WordPress user management; security audit; post-migration extras (htaccess, repair tables, flush rewrite, debug/maintenance); PHP config with isolated safe testing; phpMyAdmin installer; Domain Link Manager final-URL preview and availability check |

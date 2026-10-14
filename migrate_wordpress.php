@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.12.0');
+define('TOOL_VERSION',  '3.0.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -173,6 +173,26 @@ $GLOBALS['__I18N'] = [
         'Save origin'                         => 'Guardar origen',
         'Scan for missing assets'             => 'Buscar archivos faltantes',
         'Download missing from origin'        => 'Descargar faltantes del origen',
+        // Test Environment (sandbox)
+        'Test Environment (sandbox)'          => 'Entorno de prueba (sandbox)',
+        'Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.'
+            => 'Construye un WordPress aislado en una subcarpeta: replica las tablas de la base de datos con un prefijo de prueba y enlaza el core, plugins, temas y uploads (symlink, con copia como respaldo). Luego puede probar cada plugin uno a uno contra el sandbox, evaluar plugins nuevos de wordpress.org antes de instalarlos en producción, y generar un informe — todo sin arriesgar el sitio real. Usa la conexión de BD de la tarjeta Herramientas DB de arriba.',
+        'Build sandbox'                       => 'Construir sandbox',
+        'Smoke-test plugins'                  => 'Probar plugins',
+        'Destroy sandbox'                     => 'Destruir sandbox',
+        'Vet a new plugin from wordpress.org' => 'Evaluar un plugin nuevo de wordpress.org',
+        'Plugin name…'                        => 'Nombre del plugin…',
+        'Search'                              => 'Buscar',
+        'Replicating table'                   => 'Replicando tabla',
+        'rows'                                => 'filas',
+        'Creating sandbox folder…'            => 'Creando carpeta del sandbox…',
+        'Sandbox ready'                       => 'Sandbox listo',
+        'Testing plugin'                      => 'Probando plugin',
+        'Plugin compatibility report'         => 'Informe de compatibilidad de plugins',
+        'Recommend disabling'                 => 'Se recomienda desactivar',
+        'All plugins load in the sandbox'     => 'Todos los plugins cargan en el sandbox',
+        'Vet in the sandbox before installing live.' => 'Evaluá en el sandbox antes de instalar en producción.',
+        'Destroy the sandbox folder and its test tables?' => '¿Destruir la carpeta del sandbox y sus tablas de prueba?',
         'Clear Cache'                         => 'Limpiar caché',
         'Database Export'                     => 'Exportar base de datos',
         'Import SQL'                          => 'Importar SQL',
@@ -2379,6 +2399,274 @@ if ($authenticated && isset($_GET['action'])) {
             }
         }
         echo json_encode(['ok' => true, 'results' => $results]);
+        exit;
+    }
+
+    // --- TEST ENVIRONMENT: shared DB connection + sandbox prefix ---
+    $sandbox_db = function () use ($db) {
+        return [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+    };
+    // The sandbox table prefix derives from the live prefix (wp_ -> wptest_).
+    $sandbox_prefix = function ($live_prefix) { return rtrim($live_prefix, '_') . 'test_'; };
+
+    // --- CLONE TABLES: list the source tables + row counts ---
+    if ($action === 'clone_tables_start') {
+        $c_db = $sandbox_db();
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $src = $c_db['prefix']; $dst = $sandbox_prefix($src);
+        $all = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+        $tables = [];
+        foreach ($all as $t) {
+            // Only source tables, and never the sandbox tables themselves.
+            if (strpos($t, $src) !== 0 || strpos($t, $dst) === 0) continue;
+            $rows = (int)$pdo->query("SELECT COUNT(*) FROM `$t`")->fetchColumn();
+            $tables[] = ['name' => $t, 'rows' => $rows];
+        }
+        echo json_encode(['ok' => true, 'src_prefix' => $src, 'dst_prefix' => $dst, 'tables' => $tables, 'count' => count($tables)]);
+        exit;
+    }
+
+    // --- CLONE TABLES: replicate one table (CREATE LIKE + INSERT SELECT) ---
+    if ($action === 'clone_table_one') {
+        @set_time_limit(0);
+        $c_db = $sandbox_db();
+        $table = trim($_POST['table'] ?? '');
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $src = $c_db['prefix']; $dst = $sandbox_prefix($src);
+        if ($table === '' || strpos($table, $src) !== 0) { echo json_encode(['ok' => false, 'error' => 'Invalid table']); exit; }
+        $new = $dst . substr($table, strlen($src));
+        try {
+            $pdo->exec("DROP TABLE IF EXISTS `$new`");
+            $pdo->exec("CREATE TABLE `$new` LIKE `$table`");
+            $pdo->exec("INSERT INTO `$new` SELECT * FROM `$table`");
+            $rows = (int)$pdo->query("SELECT COUNT(*) FROM `$new`")->fetchColumn();
+            echo json_encode(['ok' => true, 'table' => $table, 'into' => $new, 'rows' => $rows]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'error' => $e->getMessage(), 'table' => $table]);
+        }
+        exit;
+    }
+
+    // --- CLONE TABLES: drop all sandbox tables ---
+    if ($action === 'clone_cleanup') {
+        $c_db = $sandbox_db();
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+        $all = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+        $dropped = 0;
+        $pdo->exec("SET foreign_key_checks = 0");
+        foreach ($all as $t) { if (strpos($t, $dst) === 0) { $pdo->exec("DROP TABLE IF EXISTS `$t`"); $dropped++; } }
+        $pdo->exec("SET foreign_key_checks = 1");
+        echo json_encode(['ok' => true, 'dropped' => $dropped, 'prefix' => $dst]);
+        exit;
+    }
+
+    // --- SANDBOX: create an isolated WordPress folder (multisite-style) ---
+    // Builds test_env_<rand>/ linking the live core, plugins, themes and uploads
+    // (symlink, falling back to copy) and writing its OWN wp-config.php that points
+    // at the sandbox table prefix and sandbox URL — so plugins/permalinks/PHP config
+    // can be exercised against a runnable WP without touching the live site.
+    if ($action === 'sandbox_create') {
+        @set_time_limit(0);
+        $c_db = $sandbox_db();
+        $root = rtrim($abspath, '/');
+        $live_prefix = $c_db['prefix'];
+        $dst_prefix  = $sandbox_prefix($live_prefix);
+        // Reuse an existing sandbox if present.
+        $existing = glob($root . '/test_env_*', GLOB_ONLYDIR);
+        $dir = ($existing && is_dir($existing[0])) ? $existing[0] : $root . '/test_env_' . bin2hex(random_bytes(4));
+        $fresh = !is_dir($dir);
+        if ($fresh && !@mkdir($dir, 0755)) { echo json_encode(['ok' => false, 'error' => 'Could not create sandbox folder (web root not writable)']); exit; }
+
+        // Link or copy a path from the live root into the sandbox.
+        $link_method = 'symlink';
+        $provide = function ($name) use ($root, $dir, &$link_method) {
+            $src = $root . '/' . $name; $dest = $dir . '/' . $name;
+            if (!file_exists($src) || file_exists($dest)) return;
+            if (@symlink($src, $dest)) return;           // preferred: no duplication
+            $link_method = 'copy';
+            if (is_dir($src)) {
+                // Shallow recursive copy fallback.
+                @mkdir($dest, 0755, true);
+                $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                foreach ($it as $f) {
+                    $target = $dest . '/' . $it->getSubPathName();
+                    $f->isDir() ? @mkdir($target, 0755, true) : @copy($f->getRealPath(), $target);
+                }
+            } else { @copy($src, $dest); }
+        };
+        // Core dirs/files and content. uploads is shared (symlink only — never copied).
+        foreach (['wp-admin', 'wp-includes'] as $d) $provide($d);
+        foreach (glob($root . '/*.php') ?: [] as $f) $provide(basename($f)); // index.php, wp-load.php, etc.
+        @mkdir($dir . '/wp-content', 0755);
+        foreach (['plugins', 'themes', 'mu-plugins'] as $d) {
+            if (is_dir($root . '/wp-content/' . $d) && !file_exists($dir . '/wp-content/' . $d))
+                @symlink($root . '/wp-content/' . $d, $dir . '/wp-content/' . $d) || $provide('wp-content/' . $d);
+        }
+        // uploads: symlink only (large; shared with the live site).
+        if (is_dir($root . '/wp-content/uploads') && !file_exists($dir . '/wp-content/uploads'))
+            @symlink($root . '/wp-content/uploads', $dir . '/wp-content/uploads');
+
+        // Sandbox URL + its own wp-config.php (sandbox prefix).
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+        $sandbox_url = $base . '/' . basename($dir);
+        $wpcfg  = "<?php\n/* WP Migration Tool sandbox — isolated test environment */\n";
+        $wpcfg .= "define('DB_NAME', " . var_export($c_db['name'], true) . ");\n";
+        $wpcfg .= "define('DB_USER', " . var_export($c_db['user'], true) . ");\n";
+        $wpcfg .= "define('DB_PASSWORD', " . var_export($c_db['pass'], true) . ");\n";
+        $wpcfg .= "define('DB_HOST', " . var_export($c_db['host'], true) . ");\n";
+        $wpcfg .= "define('DB_CHARSET', 'utf8mb4');\n\$table_prefix = " . var_export($dst_prefix, true) . ";\n";
+        $wpcfg .= "define('WP_HOME', " . var_export($sandbox_url, true) . ");\ndefine('WP_SITEURL', " . var_export($sandbox_url, true) . ");\n";
+        $wpcfg .= "define('WP_DEBUG', false);\nif (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');\nrequire_once ABSPATH . 'wp-settings.php';\n";
+        @file_put_contents($dir . '/wp-config.php', $wpcfg);
+        @chmod($dir . '/wp-config.php', 0600);
+
+        echo json_encode(['ok' => true, 'folder' => basename($dir), 'url' => $sandbox_url,
+            'link_method' => $link_method, 'dst_prefix' => $dst_prefix, 'fresh' => $fresh]);
+        exit;
+    }
+
+    // --- SANDBOX: destroy folder (and optionally the sandbox tables) ---
+    if ($action === 'sandbox_destroy') {
+        $root = rtrim($abspath, '/');
+        $removed = 0;
+        foreach (glob($root . '/test_env_*', GLOB_ONLYDIR) ?: [] as $dir) {
+            // Remove the sandbox folder. Symlinks are unlinked (never follow into live dirs).
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+            foreach ($it as $f) {
+                $path = $f->getPathname();
+                if (is_link($path)) { @unlink($path); }
+                elseif ($f->isDir()) { @rmdir($path); }
+                else { @unlink($path); }
+            }
+            @rmdir($dir); $removed++;
+        }
+        $drop_tables = ($_POST['drop_tables'] ?? '') === '1';
+        $dropped = 0;
+        if ($drop_tables) {
+            $c_db = $sandbox_db();
+            $r = try_db_connect($c_db);
+            if ($r['ok']) {
+                $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+                $pdo->exec("SET foreign_key_checks = 0");
+                foreach ($pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN) as $t) { if (strpos($t, $dst) === 0) { $pdo->exec("DROP TABLE IF EXISTS `$t`"); $dropped++; } }
+                $pdo->exec("SET foreign_key_checks = 1");
+            }
+        }
+        echo json_encode(['ok' => true, 'folders_removed' => $removed, 'tables_dropped' => $dropped]);
+        exit;
+    }
+
+    // --- SANDBOX: list installed plugins with PHP-compat header ---
+    // Reads plugin headers from disk (Plugin Name, Requires PHP) so the UI can show
+    // a static PHP-compatibility check plus drive the per-plugin smoke test.
+    if ($action === 'sandbox_plugins_list') {
+        $root = rtrim($abspath, '/');
+        $plugins_dir = $root . '/wp-content/plugins';
+        $server_php  = phpversion();
+        $list = [];
+        $read_header = function ($file) {
+            $head = @file_get_contents($file, false, null, 0, 8192) ?: '';
+            $name = preg_match('/Plugin Name:\s*(.+)/i', $head, $m) ? trim($m[1]) : '';
+            $req  = preg_match('/Requires PHP:\s*([0-9.]+)/i', $head, $m) ? trim($m[1]) : '';
+            return [$name, $req];
+        };
+        if (is_dir($plugins_dir)) {
+            foreach (glob($plugins_dir . '/*.php') ?: [] as $php) {
+                [$name, $req] = $read_header($php);
+                if ($name === '') continue;
+                $file = basename($php);
+                $list[] = ['file' => $file, 'name' => $name, 'requires_php' => $req,
+                    'php_ok' => ($req === '' || version_compare($server_php, $req, '>='))];
+            }
+            foreach (scandir($plugins_dir) ?: [] as $item) {
+                if ($item[0] === '.' || !is_dir($plugins_dir . '/' . $item)) continue;
+                foreach (glob($plugins_dir . '/' . $item . '/*.php') ?: [] as $php) {
+                    [$name, $req] = $read_header($php);
+                    if ($name === '') continue;
+                    $list[] = ['file' => $item . '/' . basename($php), 'name' => $name, 'requires_php' => $req,
+                        'php_ok' => ($req === '' || version_compare($server_php, $req, '>='))];
+                    break;
+                }
+            }
+        }
+        usort($list, fn($a, $b) => strcasecmp($a['name'], $b['name']));
+        echo json_encode(['ok' => true, 'server_php' => $server_php, 'plugins' => $list, 'count' => count($list)]);
+        exit;
+    }
+
+    // --- SANDBOX: smoke-test a single plugin ---
+    // Sets active_plugins in the SANDBOX tables to just this plugin, then GETs the
+    // sandbox URL and reports whether it loads (ok) or returns 500 / a PHP fatal.
+    if ($action === 'sandbox_plugin_test') {
+        @set_time_limit(0);
+        $c_db = $sandbox_db();
+        $plugin = trim($_POST['plugin'] ?? '');
+        $sandbox_url = trim($_POST['sandbox_url'] ?? '');
+        if ($plugin === '' || $sandbox_url === '') { echo json_encode(['ok' => false, 'error' => 'Missing plugin or sandbox URL']); exit; }
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+        // Guard: sandbox tables must exist (replicated first).
+        $has = $pdo->query("SHOW TABLES LIKE " . $pdo->quote($dst . 'options'))->fetchColumn();
+        if (!$has) { echo json_encode(['ok' => false, 'error' => 'Sandbox tables not found — replicate first']); exit; }
+        // Activate only this plugin in the sandbox options.
+        $pdo->prepare("UPDATE `{$dst}options` SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize([$plugin])]);
+        // GET the sandbox home and classify.
+        $status = 0; $body = '';
+        if (function_exists('curl_init')) {
+            $ch = curl_init($sandbox_url . '/');
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 20, CURLOPT_SSL_VERIFYPEER => false]);
+            $body = (string)curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 20, 'ignore_errors' => true]]);
+            $body = (string)@file_get_contents($sandbox_url . '/', false, $ctx);
+            $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+            if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+        }
+        $fatal = (stripos($body, 'Fatal error') !== false) || (stripos($body, 'There has been a critical error') !== false);
+        $breaks = ($status >= 500) || $fatal;
+        echo json_encode(['ok' => true, 'plugin' => $plugin, 'status' => $status, 'breaks' => $breaks,
+            'loads' => ($status >= 200 && $status < 400 && !$fatal)]);
+        exit;
+    }
+
+    // --- PLUGIN SEARCH (wordpress.org API) ---
+    // Lets the user find a plugin to vet in the sandbox before installing it live.
+    if ($action === 'plugin_search') {
+        $q = trim($_POST['q'] ?? '');
+        if ($q === '') { echo json_encode(['ok' => false, 'error' => 'Empty query']); exit; }
+        $api = 'https://api.wordpress.org/plugins/info/1.2/?action=query_plugins&request[search]=' . urlencode($q) . '&request[per_page]=10';
+        $body = false;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($api);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 20, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_USERAGENT => 'WP-Migration-Tool']);
+            $body = curl_exec($ch); unset($ch);
+        } elseif (ini_get('allow_url_fopen')) {
+            $body = @file_get_contents($api, false, stream_context_create(['http' => ['timeout' => 20]]));
+        }
+        $data = $body ? json_decode($body, true) : null;
+        if (!is_array($data) || !isset($data['plugins'])) { echo json_encode(['ok' => false, 'error' => 'wordpress.org API unavailable']); exit; }
+        $server_php = phpversion();
+        $out = [];
+        foreach ($data['plugins'] as $p) {
+            $req = $p['requires_php'] ?? '';
+            $out[] = [
+                'slug' => $p['slug'] ?? '', 'name' => strip_tags($p['name'] ?? ''),
+                'version' => $p['version'] ?? '', 'requires_php' => $req,
+                'php_ok' => ($req === '' || version_compare($server_php, $req, '>=')),
+                'download' => $p['download_link'] ?? '',
+            ];
+        }
+        echo json_encode(['ok' => true, 'server_php' => $server_php, 'plugins' => $out]);
         exit;
     }
 
@@ -4646,6 +4934,36 @@ foreach ($php_cfg_rows as $r):
 <div id="tls_sp_log" class="log" style="display:none"></div>
 </div>
 
+<!-- TEST ENVIRONMENT (sandbox) -->
+<div class="card" style="border-color:#1e3a5f">
+<h2>🧪 <?= h(t('Test Environment (sandbox)')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+    <?= h(t('Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.')) ?>
+</p>
+<div class="actions" style="margin-bottom:10px">
+    <button class="btn btn-primary" id="te_build_btn" onclick="teBuild()">🏗️ <?= h(t('Build sandbox')) ?></button>
+    <button class="btn btn-warning" id="te_plugins_btn" onclick="teSmokeTestPlugins()" style="display:none">🔌 <?= h(t('Smoke-test plugins')) ?></button>
+    <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);display:none" id="te_stop" onclick="TE_ABORT=true">⏹ <?= h(t('Stop')) ?></button>
+    <button class="btn btn-sm btn-danger" id="te_destroy_btn" onclick="teDestroy()" style="display:none">🗑️ <?= h(t('Destroy sandbox')) ?></button>
+</div>
+<div id="te_progress" style="display:none;margin-bottom:10px">
+    <div class="progress"><div class="progress-bar" id="te_bar" style="width:0%"></div></div>
+    <div id="te_progress_txt" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
+</div>
+<div id="te_sandbox_info" style="font-size:12px;margin-bottom:10px"></div>
+<div id="te_results" style="margin-bottom:10px"></div>
+
+<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px"><?= h(t('Vet a new plugin from wordpress.org')) ?></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="te_plugin_q" placeholder="<?= h(t('Plugin name…')) ?>" style="flex:1;min-width:200px;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px">
+        <button class="btn btn-sm btn-primary" onclick="tePluginSearch()">🔍 <?= h(t('Search')) ?></button>
+    </div>
+    <div id="te_plugin_results" style="margin-top:8px;font-size:12px"></div>
+</div>
+<div id="te_log" class="log" style="display:none;margin-top:12px"></div>
+</div>
+
 </div><!-- /tools -->
 
 <?php endif; ?>
@@ -4795,6 +5113,126 @@ async function recoverAssets(){
     stop.style.display = 'none';
     log('ar_log', `✓ Done. Recovered ${ok}, not found ${fail}${AR_ABORT ? ' (stopped)' : ''}. Re-scan to confirm.`, false);
 }
+
+// --- Test Environment (sandbox) ---
+let TE_ABORT = false;
+let TE_SANDBOX = null; // {folder, url, dst_prefix, link_method}
+function teCreds(fd){ ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('tls_db_'+k)?.value || '')); return fd; }
+
+async function teBuild(){
+    const btn = document.getElementById('te_build_btn');
+    btn.disabled = true; btn.textContent = '⏳';
+    const bar = document.getElementById('te_bar'), ptxt = document.getElementById('te_progress_txt');
+    document.getElementById('te_progress').style.display = 'block';
+    document.getElementById('te_results').innerHTML = '';
+    // 1) list tables
+    log('te_log', '⏳ Listing tables…', false);
+    let start;
+    try { const r = await fetch('?action=clone_tables_start', {method:'POST', body:teCreds(new FormData())}); start = await r.json(); }
+    catch(e){ log('te_log','✗ '+e.message,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
+    if (!start.ok){ log('te_log','✗ '+start.error,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
+    // 2) replicate table by table with a progress bar
+    let done = 0;
+    for (const tb of start.tables){
+        const fd = teCreds(new FormData()); fd.append('table', tb.name);
+        try { await (await fetch('?action=clone_table_one', {method:'POST', body:fd})).json(); } catch(e){}
+        done++;
+        const pct = Math.round(done / start.tables.length * 100);
+        bar.style.width = pct + '%';
+        ptxt.textContent = `${T_TE.replicating} ${done}/${start.tables.length} — ${tb.name} (${tb.rows} ${T_TE.rows})`;
+    }
+    // 3) create the sandbox folder
+    ptxt.textContent = T_TE.creatingFolder;
+    let sb;
+    try { const r = await fetch('?action=sandbox_create', {method:'POST', body:teCreds(new FormData())}); sb = await r.json(); }
+    catch(e){ log('te_log','✗ '+e.message,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
+    if (!sb.ok){ log('te_log','✗ '+sb.error,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
+    TE_SANDBOX = sb;
+    document.getElementById('te_sandbox_info').innerHTML =
+        `✓ ${T_TE.sandboxReady}: <a href="${sb.url}/" target="_blank" style="color:#7dd3fc;font-family:monospace">${esc(sb.folder)}/</a> ` +
+        `<span class="badge ${sb.link_method==='symlink'?'badge-ok':'badge-warn'}">${sb.link_method}</span>`;
+    log('te_log', `✓ Tables replicated (${start.count}) and sandbox created (${sb.link_method}).`, false);
+    document.getElementById('te_plugins_btn').style.display = 'inline-flex';
+    document.getElementById('te_destroy_btn').style.display = 'inline-flex';
+    btn.disabled = false; btn.textContent = '🏗️ Rebuild sandbox';
+}
+
+async function teSmokeTestPlugins(){
+    if (!TE_SANDBOX){ alert('Build the sandbox first.'); return; }
+    TE_ABORT = false;
+    document.getElementById('te_stop').style.display = 'inline-flex';
+    // list plugins (+ PHP compat)
+    let pl;
+    try { const r = await fetch('?action=sandbox_plugins_list', {method:'POST', body:teCreds(new FormData())}); pl = await r.json(); }
+    catch(e){ log('te_log','✗ '+e.message,false); return; }
+    if (!pl.ok){ log('te_log','✗ '+pl.error,false); return; }
+    const bar = document.getElementById('te_bar'), ptxt = document.getElementById('te_progress_txt');
+    document.getElementById('te_progress').style.display = 'block';
+    const rows = [];
+    let done = 0;
+    for (const p of pl.plugins){
+        if (TE_ABORT) break;
+        const fd = teCreds(new FormData()); fd.append('plugin', p.file); fd.append('sandbox_url', TE_SANDBOX.url);
+        let res = {loads:false, breaks:true, status:0};
+        try { res = await (await fetch('?action=sandbox_plugin_test', {method:'POST', body:fd})).json(); } catch(e){}
+        rows.push({name:p.name, file:p.file, requires_php:p.requires_php, php_ok:p.php_ok, loads:res.loads, breaks:res.breaks, status:res.status});
+        done++;
+        bar.style.width = Math.round(done/pl.plugins.length*100) + '%';
+        ptxt.textContent = `${T_TE.testingPlugins} ${done}/${pl.plugins.length} — ${p.name}`;
+    }
+    document.getElementById('te_stop').style.display = 'none';
+    // render report
+    let html = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${T_TE.reportTitle} (PHP ${pl.server_php})</div>`;
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:var(--text-dim);text-align:left"><th style="padding:4px 8px">Plugin</th><th style="padding:4px 8px">PHP</th><th style="padding:4px 8px">Test</th></tr>';
+    rows.forEach(r => {
+        const phpBadge = r.requires_php ? (r.php_ok ? `<span class="badge badge-ok">≥${r.requires_php} ✓</span>` : `<span class="badge badge-err">needs ${r.requires_php}</span>`) : '<span style="color:var(--text-dim)">—</span>';
+        const testBadge = r.breaks ? `<span class="badge badge-err">✗ ${r.status||'fatal'}</span>` : (r.loads ? '<span class="badge badge-ok">✓ loads</span>' : `<span class="badge badge-warn">? ${r.status||'—'}</span>`);
+        html += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${esc(r.name)}</td><td style="padding:4px 8px">${phpBadge}</td><td style="padding:4px 8px">${testBadge}</td></tr>`;
+    });
+    html += '</table>';
+    const breakers = rows.filter(r => r.breaks).map(r => r.name);
+    if (breakers.length) html += `<div style="margin-top:8px;font-size:12px;color:#fca5a5">⚠ ${T_TE.recommend}: ${esc(breakers.join(', '))}</div>`;
+    else html += `<div style="margin-top:8px;font-size:12px;color:#6ee7b7">✓ ${T_TE.allPluginsOk}</div>`;
+    document.getElementById('te_results').innerHTML = html;
+    log('te_log', `✓ Smoke test done: ${breakers.length} plugin(s) break the sandbox.`, false);
+}
+
+async function tePluginSearch(){
+    const q = document.getElementById('te_plugin_q').value.trim();
+    if (!q) return;
+    const out = document.getElementById('te_plugin_results');
+    out.innerHTML = '<span style="color:var(--text-dim)">⏳</span>';
+    const fd = new FormData(); fd.append('q', q);
+    let j;
+    try { const r = await fetch('?action=plugin_search', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; return; }
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+    j.plugins.forEach(p => {
+        const php = p.requires_php ? (p.php_ok ? `<span class="badge badge-ok">PHP ≥${p.requires_php}</span>` : `<span class="badge badge-err">needs PHP ${p.requires_php}</span>`) : '';
+        html += `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${esc(p.name)} <span style="color:var(--text-dim)">v${esc(p.version)}</span></td><td style="padding:4px 8px">${php}</td></tr>`;
+    });
+    html += '</table><div style="font-size:11px;color:var(--text-dim);margin-top:4px">' + T_TE.vetNote + '</div>';
+    out.innerHTML = html;
+}
+
+async function teDestroy(){
+    if (!confirm(T_TE.confirmDestroy)) return;
+    const fd = teCreds(new FormData()); fd.append('drop_tables', '1');
+    const r = await fetch('?action=sandbox_destroy', {method:'POST', body:fd});
+    const j = await r.json();
+    log('te_log', j.ok ? `✓ Sandbox removed (${j.folders_removed} folder, ${j.tables_dropped} tables).` : `✗ ${j.error}`, false);
+    if (j.ok){ TE_SANDBOX = null; document.getElementById('te_sandbox_info').innerHTML=''; document.getElementById('te_results').innerHTML='';
+        document.getElementById('te_plugins_btn').style.display='none'; document.getElementById('te_destroy_btn').style.display='none';
+        document.getElementById('te_progress').style.display='none'; }
+}
+const T_TE = {
+    replicating: <?= json_encode(t('Replicating table')) ?>, rows: <?= json_encode(t('rows')) ?>,
+    creatingFolder: <?= json_encode(t('Creating sandbox folder…')) ?>, sandboxReady: <?= json_encode(t('Sandbox ready')) ?>,
+    testingPlugins: <?= json_encode(t('Testing plugin')) ?>, reportTitle: <?= json_encode(t('Plugin compatibility report')) ?>,
+    recommend: <?= json_encode(t('Recommend disabling')) ?>, allPluginsOk: <?= json_encode(t('All plugins load in the sandbox')) ?>,
+    vetNote: <?= json_encode(t('Vet in the sandbox before installing live.')) ?>, confirmDestroy: <?= json_encode(t('Destroy the sandbox folder and its test tables?')) ?>,
+};
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read
 // server-side next load to avoid a flash).

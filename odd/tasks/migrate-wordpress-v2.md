@@ -78,6 +78,24 @@ Delivered in phases, one commit per phase. Release at the end.
       present). -> 2.4.0
 - [x] S4: README + tag v2.4.0-wp + GitHub release (created once GITHUB_TOKEN env var removed).
 
+## v3.0 — Quick Update + Test Environment sandbox (DONE)
+- [x] F1 Quick Update (2522cba, 2.11.0): summary old/current URL + guarded one-click
+      (wp-config rewrite+backup, siteurl, relativize+cache, deactivate plugins), per-step report.
+- [x] Asset recovery (b00a3a2, 2.12.0): assets_scan finds missing /wp-content/ refs on disk;
+      asset_recover downloads them from the origin in batches w/ progress; origin persisted in
+      .migrate_config via migrate_config_set() merge (preserves password_hash). Verified vs test (3386 refs).
+- [x] F2 table replication (clone_tables_start/clone_table_one/clone_cleanup): CREATE LIKE +
+      INSERT SELECT to wptest_* same DB, progress bar. Verified: options/posts/postmeta exact + cleanup.
+- [x] F3 sandbox (sandbox_create/sandbox_destroy): test_env_<rand>/ with own wp-config (wptest_
+      prefix, sandbox URL), symlink core/plugins/themes/uploads w/ copy fallback.
+- [x] F4 plugin smoke test (sandbox_plugins_list/sandbox_plugin_test): activate one plugin in
+      wptest_options, GET sandbox URL, flag 500/fatal. + sandbox_report via UI table.
+- [x] F5 plugin vetting (plugin_search wordpress.org API w/ requires_php compat) + PHP-compat
+      report + recommendations. Verified API returns requires_php.
+- [x] Unified "Test Environment" card orchestrating build(replicate+sandbox)/smoke-test/search/destroy.
+- NOTE: plugin smoke test needs runnable WP (symlinks or copy + replica); on the dev server
+  .htaccess/permalinks aren't processed so some verdicts are Apache-only. -> 3.0.0
+
 ## v2.5–v2.7 follow-ups
 - [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
       bilingual covering the full v2 feature set.
