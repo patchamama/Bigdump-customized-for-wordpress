@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.4.0');
+define('TOOL_VERSION',  '3.5.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -301,12 +301,13 @@ $GLOBALS['__I18N'] = [
         'On'                                  => 'Activar',
         'Off'                                 => 'Desactivar',
         'Maintenance mode'                    => 'Modo mantenimiento',
-        'Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after 30 seconds so afterwards you must log in manually.'
-            => 'Descarga la última versión de phpMyAdmin en una carpeta con nombre aleatorio (más difícil de encontrar para bots). El path se muestra abajo. "Acceso temporal" escribe una configuración con las credenciales de la base de datos y abre phpMyAdmin ya autenticado; la configuración se autodestruye a los 30 segundos, así que después hay que iniciar sesión manualmente.',
+        'Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after the chosen time so afterwards you must log in manually.'
+            => 'Descarga la última versión de phpMyAdmin en una carpeta con nombre aleatorio (más difícil de encontrar para bots). El path se muestra abajo. "Acceso temporal" escribe una configuración con las credenciales de la base de datos y abre phpMyAdmin ya autenticado; la configuración se autodestruye al pasar el tiempo elegido, así que después hay que iniciar sesión manualmente.',
         'Download & install phpMyAdmin'       => 'Descargar e instalar phpMyAdmin',
         'Installed at'                        => 'Instalado en',
         'Not installed yet.'                  => 'Aún no instalado.',
-        'Temporary access (30s)'              => 'Acceso temporal (30s)',
+        'Temporary access'                    => 'Acceso temporal',
+        'Access time'                         => 'Tiempo de acceso',
         'Remove credentials now'              => 'Quitar credenciales ahora',
         'Credentials expire in'               => 'Las credenciales expiran en',
         // SEO
@@ -4395,7 +4396,10 @@ if ($authenticated && isset($_GET['action'])) {
         $dirs = glob($root . '/phpmyadmin_*', GLOB_ONLYDIR);
         if (!$dirs) { echo json_encode(['ok' => false, 'error' => 'phpMyAdmin is not installed yet.']); exit; }
         $dir = $dirs[0];
-        $ttl = 30;
+        // TTL in minutes (default 15); accepted values 5/15/30/60.
+        $mins = (int)($_POST['ttl_min'] ?? 15);
+        if (!in_array($mins, [5, 15, 30, 60], true)) $mins = 15;
+        $ttl = $mins * 60;
         $host = $_POST['db_host'] ?? $db['host'];
         $user = $_POST['db_user'] ?? $db['user'];
         $pass = $_POST['db_pass'] ?? $db['pass'];
@@ -5583,7 +5587,7 @@ foreach ($php_cfg_rows as $r):
 <div class="card">
 <h2>🗃️ phpMyAdmin</h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
-    <?= h(t('Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after 30 seconds so afterwards you must log in manually.')) ?>
+    <?= h(t('Download the latest phpMyAdmin into a randomly-named folder (harder for bots to find). The path is shown below. "Temporary access" drops a config with the DB credentials and opens phpMyAdmin logged in; the config self-destructs after the chosen time so afterwards you must log in manually.')) ?>
 </p>
 <div id="tls_pma_path" style="font-size:12px;margin-bottom:12px">
     <?php if ($pma_folder): ?>
@@ -5592,9 +5596,17 @@ foreach ($php_cfg_rows as $r):
         <span style="color:#718096"><?= h(t('Not installed yet.')) ?></span>
     <?php endif; ?>
 </div>
-<div class="actions">
+<div class="actions" style="align-items:center">
     <button id="tls_pma_btn" class="btn btn-primary" onclick="installPhpMyAdmin()"<?= $pma_folder ? ' style="display:none"' : '' ?>>⬇️ <?= h(t('Download & install phpMyAdmin')) ?></button>
-    <button id="tls_pma_cfg_btn" class="btn btn-warning" onclick="pmaTempAccess()"<?= $pma_folder ? '' : ' style="display:none"' ?>>⏱️ <?= h(t('Temporary access (30s)')) ?></button>
+    <label style="font-size:12px;color:var(--text-muted);display:<?= $pma_folder ? 'inline-flex' : 'none' ?>;align-items:center;gap:4px" id="tls_pma_ttl_wrap"><?= h(t('Access time')) ?>:
+        <select id="tls_pma_ttl" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+            <option value="5">5 min</option>
+            <option value="15" selected>15 min</option>
+            <option value="30">30 min</option>
+            <option value="60">60 min</option>
+        </select>
+    </label>
+    <button id="tls_pma_cfg_btn" class="btn btn-warning" onclick="pmaTempAccess()"<?= $pma_folder ? '' : ' style="display:none"' ?>>⏱️ <?= h(t('Temporary access')) ?></button>
     <button id="tls_pma_off_btn" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;<?= $pma_folder ? '' : 'display:none' ?>" onclick="pmaConfigOff()"><?= h(t('Remove credentials now')) ?></button>
 </div>
 <div id="tls_pma_countdown" style="font-size:12px;color:#fcd34d;margin-top:10px"></div>
@@ -7196,6 +7208,7 @@ async function installPhpMyAdmin() {
             btn.style.display = 'none';
             document.getElementById('tls_pma_cfg_btn').style.display = 'inline-flex';
             document.getElementById('tls_pma_off_btn').style.display = 'inline-flex';
+            const ttlw = document.getElementById('tls_pma_ttl_wrap'); if (ttlw) ttlw.style.display = 'inline-flex';
         } else {
             log('tls_pma_log', '✗ ' + j.error, false);
             btn.disabled = false; btn.textContent = '⬇️ Download & install phpMyAdmin';
@@ -7207,6 +7220,7 @@ let PMA_TIMER = null;
 async function pmaTempAccess() {
     const fd = new FormData();
     Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('ttl_min', document.getElementById('tls_pma_ttl')?.value || '15');
     log('tls_pma_log', '⏱️ Writing temporary credentials…', false);
     let j;
     try { const r = await fetch('?action=pma_config_on', {method:'POST', body:fd}); j = await r.json(); }
@@ -7214,14 +7228,16 @@ async function pmaTempAccess() {
     if (!j.ok) { log('tls_pma_log', '✗ ' + j.error, false); return; }
     // Open phpMyAdmin (already logged in via the config) in a new tab.
     window.open(j.url, '_blank');
-    log('tls_pma_log', `✓ Opened ${j.url} — credentials self-destruct in ${j.ttl}s.`, false);
+    const mins = Math.round(j.ttl/60);
+    log('tls_pma_log', `✓ Opened ${j.url} — credentials self-destruct in ${mins} min.`, false);
     // Countdown; at the end remove the config as reinforcement (server also self-expires).
     let left = j.ttl;
     const cd = document.getElementById('tls_pma_countdown');
+    const fmt = s => s >= 60 ? Math.floor(s/60)+'m '+(s%60)+'s' : s+'s';
     clearInterval(PMA_TIMER);
     PMA_TIMER = setInterval(() => {
         left--;
-        cd.textContent = left > 0 ? `${T_PMA.expiring} ${left}s…` : '';
+        cd.textContent = left > 0 ? `${T_PMA.expiring} ${fmt(left)}…` : '';
         if (left <= 0) { clearInterval(PMA_TIMER); pmaConfigOff(true); }
     }, 1000);
     cd.textContent = `${T_PMA.expiring} ${left}s…`;
