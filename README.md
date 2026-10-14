@@ -108,6 +108,21 @@ operation over PDO/mysqli.
   (`wp-config.php` permissions, fingerprint files, exposed dumps, `.htaccess`), and
   **attack surface** (`xmlrpc.php`, REST user enumeration, brute-force advisory).
 
+### SEO
+
+- **SEO audit** — indexability (`blog_public`, robots.txt), site title/tagline, friendly
+  permalinks, sitemap presence, HTTPS in `siteurl`, and untitled published posts.
+- **Edit title and tagline**, switch to friendly `/%postname%/` permalinks, and **generate a
+  `sitemap.xml`** referenced from `robots.txt`.
+- **Indexing toggle** — allow or block indexing via `robots.txt` and `blog_public`.
+- **Request indexing** and **check if indexed** links for Google, Bing, DuckDuckGo and Yandex.
+
+### Full-site password
+
+- Protect the entire site with HTTP Basic auth (`.htaccess` + `.htpasswd`, bcrypt). An isolated
+  test writes the rule into a throwaway subfolder and confirms the host answers 401 (auth
+  required) rather than 500 before you apply it, with a probe URL to try in the browser.
+
 ### Post-migration extras
 
 - **Regenerate `.htaccess`** with the standard WordPress rewrite rules (fixes the typical
@@ -209,6 +224,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 2.4.0` | SEO suite (audit, meta, friendly permalinks, sitemap, indexing toggle, request/check-indexed links); full-site HTTP Basic password with isolated anti-500 test; Get BigDump into the site; fix Media URL Scanner to rewrite URLs that carry a subfolder before `/wp-content/`, with opt-in disk verification |
 | `migrate 2.0.0` | DB-password-based access with custom encrypted override; bilingual EN/ES UI; WordPress user management; security audit; post-migration extras (htaccess, repair tables, flush rewrite, debug/maintenance); PHP config with isolated safe testing; phpMyAdmin installer; Domain Link Manager final-URL preview and availability check |
 | `migrate 1.3.0` | Domain Link Manager with disk-verified base path; size-limited split `.zip` export; disk-verified media URL fixing |
 | `migrate 1.0` | WordPress migration suite: export/import, URL migration, health check, plugin manager, PHP config, WordPress installer |
