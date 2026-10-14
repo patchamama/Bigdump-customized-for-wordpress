@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.5.0');
+define('TOOL_VERSION',  '2.6.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -221,6 +221,20 @@ $GLOBALS['__I18N'] = [
         'Block'                               => 'Bloquear',
         'Request indexing'                    => 'Solicitar indexación',
         'Check if indexed'                    => 'Verificar si está indexado',
+        // Broken Link Checker
+        'Broken Link Checker'                 => 'Verificador de enlaces rotos',
+        'Checks the links stored in the database over HTTP and groups the broken ones (HTTP 400+ or no response) by domain. Click a domain to see its broken URLs and open each in a new tab.'
+            => 'Verifica por HTTP los enlaces guardados en la base de datos y agrupa los rotos (HTTP 400+ o sin respuesta) por dominio. Pulsá un dominio para ver sus URLs rotas y abrir cada una en una pestaña nueva.',
+        'Scope'                               => 'Alcance',
+        'Current site only'                   => 'Solo el sitio actual',
+        'All linked domains'                  => 'Todos los dominios enlazados',
+        'Max URLs'                            => 'URLs máx.',
+        'Check links'                         => 'Verificar enlaces',
+        'Stop'                                => 'Detener',
+        'No broken links found'               => 'No se encontraron enlaces rotos',
+        'checked'                             => 'verificadas',
+        'Broken links found'                  => 'Enlaces rotos encontrados',
+        'broken'                              => 'rotos',
         // Site Password
         'Site Password (HTTP Basic)'          => 'Contraseña del sitio (HTTP Basic)',
         'Protect the whole site with an HTTP Basic password (.htaccess + .htpasswd). Before applying, a test writes the rule into an isolated subfolder and checks the host returns 401 (auth required), not 500. Open the test URL to confirm the login prompt appears; Apply stays disabled until the test passes.'
@@ -1881,6 +1895,60 @@ if ($authenticated && isset($_GET['action'])) {
         $results = [];
         foreach ($urls as $u) { $results[$u] = $check((string)$u); }
         echo json_encode(['ok' => true, 'results' => $results]);
+        exit;
+    }
+
+    // --- COLLECT URLS TO CHECK FOR BROKEN LINKS ---
+    // Extracts unique absolute http(s) URLs from content so the browser can verify
+    // them in batches (with a progress bar) via the verify_url endpoint. Scope:
+    //   all      – every external/linked domain (excluding the current host)
+    //   site     – only the current host plus the detected legacy site domains
+    // The frontend does the HTTP checking so long scans don't time out the script.
+    if ($action === 'scan_broken_collect') {
+        $c_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $scope = in_array($_POST['scope'] ?? '', ['all', 'site'], true) ? $_POST['scope'] : 'site';
+        $cap   = max(10, min(5000, (int)($_POST['cap'] ?? 200)));
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $c_db['prefix'];
+
+        $cur_host = preg_replace('#^www\.#', '', strtolower(parse_url(current_url(), PHP_URL_HOST) ?? ''));
+        $tables = [
+            [$prefix . 'posts', 'post_content'],
+            [$prefix . 'postmeta', 'meta_value'],
+            [$prefix . 'options', 'option_value'],
+        ];
+        $url_rx = '#https?://[^\s"\'<>()\[\]\\\\]+#i';
+        $urls = []; // url => host
+        foreach ($tables as [$tbl, $col]) {
+            try {
+                $stmt = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE '%http%'");
+                while (($val = $stmt->fetchColumn()) !== false) {
+                    if (strpos($val, 'http') === false) continue;
+                    if (!preg_match_all($url_rx, $val, $m)) continue;
+                    foreach ($m[0] as $u) {
+                        $u = rtrim($u, '.,;:)\'"');
+                        $host = preg_replace('#^www\.#', '', strtolower(parse_url($u, PHP_URL_HOST) ?? ''));
+                        if ($host === '') continue;
+                        if ($scope === 'site' && $host !== $cur_host) {
+                            // In "site" scope keep only the current host (legacy hosts
+                            // the user is migrating from are usually the current one's
+                            // old URLs — those are covered once rewritten). Skip pure externals.
+                            continue;
+                        }
+                        if (!isset($urls[$u])) $urls[$u] = $host;
+                        if (count($urls) >= $cap) break 3;
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+        $out = [];
+        foreach ($urls as $u => $host) $out[] = ['url' => $u, 'host' => $host];
+        echo json_encode(['ok' => true, 'scope' => $scope, 'cap' => $cap, 'total' => count($out), 'urls' => $out]);
         exit;
     }
 
@@ -3830,6 +3898,31 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 </div>
 
 <div class="card">
+<h2>🔗 <?= h(t('Broken Link Checker')) ?></h2>
+<p style="font-size:12px;color:#718096;margin-bottom:12px">
+    <?= h(t('Checks the links stored in the database over HTTP and groups the broken ones (HTTP 400+ or no response) by domain. Click a domain to see its broken URLs and open each in a new tab.')) ?>
+</p>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+    <label style="font-size:12px;color:#a0aec0"><?= h(t('Scope')) ?>:
+        <select id="bl_scope" style="padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px">
+            <option value="site"><?= h(t('Current site only')) ?></option>
+            <option value="all"><?= h(t('All linked domains')) ?></option>
+        </select>
+    </label>
+    <label style="font-size:12px;color:#a0aec0"><?= h(t('Max URLs')) ?>:
+        <input type="number" id="bl_cap" value="200" min="10" max="5000" style="width:80px;padding:5px 8px;background:#0f1117;border:1px solid #2d3148;border-radius:4px;color:#e2e8f0;font-size:12px">
+    </label>
+    <button class="btn btn-sm btn-primary" id="bl_btn" onclick="checkBrokenLinks()">🔎 <?= h(t('Check links')) ?></button>
+    <button class="btn btn-sm" style="background:#2d3148;color:#a0aec0;display:none" id="bl_stop" onclick="BL_ABORT=true">⏹ <?= h(t('Stop')) ?></button>
+</div>
+<div id="bl_progress" style="display:none;margin-bottom:10px">
+    <div class="progress"><div class="progress-bar" id="bl_bar" style="width:0%"></div></div>
+    <div id="bl_progress_txt" style="font-size:11px;color:#718096;margin-top:4px"></div>
+</div>
+<div id="bl_results"></div>
+</div>
+
+<div class="card">
 <h2>👤 <?= h(t('WordPress Users')) ?></h2>
 <p style="font-size:12px;color:#718096;margin-bottom:14px">
     <?= h(t('List WordPress users, change passwords, edit details or create new users directly in the database. Useful when WP admin is inaccessible after a migration.')) ?>
@@ -4554,6 +4647,80 @@ async function fixDomains() {
         log('tls_domains_log', `✗ ${j.error}`, false);
     }
 }
+
+// --- Broken Link Checker ---
+let BL_ABORT = false;
+async function checkBrokenLinks() {
+    const btn = document.getElementById('bl_btn');
+    const stop = document.getElementById('bl_stop');
+    const out = document.getElementById('bl_results');
+    const prog = document.getElementById('bl_progress');
+    const bar = document.getElementById('bl_bar');
+    const ptxt = document.getElementById('bl_progress_txt');
+    BL_ABORT = false;
+    btn.disabled = true; out.innerHTML = '';
+    // 1) Collect URLs from the DB (fast, server-side).
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('scope', document.getElementById('bl_scope').value);
+    fd.append('cap', document.getElementById('bl_cap').value);
+    out.innerHTML = '<span style="color:#718096;font-size:12px">⏳ Collecting URLs…</span>';
+    let c;
+    try { const r = await fetch('?action=scan_broken_collect', {method:'POST', body:fd}); c = await r.json(); }
+    catch(e) { out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; btn.disabled=false; return; }
+    if (!c.ok) { out.innerHTML = `<span style="color:#f87171">✗ ${c.error}</span>`; btn.disabled=false; return; }
+    if (!c.total) { out.innerHTML = '<span style="color:#6ee7b7;font-size:13px">✓ No URLs found to check.</span>'; btn.disabled=false; return; }
+
+    // 2) Verify in batches with a progress bar; the user can stop.
+    prog.style.display = 'block'; stop.style.display = 'inline-flex';
+    const broken = {}; // host => [ {url,status} ]
+    const BATCH = 10;
+    let done = 0;
+    for (let i = 0; i < c.urls.length && !BL_ABORT; i += BATCH) {
+        const slice = c.urls.slice(i, i + BATCH);
+        const bf = new FormData();
+        bf.append('urls', JSON.stringify(slice.map(x => x.url)));
+        let j;
+        try { const r = await fetch('?action=verify_url', {method:'POST', body:bf}); j = await r.json(); }
+        catch(e) { j = {ok:false}; }
+        slice.forEach(x => {
+            const res = (j.ok && j.results[x.url]) ? j.results[x.url] : {ok:false, status:0};
+            if (!res.ok) { (broken[x.host] = broken[x.host] || []).push({url:x.url, status:res.status}); }
+        });
+        done += slice.length;
+        const pct = Math.round(done / c.urls.length * 100);
+        bar.style.width = pct + '%';
+        const bt = Object.values(broken).reduce((a,v)=>a+v.length,0);
+        ptxt.textContent = `${done}/${c.urls.length} (${pct}%) — ${bt} broken so far`;
+    }
+    stop.style.display = 'none'; btn.disabled = false;
+
+    // 3) Render broken URLs grouped by domain (click to expand; links open in a new tab).
+    const hosts = Object.keys(broken).sort((a,b) => broken[b].length - broken[a].length);
+    if (!hosts.length) { out.innerHTML = `<div style="color:#6ee7b7;font-size:13px">✓ ${T_BL.allok} (${done} ${T_BL.checked}).</div>`; return; }
+    let html = `<div style="font-size:12px;color:#fcd34d;margin-bottom:8px">${T_BL.found}: ${hosts.reduce((a,h)=>a+broken[h].length,0)} (${done} ${T_BL.checked})</div>`;
+    html += '<div style="border:1px solid #2d3148;border-radius:6px;overflow:hidden">';
+    hosts.forEach(h => {
+        const items = broken[h].map(b =>
+            `<div style="padding:4px 14px;font-size:11px;font-family:monospace;border-top:1px solid #1a1d2733">
+                <span class="badge badge-err">${b.status||'—'}</span>
+                <a href="${esc(b.url)}" target="_blank" style="color:#7dd3fc;word-break:break-all">${esc(b.url)}</a>
+            </div>`).join('');
+        html += `<details style="border-bottom:1px solid #2d3148">
+            <summary style="padding:8px 14px;cursor:pointer;font-size:13px;background:#1a1d27;list-style:none">
+                <span style="font-family:monospace;color:#e2e8f0">${esc(h)}</span>
+                <span class="badge badge-err" style="margin-left:6px">${broken[h].length} ${T_BL.broken}</span>
+            </summary>${items}</details>`;
+    });
+    html += '</div>';
+    out.innerHTML = html;
+}
+const T_BL = {
+    allok:   <?= json_encode(t('No broken links found')) ?>,
+    checked: <?= json_encode(t('checked')) ?>,
+    found:   <?= json_encode(t('Broken links found')) ?>,
+    broken:  <?= json_encode(t('broken')) ?>,
+};
 
 // --- WordPress Users ---
 const WP_ROLES = ['administrator','editor','author','contributor','subscriber'];
