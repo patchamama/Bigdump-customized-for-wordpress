@@ -272,6 +272,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.3.0` | URL Replacement can now run directly against the live database: it finds the source URLs, HTTP-verifies each target URL and replaces only the ones that respond (serialized-safe), with a reversible log |
 | `migrate 3.2.0` | Uploads optimization: organize files into subfolders (YYYY/MM for dated names, else by first letter), deduplicate identical files (size + hash, repointing references), and sanitize special-character filenames — each locating files in the database first, updating all references, and writing a reversible log |
 | `migrate 3.1.0` | Health check links missing media/assets to the recovery flow; Clean Site rebuilds wp-content/uploads with only used files (DB references + WordPress thumbnails), keeping the old folder as a backup with a restore log and a summary of reclaimed space |
 | `migrate 3.0.0` | Quick Update one-click post-migration (wp-config, siteurl, relativize, cache, plugins); asset recovery that downloads missing wp-content files from the original site; isolated Test Environment sandbox (table replication with progress bar, symlinked core/plugins/themes/uploads, per-plugin smoke test, wordpress.org plugin vetting, PHP-compat report) |

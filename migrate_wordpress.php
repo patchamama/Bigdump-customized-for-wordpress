@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.2.0');
+define('TOOL_VERSION',  '3.3.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -236,6 +236,17 @@ $GLOBALS['__I18N'] = [
         'Target URL (destination)'            => 'URL de destino',
         'DB Connection for Tools'             => 'Conexión de BD para Herramientas',
         'URL Replacement'                     => 'Reemplazo de URL',
+        'Replace directly in the current database' => 'Reemplazar directamente en la base de datos actual',
+        'Replaces the source URL with the target across the live database (assets and links, serialized-safe). Each target URL is checked over HTTP first and only replaced if it responds — broken targets are skipped. Reversible log.'
+            => 'Reemplaza la URL de origen por la de destino en toda la base de datos actual (assets y enlaces, seguro con datos serializados). Cada URL de destino se verifica por HTTP primero y solo se reemplaza si responde — los destinos rotos se omiten. Registro reversible.',
+        'Find & verify URLs'                  => 'Buscar y verificar URLs',
+        'Replace verified in DB'              => 'Reemplazar verificadas en BD',
+        'Finding URLs in the database…'       => 'Buscando URLs en la base de datos…',
+        'No source URLs found in the database.' => 'No se encontraron URLs de origen en la base de datos.',
+        'reachable'                           => 'accesibles',
+        'skipped'                             => 'omitidas',
+        'Replace %d verified URL(s) in the live database? Reversible via log.' => '¿Reemplazar %d URL(s) verificada(s) en la base de datos actual? Reversible mediante registro.',
+        'rows updated'                        => 'filas actualizadas',
         'Export Actions'                      => 'Acciones de exportación',
         'Destination DB'                      => 'BD de destino',
         'Extract Hosting'                     => 'Extraer hosting',
@@ -2138,6 +2149,99 @@ if ($authenticated && isset($_GET['action'])) {
             else { $errors++; }
         }
         echo json_encode(['ok' => true, 'renamed' => $renamed, 'errors' => $errors, 'log' => $logname]);
+        exit;
+    }
+
+    // --- DB URL REPLACE: analyze (find distinct origin URLs + their target) ---
+    // Finds every distinct absolute URL under the source origin referenced in the
+    // DB (assets and page links), and computes the target URL (origin -> dest). The
+    // browser then HEAD-verifies each target and only verified ones are replaced.
+    if ($action === 'dburl_analyze') {
+        @set_time_limit(0);
+        $u_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $origin = rtrim(trim($_POST['source_url'] ?? ''), '/');
+        $target = rtrim(trim($_POST['target_url'] ?? ''), '/');
+        if ($origin === '' || $target === '' || $origin === $target) { echo json_encode(['ok' => false, 'error' => 'Provide distinct source and target URLs']); exit; }
+        if (!preg_match('#^https?://#i', $origin)) { echo json_encode(['ok' => false, 'error' => 'Source must be a full URL']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix'];
+        // Distinct full URLs that start with the origin.
+        $rx = '#' . preg_quote($origin, '#') . '[^\s"\'<>()\[\]\\\\]*#i';
+        $urls = [];
+        foreach ([[$prefix.'posts','post_content'],[$prefix.'postmeta','meta_value'],[$prefix.'options','option_value']] as [$tbl,$col]) {
+            try {
+                $st = $pdo->query("SELECT `$col` FROM `$tbl` WHERE `$col` LIKE " . $pdo->quote('%' . $origin . '%'));
+                while (($v = $st->fetchColumn()) !== false) {
+                    if (!preg_match_all($rx, $v, $m)) continue;
+                    foreach ($m[0] as $u) {
+                        $u = rtrim(str_replace('\\/', '/', $u), '.,;:)\'"');
+                        if (!isset($urls[$u])) $urls[$u] = $target . substr($u, strlen($origin));
+                        if (count($urls) >= 5000) break 2;
+                    }
+                }
+            } catch (Exception $e) {}
+        }
+        $out = [];
+        foreach ($urls as $from => $to) $out[] = ['from' => $from, 'to' => $to];
+        echo json_encode(['ok' => true, 'origin' => $origin, 'target' => $target, 'count' => count($out), 'urls' => $out]);
+        exit;
+    }
+
+    // --- DB URL REPLACE: apply (only the verified URLs) ---
+    // Receives a batch of {from,to} pairs the browser confirmed reachable and
+    // replaces each exact URL across the DB (serialized-safe), with a reversible log.
+    if ($action === 'dburl_apply') {
+        @set_time_limit(0);
+        $u_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $pairs = json_decode($_POST['pairs'] ?? '', true);
+        $pairs = is_array($pairs) ? array_slice($pairs, 0, 200) : [];
+        if (!$pairs) { echo json_encode(['ok' => false, 'error' => 'No verified URLs provided']); exit; }
+        $r = try_db_connect($u_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $u_db['prefix']; $root = rtrim($abspath, '/');
+        $tables = [[$prefix.'posts','post_content','ID'],[$prefix.'postmeta','meta_value','meta_id'],[$prefix.'options','option_value','option_id']];
+        $updated = 0; $logged = [];
+        foreach ($pairs as $p) {
+            $from = (string)($p['from'] ?? ''); $to = (string)($p['to'] ?? '');
+            if ($from === '' || $to === '' || $from === $to) continue;
+            // Replace the exact URL, both plain and JSON-escaped.
+            $swap = function ($s) use ($from, $to) {
+                return str_replace([$from, str_replace('/', '\\/', $from)], [$to, str_replace('/', '\\/', $to)], $s);
+            };
+            $rows = 0;
+            foreach ($tables as [$tbl,$col,$id]) {
+                try {
+                    $st = $pdo->prepare("SELECT `$id`,`$col` FROM `$tbl` WHERE `$col` LIKE ?");
+                    $st->execute(['%' . $from . '%']);
+                    while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                        $old = $row[$col];
+                        $new = preg_replace_callback('/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s', function($m) use ($swap){ $x=$swap($m[2]); return $x===$m[2]?$m[0]:'s:'.strlen($x).':"'.$x.'"'; }, $old);
+                        $new = $swap($new);
+                        if ($new !== $old) { $pdo->prepare("UPDATE `$tbl` SET `$col`=? WHERE `$id`=?")->execute([$new,$row[$id]]); $rows++; }
+                    }
+                } catch (Exception $e) {}
+            }
+            if ($rows) { $updated += $rows; $logged[] = ['from' => $from, 'to' => $to, 'rows' => $rows]; }
+        }
+        // Reversible log.
+        $logname = '';
+        if ($logged) {
+            $f = $root . '/wp-content/.dburl-replace.json';
+            $data = is_file($f) ? (json_decode(file_get_contents($f), true) ?: []) : [];
+            $data[] = ['at' => date('c'), 'changes' => $logged];
+            @file_put_contents($f, json_encode($data, JSON_PRETTY_PRINT));
+            $logname = '.dburl-replace.json';
+        }
+        echo json_encode(['ok' => true, 'updated_rows' => $updated, 'urls' => count($logged), 'log' => $logname]);
         exit;
     }
 
@@ -4881,6 +4985,20 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <p style="font-size:11px;color:#718096;margin-top:4px">
     URL will be replaced everywhere in the SQL including serialized data.
 </p>
+<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">🗄️ <?= h(t('Replace directly in the current database')) ?></div>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+        <?= h(t('Replaces the source URL with the target across the live database (assets and links, serialized-safe). Each target URL is checked over HTTP first and only replaced if it responds — broken targets are skipped. Reversible log.')) ?>
+    </p>
+    <div class="actions" style="margin-bottom:8px">
+        <button class="btn btn-sm btn-primary" id="dbu_analyze_btn" onclick="dbUrlAnalyze()">🔍 <?= h(t('Find & verify URLs')) ?></button>
+        <button class="btn btn-sm btn-warning" id="dbu_apply_btn" onclick="dbUrlApply()" style="display:none">▶ <?= h(t('Replace verified in DB')) ?></button>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);display:none" id="dbu_stop" onclick="DBU_ABORT=true">⏹ <?= h(t('Stop')) ?></button>
+    </div>
+    <div id="dbu_progress" style="display:none;margin-bottom:8px"><div class="progress"><div class="progress-bar" id="dbu_bar" style="width:0%"></div></div><div id="dbu_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="dbu_result" style="font-size:12px"></div>
+    <div id="dbu_log" class="log" style="display:none"></div>
+</div>
 </div>
 
 <div class="card">
@@ -6699,6 +6817,78 @@ const T_OPT = {
     found: <?= json_encode(t('Found')) ?>, nothing: <?= json_encode(t('Nothing to optimize')) ?>,
     hashing: <?= json_encode(t('Hashing files…')) ?>, confirm: <?= json_encode(t('Apply this optimization? Files on disk and database references will change (logged and reversible).')) ?>,
     logged: <?= json_encode(t('Changes written to a reversible log.')) ?>,
+};
+
+// --- DB URL replacement with per-URL target verification ---
+let DBU_ABORT = false;
+let DBU_VERIFIED = []; // {from,to} pairs whose target responded
+function dbuCreds(fd){ ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('exp_db_'+k)?.value || document.getElementById('tls_db_'+k)?.value || '')); return fd; }
+
+async function dbUrlAnalyze(){
+    const src = document.getElementById('exp_source_url').value.trim();
+    const dst = document.getElementById('exp_target_url').value.trim();
+    if (!src || !dst || src === dst){ alert('Set distinct source and target URLs.'); return; }
+    DBU_ABORT = false; DBU_VERIFIED = [];
+    const out = document.getElementById('dbu_result');
+    const btn = document.getElementById('dbu_analyze_btn');
+    btn.disabled = true; btn.textContent = '⏳';
+    out.innerHTML = '<span style="color:var(--text-dim)">⏳ ' + T_DBU.finding + '</span>';
+    const fd = dbuCreds(new FormData()); fd.append('source_url', src); fd.append('target_url', dst);
+    let j;
+    try { const r = await fetch('?action=dburl_analyze', {method:'POST', body:fd}); j = await r.json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; btn.disabled=false; btn.textContent='🔍 '+T_DBU.find; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; btn.disabled=false; btn.textContent='🔍 '+T_DBU.find; return; }
+    if (!j.count){ out.innerHTML = `<span style="color:#6ee7b7">✓ ${T_DBU.none}</span>`; btn.disabled=false; btn.textContent='🔍 '+T_DBU.find; return; }
+
+    // Verify each distinct target URL over HTTP in batches.
+    document.getElementById('dbu_progress').style.display = 'block';
+    document.getElementById('dbu_stop').style.display = 'inline-flex';
+    const bar = document.getElementById('dbu_bar'), ptxt = document.getElementById('dbu_ptxt');
+    let done = 0, okCount = 0, failCount = 0; const BATCH = 10;
+    for (let i=0; i<j.urls.length && !DBU_ABORT; i+=BATCH){
+        const slice = j.urls.slice(i, i+BATCH);
+        const vf = new FormData(); vf.append('urls', JSON.stringify(slice.map(x => x.to)));
+        let v;
+        try { v = await (await fetch('?action=verify_url', {method:'POST', body:vf})).json(); } catch(e){ v = {ok:false}; }
+        slice.forEach(x => {
+            const res = (v.ok && v.results[x.to]) ? v.results[x.to] : {ok:false};
+            if (res.ok){ DBU_VERIFIED.push(x); okCount++; } else { failCount++; }
+        });
+        done += slice.length;
+        const pct = Math.round(done/j.urls.length*100); bar.style.width = pct+'%';
+        ptxt.textContent = `${done}/${j.urls.length} (${pct}%) — ${okCount} ${T_DBU.reachable}, ${failCount} ${T_DBU.skipped}`;
+    }
+    document.getElementById('dbu_stop').style.display = 'none';
+    out.innerHTML = `<div style="font-size:12px">${T_DBU.found}: ${j.count} · ${T_DBU.reachable}: <strong style="color:#6ee7b7">${okCount}</strong> · ${T_DBU.skipped}: <strong style="color:#fcd34d">${failCount}</strong></div>`;
+    document.getElementById('dbu_apply_btn').style.display = DBU_VERIFIED.length ? 'inline-flex' : 'none';
+    btn.disabled = false; btn.textContent = '🔍 ' + T_DBU.find;
+}
+
+async function dbUrlApply(){
+    if (!DBU_VERIFIED.length){ return; }
+    if (!confirm(T_DBU.confirm.replace('%d', DBU_VERIFIED.length))) return;
+    const btn = document.getElementById('dbu_apply_btn'); btn.disabled = true; btn.textContent = '⏳';
+    const bar = document.getElementById('dbu_bar'), ptxt = document.getElementById('dbu_ptxt');
+    document.getElementById('dbu_progress').style.display = 'block';
+    let done = 0, rows = 0; const BATCH = 50;
+    for (let i=0; i<DBU_VERIFIED.length; i+=BATCH){
+        const slice = DBU_VERIFIED.slice(i, i+BATCH);
+        const fd = dbuCreds(new FormData()); fd.append('pairs', JSON.stringify(slice));
+        try { const j = await (await fetch('?action=dburl_apply', {method:'POST', body:fd})).json(); if (j.ok) rows += j.updated_rows||0; } catch(e){}
+        done += slice.length;
+        bar.style.width = Math.round(done/DBU_VERIFIED.length*100)+'%';
+        ptxt.textContent = `${done}/${DBU_VERIFIED.length}`;
+    }
+    log('dbu_log', `✓ ${T_DBU.done}: ${DBU_VERIFIED.length} URL(s), ${rows} ${T_DBU.rowsUpd}. ${T_DBU.logged}`, false);
+    document.getElementById('dbu_apply_btn').style.display = 'none';
+    btn.disabled = false; btn.textContent = '▶ ' + T_DBU.replace;
+}
+const T_DBU = {
+    find: <?= json_encode(t('Find & verify URLs')) ?>, finding: <?= json_encode(t('Finding URLs in the database…')) ?>,
+    replace: <?= json_encode(t('Replace verified in DB')) ?>, none: <?= json_encode(t('No source URLs found in the database.')) ?>,
+    found: <?= json_encode(t('Found')) ?>, reachable: <?= json_encode(t('reachable')) ?>, skipped: <?= json_encode(t('skipped')) ?>,
+    confirm: <?= json_encode(t('Replace %d verified URL(s) in the live database? Reversible via log.')) ?>,
+    done: <?= json_encode(t('Done')) ?>, rowsUpd: <?= json_encode(t('rows updated')) ?>, logged: <?= json_encode(t('Changes written to a reversible log.')) ?>,
 };
 
 async function runSecurityAudit() {

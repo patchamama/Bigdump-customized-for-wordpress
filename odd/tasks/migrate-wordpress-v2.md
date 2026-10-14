@@ -115,6 +115,14 @@ Delivered in phases, one commit per phase. Release at the end.
 - [x] Unified "Optimize uploads" card: 3 sub-sections, each analyze(dry-run)+apply(progress bar), reversible JSON logs. -> 3.2.0
 - All destructive ops order: locate in DB first → confirm → move/copy → update DB refs → delete original.
 
+## v3.3 — URL Replacement direct in DB with target verification (DONE)
+- [x] dburl_analyze: finds distinct absolute URLs under the source origin in posts/postmeta/options
+      and computes each origin→target. dburl_apply: replaces only browser-verified pairs
+      (serialized-safe exact swap, plain + JSON-escaped slashes) with a reversible .dburl-replace.json log.
+- [x] UI in the URL Replacement card: "Find & verify" (lists origin URLs, HEAD-verifies each target
+      in batches via verify_url with a progress bar; only reachable targets kept) + "Replace verified in DB".
+- Verified vs real test db: analyze found 353 distinct igs-bonn.de URLs; exact swap updated 25 rows (rollback). -> 3.3.0
+
 ## v2.5–v2.7 follow-ups
 - [x] v2.5.0: WP-CLI (wp) + curl in CLI row; How-to-use tab moved after DB Tools and rewritten
       bilingual covering the full v2 feature set.
