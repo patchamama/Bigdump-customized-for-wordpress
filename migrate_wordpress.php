@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '2.7.0');
+define('TOOL_VERSION',  '2.8.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -103,6 +103,7 @@ $GLOBALS['__I18N'] = [
             => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
         // Header
         'Download tool'                       => 'Descargar herramienta',
+        'Toggle light/dark'                   => 'Alternar claro/oscuro',
         'Get BigDump'                         => 'Obtener BigDump',
         'Open BigDump'                        => 'Abrir BigDump',
         'WordPress Migration · Export & Import' => 'Migración de WordPress · Exportar e importar',
@@ -251,6 +252,15 @@ $GLOBALS['__I18N'] = [
             => 'Solo reescribir URLs cuyo archivo exista en disco (usar en el destino con los archivos ya subidos)',
     ],
 ];
+
+// Theme (dark default). Resolved server-side from ?theme= or a cookie to avoid a flash.
+if (isset($_GET['theme']) && in_array($_GET['theme'], ['dark', 'light'], true)) {
+    $THEME = $_GET['theme'];
+    setcookie('migrate_theme', $THEME, time() + 31536000, '/');
+} else {
+    $THEME = (isset($_COOKIE['migrate_theme']) && $_COOKIE['migrate_theme'] === 'light') ? 'light' : 'dark';
+}
+$GLOBALS['__THEME'] = $THEME;
 
 // Translate: returns the localized string for the current language, or the key.
 function t($key) {
@@ -3475,25 +3485,44 @@ $pma_folder  = $pma_dirs ? basename($pma_dirs[0]) : '';
 $pma_url     = $pma_folder ? rtrim(dirname($current_url), '/') . '/' . $pma_folder . '/' : '';
 
 ?><!DOCTYPE html>
-<html lang="en">
+<html lang="<?= h($LANG) ?>" data-theme="<?= h($THEME) ?>">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WP Migration Tool</title>
 <style>
+/* Theme tokens. Dark is the default; [data-theme=light] overrides them. The base
+   colors used across the UI (#0f1117, #1a1d27, #2d3148, #e2e8f0, #a0aec0, #718096)
+   map to these variables so the whole app re-themes from one place. */
+:root{
+    --bg:#0f1117; --surface:#1a1d27; --surface2:#0f1117; --border:#2d3148;
+    --text:#e2e8f0; --text-muted:#a0aec0; --text-dim:#718096; --heading:#fff; --link:#7dd3fc;
+}
+[data-theme=light]{
+    --bg:#f4f5f7; --surface:#ffffff; --surface2:#f0f1f4; --border:#d7dbe3;
+    --text:#1a1d27; --text-muted:#4a5568; --text-dim:#718096; --heading:#0f1117; --link:#2563eb;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;transition:background .2s,color .2s}
 .wrap{max-width:900px;margin:0 auto;padding:32px 16px}
-h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
-.subtitle{color:#718096;font-size:13px;margin-bottom:32px}
-.card{background:#1a1d27;border:1px solid #2d3148;border-radius:10px;padding:24px;margin-bottom:20px}
-.card h2{font-size:14px;font-weight:600;color:#a0aec0;text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
+.subtitle{color:var(--text-dim);font-size:13px;margin-bottom:32px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px}
+.card h2{font-size:14px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
 .field{margin-bottom:12px}
-.field label{display:block;font-size:12px;color:#718096;margin-bottom:4px}
-.field input{width:100%;padding:8px 12px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;color:#e2e8f0;font-size:14px;outline:none}
+.field label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px}
+.field input,.field select{width:100%;padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;outline:none}
 .field input:focus{border-color:#4f6ef7}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.row{grid-template-columns:1fr}}
+/* Light-mode overrides for the most common hardcoded inline colors. */
+[data-theme=light] .info-val,[data-theme=light] input,[data-theme=light] select,[data-theme=light] textarea{color:var(--text)!important}
+[data-theme=light] .log{background:var(--surface2)!important;color:#15803d!important;border-color:var(--border)!important}
+[data-theme=light] .tabs{background:var(--surface2)!important}
+[data-theme=light] .tab.active{background:var(--surface)!important;color:var(--heading)!important}
+[data-theme=light] .instructions{background:var(--surface2)!important;color:var(--text-muted)!important}
+[data-theme=light] .instructions code{background:var(--surface)!important}
+[data-theme=light] a{color:var(--link)}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
 .btn-primary{background:#4f6ef7;color:#fff}.btn-primary:hover{background:#3d5ce6}
 .btn-success{background:#22c55e;color:#fff}.btn-success:hover{background:#16a34a}
@@ -3504,24 +3533,24 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
 .badge-ok{background:#064e3b;color:#6ee7b7}
 .badge-err{background:#7f1d1d;color:#fca5a5}
 .badge-warn{background:#78350f;color:#fcd34d}
-.info-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2d3148;font-size:13px}
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
 .info-row:last-child{border-bottom:none}
-.info-label{color:#718096}
-.info-val{color:#e2e8f0;font-family:monospace;font-size:12px}
-.log{background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:12px;font-family:monospace;font-size:12px;color:#6ee7b7;min-height:60px;max-height:200px;overflow-y:auto;margin-top:12px;white-space:pre-wrap}
-.tabs{display:flex;gap:2px;margin-bottom:20px;background:#0f1117;border-radius:8px;padding:4px}
-.tab{flex:1;padding:8px;text-align:center;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:#718096;border:none;background:none}
-.tab.active{background:#1a1d27;color:#fff}
+.info-label{color:var(--text-dim)}
+.info-val{color:var(--text);font-family:monospace;font-size:12px}
+.log{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:12px;color:#6ee7b7;min-height:60px;max-height:200px;overflow-y:auto;margin-top:12px;white-space:pre-wrap}
+.tabs{display:flex;gap:2px;margin-bottom:20px;background:var(--surface2);border-radius:8px;padding:4px}
+.tab{flex:1;padding:8px;text-align:center;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text-dim);border:none;background:none}
+.tab.active{background:var(--surface);color:var(--heading)}
 .section{display:none}.section.active{display:block}
 .alert{padding:12px 16px;border-radius:6px;font-size:13px;margin-bottom:16px}
 .alert-warn{background:#78350f22;border:1px solid #d97706;color:#fcd34d}
 .alert-ok{background:#064e3b22;border:1px solid #22c55e;color:#6ee7b7}
 .alert-err{background:#7f1d1d22;border:1px solid #ef4444;color:#fca5a5}
-.instructions{background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:16px;font-size:12px;color:#a0aec0;line-height:1.7}
-.instructions h4{color:#e2e8f0;margin-bottom:8px;font-size:13px}
+.instructions{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:16px;font-size:12px;color:var(--text-muted);line-height:1.7}
+.instructions h4{color:var(--text);margin-bottom:8px;font-size:13px}
 .instructions ol{padding-left:18px}
-.instructions code{background:#1a1d27;padding:1px 5px;border-radius:3px;color:#7dd3fc}
-.progress{height:6px;background:#2d3148;border-radius:3px;overflow:hidden;margin-top:8px}
+.instructions code{background:var(--surface);padding:1px 5px;border-radius:3px;color:var(--link)}
+.progress{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:8px}
 .progress-bar{height:100%;background:#4f6ef7;transition:width .3s;border-radius:3px}
 .auth-wrap{max-width:380px;margin:80px auto;padding:0 16px}
 .auth-wrap .card{text-align:center}
@@ -3582,9 +3611,10 @@ h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
     <div class="subtitle"><?= h(t('WordPress Migration · Export & Import')) ?></div>
 </div>
 <div style="display:flex;gap:8px;align-items:center">
-<span style="display:inline-flex;border:1px solid #2d3148;border-radius:6px;overflow:hidden;font-size:12px">
-    <a href="?lang=en" style="padding:5px 10px;text-decoration:none;<?= $LANG==='en'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">EN</a>
-    <a href="?lang=es" style="padding:5px 10px;text-decoration:none;<?= $LANG==='es'?'background:#4f6ef7;color:#fff':'background:#2d3148;color:#a0aec0' ?>">ES</a>
+<button id="theme_toggle" class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="toggleTheme()" title="<?= h(t('Toggle light/dark')) ?>"><?= $THEME === 'light' ? '🌙' : '☀️' ?></button>
+<span style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:12px">
+    <a href="?lang=en" style="padding:5px 10px;text-decoration:none;<?= $LANG==='en'?'background:#4f6ef7;color:#fff':'background:var(--border);color:var(--text-muted)' ?>">EN</a>
+    <a href="?lang=es" style="padding:5px 10px;text-decoration:none;<?= $LANG==='es'?'background:#4f6ef7;color:#fff':'background:var(--border);color:var(--text-muted)' ?>">ES</a>
 </span>
 <a href="?action=download_self" class="btn btn-sm" style="background:#2d3148;color:#a0aec0;text-decoration:none" download>⬇️ <?= h(t('Download tool')) ?></a>
 <button id="bigdump_btn" class="btn btn-sm" style="background:#2d3148;color:#a0aec0" onclick="fetchBigdump()">⬇️ <?= h(t('Get BigDump')) ?></button>
@@ -4273,6 +4303,17 @@ function showTab(name){
     document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
     document.getElementById('tab-'+name).classList.add('active');
     event.target.classList.add('active');
+}
+
+// Light/dark toggle: flips data-theme live and remembers it in a cookie (read
+// server-side next load to avoid a flash).
+function toggleTheme(){
+    const html = document.documentElement;
+    const next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    html.setAttribute('data-theme', next);
+    document.cookie = 'migrate_theme=' + next + ';path=/;max-age=31536000';
+    const b = document.getElementById('theme_toggle');
+    if (b) b.textContent = next === 'light' ? '🌙' : '☀️';
 }
 
 function formData(prefix){
