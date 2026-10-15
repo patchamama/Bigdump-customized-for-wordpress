@@ -12,52 +12,99 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.10.0');
+define('TOOL_VERSION',  '3.11.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
 // ============================================================
-// DETECCIÓN DE WP CONFIG
+// DETECCIÓN DE CMS Y CREDENCIALES DE BASE DE DATOS
 // ============================================================
-$wp_config_path = null;
-$search_paths = [__DIR__ . '/wp-config.php'];
-// Only search parent dir if current dir is a CONFIGURED WP root (has core dirs)
-// and NOT a fresh WP download (wp-config-sample.php present + wp-config.php absent
-// means the installer hasn't run yet — don't bleed into a parent installation).
-$_is_wp_root = is_dir(__DIR__ . '/wp-includes') || is_dir(__DIR__ . '/wp-admin');
-$_is_fresh   = file_exists(__DIR__ . '/wp-config-sample.php') && !file_exists(__DIR__ . '/wp-config.php');
-if ($_is_wp_root && !$_is_fresh) {
-    $search_paths[] = dirname(__DIR__) . '/wp-config.php';
-}
-unset($_is_wp_root, $_is_fresh);
-foreach ($search_paths as $p) {
-    if (file_exists($p)) { $wp_config_path = $p; break; }
-}
-
+// Supports WordPress, Joomla, Drupal and MediaWiki: finds the config file in the
+// current or parent directory, identifies the CMS, and reads the DB credentials
+// into a normalized $db array used by export/import and phpMyAdmin. Other,
+// WordPress-only features stay gated on $detected_cms === 'wordpress'.
 $db = ['host' => 'localhost', 'name' => '', 'user' => '', 'pass' => '', 'prefix' => 'wp_', 'charset' => 'utf8mb4'];
-$site_url = '';
-$abspath   = __DIR__ . '/';
+$site_url       = '';
+$abspath        = __DIR__ . '/';
+$detected_cms   = '';            // '', wordpress, joomla, drupal, mediawiki
+$cms_config_path = null;
+$wp_config_path  = null;         // kept for the WordPress-specific code paths
 
-if ($wp_config_path) {
-    $cfg = file_get_contents($wp_config_path);
-    foreach ([
-        'DB_HOST'    => 'host',
-        'DB_NAME'    => 'name',
-        'DB_USER'    => 'user',
-        'DB_PASSWORD'=> 'pass',
-        'DB_CHARSET' => 'charset',
-    ] as $const => $key) {
-        if (preg_match("/define\s*\(\s*['\"]" . $const . "['\"]\s*,\s*['\"]([^'\"]*)['\"\s]/", $cfg, $m)) {
-            $db[$key] = $m[1];
+// A CMS descriptor: config file name + a parser returning the normalized creds.
+$cms_defs = [
+    'wordpress' => [
+        'file' => 'wp-config.php', 'label' => 'WordPress',
+        'parse' => function ($cfg) {
+            $d = ['prefix' => 'wp_'];
+            foreach (['DB_HOST'=>'host','DB_NAME'=>'name','DB_USER'=>'user','DB_PASSWORD'=>'pass','DB_CHARSET'=>'charset'] as $const=>$k) {
+                $rx = '/define\s*\(\s*[\'"]' . preg_quote($const, '/') . '[\'"]\s*,\s*[\'"]([^\'"]*)[\'"\s]/';
+                if (preg_match($rx, $cfg, $m)) $d[$k] = $m[1];
+            }
+            if (preg_match('/\$table_prefix\s*=\s*[\'"]([^\'"]+)[\'"]/', $cfg, $m)) $d['prefix'] = $m[1];
+            return $d;
+        },
+    ],
+    'joomla' => [
+        'file' => 'configuration.php', 'label' => 'Joomla',
+        'parse' => function ($cfg) {
+            $d = ['prefix' => ''];
+            foreach (['host'=>'host','user'=>'user','password'=>'pass','db'=>'name','dbprefix'=>'prefix'] as $var=>$k) {
+                $rx = '/public\s+\$' . $var . '\s*=\s*[\'"]([^\'"]*)[\'"]/';
+                if (preg_match($rx, $cfg, $m)) $d[$k] = $m[1];
+            }
+            return $d;
+        },
+    ],
+    'drupal' => [
+        'file' => 'sites/default/settings.php', 'label' => 'Drupal',
+        'parse' => function ($cfg) {
+            // $databases['default']['default'] = [ 'database'=>, 'username'=>, 'password'=>, 'host'=>, 'prefix'=> ];
+            $d = ['prefix' => ''];
+            foreach (['database'=>'name','username'=>'user','password'=>'pass','host'=>'host','prefix'=>'prefix'] as $key=>$k) {
+                $rx = '/[\'"]' . $key . '[\'"]\s*=>\s*[\'"]([^\'"]*)[\'"]/';
+                if (preg_match($rx, $cfg, $m)) $d[$k] = $m[1];
+            }
+            return $d;
+        },
+    ],
+    'mediawiki' => [
+        'file' => 'LocalSettings.php', 'label' => 'MediaWiki',
+        'parse' => function ($cfg) {
+            $d = ['prefix' => ''];
+            foreach (['wgDBserver'=>'host','wgDBname'=>'name','wgDBuser'=>'user','wgDBpassword'=>'pass','wgDBprefix'=>'prefix'] as $var=>$k) {
+                $rx = '/\$' . $var . '\s*=\s*[\'"]([^\'"]*)[\'"]/';
+                if (preg_match($rx, $cfg, $m)) $d[$k] = $m[1];
+            }
+            return $d;
+        },
+    ],
+];
+
+// Look in the current dir and the parent for any known config file.
+foreach ([__DIR__, dirname(__DIR__)] as $base) {
+    if ($detected_cms) break;
+    foreach ($cms_defs as $cms => $def) {
+        $path = $base . '/' . $def['file'];
+        // Skip a fresh WordPress download (sample present, real config absent).
+        if ($cms === 'wordpress' && file_exists($base . '/wp-config-sample.php') && !file_exists($path)) continue;
+        if (file_exists($path)) {
+            $creds = $def['parse'](file_get_contents($path));
+            $db = array_merge($db, array_filter($creds, fn($v) => $v !== null));
+            if ($db['charset'] === '' || empty($db['charset'])) $db['charset'] = 'utf8mb4';
+            $detected_cms    = $cms;
+            $cms_config_path = $path;
+            $abspath         = ($cms === 'drupal' ? $base : dirname($path)) . '/';
+            if ($cms === 'wordpress') $wp_config_path = $path;
+            break;
         }
     }
-    if (preg_match("/\\\$table_prefix\s*=\s*['\"]([^'\"]+)['\"]/", $cfg, $m)) {
-        $db['prefix'] = $m[1];
-    }
-    if (preg_match("/define\s*\(\s*['\"]ABSPATH['\"]\s*,\s*(.+?)\s*\)\s*;/", $cfg, $m)) {
-        // ABSPATH viene del config — usamos __DIR__ mejor
-    }
-    $abspath = dirname($wp_config_path) . '/';
+}
+$cms_label = $detected_cms ? $cms_defs[$detected_cms]['label'] : '';
+
+// Detect an already-installed phpMyAdmin (not a CMS; just reported as present).
+$pma_present_dir = '';
+foreach (glob(rtrim($abspath, '/') . '/phpmyadmin*', GLOB_ONLYDIR) ?: [] as $d) {
+    if (is_file($d . '/index.php')) { $pma_present_dir = basename($d); break; }
 }
 
 // ============================================================
@@ -153,6 +200,9 @@ $GLOBALS['__I18N'] = [
         'Access to this tool requires the wp-config database password by default; set your own encrypted password from the Access Password card.'
             => 'El acceso a esta herramienta requiere por defecto la contraseña de la base de datos de wp-config; establecé tu propia contraseña cifrada desde la tarjeta Contraseña de acceso.',
         'Environment Status'                  => 'Estado del entorno',
+        'Detected CMS'                        => 'CMS detectado',
+        'none detected'                       => 'ninguno detectado',
+        'Migration & maintenance tools · Export & Import' => 'Herramientas de migración y mantenimiento · Exportar e importar',
         // Quick Update
         'Quick Update (after moving the site)' => 'Actualización rápida (tras mover el sitio)',
         'The tool reads the OLD site URL from the database and knows the CURRENT URL from your browser. With the real DB credentials below it can update wp-config, change the site URL, convert absolute URLs to relative, clear caches and deactivate plugins in one step. A backup of wp-config.php is made and every step is reported.'
@@ -5231,7 +5281,8 @@ if ($authenticated && isset($_GET['action'])) {
 // ============================================================
 // DETECCIÓN DE ENTORNO
 // ============================================================
-$site_url    = detect_site_url($db);
+// siteurl lives in wp_options — only meaningful for WordPress.
+$site_url    = ($detected_cms === 'wordpress') ? detect_site_url($db) : '';
 $current_url = current_url();
 $db_test     = try_db_connect($db);
 $abspath_size = is_dir($abspath) ? dir_size($abspath) : 0;
@@ -5248,7 +5299,7 @@ $pma_url     = $pma_folder ? rtrim(dirname($current_url), '/') . '/' . $pma_fold
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WP Migration Tool</title>
+<title>CMS Tools<?= $cms_label ? ' — ' . h($cms_label) : '' ?></title>
 <style>
 /* Theme tokens. Dark is the default; [data-theme=light] overrides them. The base
    colors used across the UI (#0f1117, #1a1d27, #2d3148, #e2e8f0, #a0aec0, #718096)
@@ -5324,7 +5375,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <!-- ====================================================== AUTH ====================================================== -->
 <div class="auth-wrap">
 <div class="card">
-<h1>🔐 WP Migration Tool</h1>
+<h1>🔐 CMS Tools</h1>
 <p class="subtitle" style="margin-bottom:20px">
     <?php if ($must_set_password): ?>
         <?= h(t('Set a password to protect this tool')) ?>
@@ -5366,8 +5417,9 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
 <div>
-    <h1>🚀 WP Migration Tool <span style="font-size:13px;font-weight:400;color:#4f6ef7;margin-left:6px">v<?= TOOL_VERSION ?></span></h1>
-    <div class="subtitle"><?= h(t('WordPress Migration · Export & Import')) ?></div>
+    <h1>🚀 CMS Tools <span style="font-size:13px;font-weight:400;color:#4f6ef7;margin-left:6px">v<?= TOOL_VERSION ?></span>
+        <?php if ($cms_label): ?><span class="badge badge-ok" style="margin-left:6px;vertical-align:middle"><?= h($cms_label) ?></span><?php endif; ?></h1>
+    <div class="subtitle"><?= h(t('Migration & maintenance tools · Export & Import')) ?></div>
 </div>
 <div style="display:flex;gap:8px;align-items:center">
 <button id="theme_toggle" class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="toggleTheme()" title="<?= h(t('Toggle light/dark')) ?>"><?= $THEME === 'light' ? '🌙' : '☀️' ?></button>
@@ -5427,6 +5479,20 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <!-- STATUS -->
 <div class="card">
 <h2>📊 <?= h(t('Environment Status')) ?></h2>
+<div class="info-row">
+    <span class="info-label"><?= h(t('Detected CMS')) ?></span>
+    <span class="info-val">
+        <?php if ($cms_label): ?>
+            <span class="badge badge-ok"><?= h($cms_label) ?></span>
+            <span style="color:#4a5568;font-size:11px"><?= h(basename($cms_config_path)) ?></span>
+        <?php else: ?>
+            <span class="badge badge-err"><?= h(t('none detected')) ?></span>
+        <?php endif; ?>
+        <?php if ($pma_present_dir): ?>
+            <span class="badge" style="background:#1e3a2f;color:#6ee7b7;margin-left:6px">phpMyAdmin: <?= h($pma_present_dir) ?>/</span>
+        <?php endif; ?>
+    </span>
+</div>
 <div class="info-row">
     <span class="info-label">Current URL</span>
     <span class="info-val"><?= h($current_url) ?></span>

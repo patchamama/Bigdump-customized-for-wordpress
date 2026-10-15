@@ -14,10 +14,13 @@ Two single-file, browser-based PHP tools for WordPress database migration and si
 administration. No Composer, no framework, no build step — drop a file next to
 `wp-config.php` and open it in the browser.
 
-- **`migrate_wordpress.php`** — a full WordPress migration and maintenance suite:
+- **`cms_tools.php`** — a full WordPress migration and maintenance suite:
   database export/import with size-limited parts, URL and domain rewriting, media
   fixes, user management, plugin control, health checks, and a built-in WordPress
-  installer. Password-protected.
+  installer. Password-protected. It **detects the CMS** on load — WordPress, Joomla,
+  Drupal or MediaWiki — and reads the database credentials from that CMS's config file,
+  so **export/import and phpMyAdmin work for all four**; the WordPress-specific tools
+  stay available only on a WordPress site.
 - **`bigdump.php`** — a staggered MySQL dump importer (based on Alexey Ozerov's
   BigDump) extended for WordPress: auto-config, URL migration, backup, and FTP/SFTP
   deployment.
@@ -34,7 +37,7 @@ Download either tool directly into your current directory with a single command.
 
 ```bash
 # WordPress migration suite
-curl -O https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/migrate_wordpress.php
+curl -O https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/cms_tools.php
 
 # Staggered SQL importer
 curl -O https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/main/bigdump.php
@@ -45,7 +48,7 @@ Then open the file in the browser from the directory that contains `wp-config.ph
 
 ---
 
-## migrate_wordpress.php
+## cms_tools.php
 
 A password-protected control panel for migrating and maintaining a WordPress site.
 It reads database credentials from `wp-config.php` automatically and drives every
@@ -279,9 +282,9 @@ These tools are maintenance utilities, not applications to leave running.
 ## File structure
 
 ```
-migrate_wordpress.php    WordPress migration and maintenance suite (single file)
+cms_tools.php    WordPress migration and maintenance suite (single file)
 bigdump.php              Staggered MySQL importer (single file)
-.migrate_config          Auth hash for migrate_wordpress.php (git-ignored)
+.migrate_config          Auth hash for cms_tools.php (git-ignored)
 .migrate_exports/        Generated exports and split parts (git-ignored)
 bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 ```
@@ -292,6 +295,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `cms 3.11.0` | Renamed `migrate_wordpress.php` to `cms_tools.php`; detects the CMS on load (WordPress, Joomla, Drupal, MediaWiki) and reads DB credentials from its config, so export/import and phpMyAdmin work for all four (other tools remain WordPress-only) |
 | `migrate 3.10.0` | Performance options (gzip, browser cache, static page cache, performance check with external-tool links); disk cleanup for orphan uploads and large/suspicious files; Apache capability tests; sandbox now fixes its DB-copy URL and relativizes assets; install popular/searched plugins into the sandbox and vet before going live |
 | `migrate 3.6.0` | phpMyAdmin temporary access time is now configurable (5/15/30/60 min); automatic asset recovery while browsing via an `.htaccess` fallback that fetches missing `/wp-content/` files from the original site on the fly, with a choice of placeholder/nothing/404 for images |
 | `migrate 3.4.0` | Fixed split export (no longer hangs — O(n) sizing) and parts now appear in Export files; fixed the Media URL Scanner count so it matches what Fix rewrites; added find & replace in links (Broken Link Checker) that verifies the resulting URL exists before saving |
