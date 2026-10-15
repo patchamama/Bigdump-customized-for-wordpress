@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.9.0');
+define('TOOL_VERSION',  '3.10.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -272,6 +272,30 @@ $GLOBALS['__I18N'] = [
         'Move these files to the pre-delete folder? Reversible via log.' => '¿Mover estos archivos a la carpeta de pre-borrado? Reversible mediante registro.',
         'Running Apache tests…'               => 'Ejecutando pruebas de Apache…',
         'Only on Apache; the PHP dev server does not process .htaccess.' => 'Solo en Apache; el servidor de desarrollo PHP no procesa .htaccess.',
+        // Performance
+        'Performance'                         => 'Rendimiento',
+        'Speed up the site with browser compression and caching (via .htaccess, tested safely first), an optional static HTML snapshot cache, and a performance check — both a quick internal measurement and links to external tools.'
+            => 'Acelerá el sitio con compresión y caché del navegador (vía .htaccess, probado sin riesgo primero), una caché opcional de HTML estático, y un chequeo de rendimiento — una medición interna rápida y enlaces a herramientas externas.',
+        'Browser optimizations (.htaccess)'   => 'Optimizaciones del navegador (.htaccess)',
+        'Gzip/deflate compression'            => 'Compresión gzip/deflate',
+        'Browser cache (Expires/Cache-Control)' => 'Caché del navegador (Expires/Cache-Control)',
+        'Cache headers and ETag tuning'       => 'Cabeceras de caché y ajuste de ETag',
+        'Apply optimizations'                 => 'Aplicar optimizaciones',
+        'Static page cache'                   => 'Caché de página estática',
+        'Saves an HTML snapshot of published pages to wp-content/cache (a static full-page cache).'
+            => 'Guarda una instantánea HTML de las páginas publicadas en wp-content/cache (una caché estática de página completa).',
+        'Generate static cache'               => 'Generar caché estática',
+        'Performance check'                   => 'Chequeo de rendimiento',
+        'Run internal check'                  => 'Ejecutar chequeo interno',
+        'Select at least one optimization'    => 'Seleccioná al menos una optimización',
+        'Optimizations applied'               => 'Optimizaciones aplicadas',
+        'Optimizations disabled'              => 'Optimizaciones desactivadas',
+        'Generating static cache…'            => 'Generando caché estática…',
+        'Pages cached'                        => 'Páginas cacheadas',
+        'Load time'                           => 'Tiempo de carga',
+        'Page size'                           => 'Tamaño de página',
+        'Asset references'                    => 'Referencias de assets',
+        'External tools'                      => 'Herramientas externas',
         'Vet in the sandbox before installing live.' => 'Evaluá en el sandbox antes de instalar en producción.',
         'Destroy the sandbox folder and its test tables?' => '¿Destruir la carpeta del sandbox y sus tablas de prueba?',
         'Clear Cache'                         => 'Limpiar caché',
@@ -3523,6 +3547,114 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- PERFORMANCE: enable/disable/test .htaccess optimizations ---
+    // Writes a managed block with gzip (mod_deflate), browser cache (mod_expires),
+    // and a few headers. Tested in an isolated subfolder first (anti-500).
+    if ($action === 'perf_status' || $action === 'perf_enable' || $action === 'perf_disable') {
+        $root = rtrim($abspath, '/'); $htaccess = $root . '/.htaccess';
+        $ms = '# BEGIN WP-Migrate Performance'; $me = '# END WP-Migrate Performance';
+        $active = is_file($htaccess) && strpos(file_get_contents($htaccess), $ms) !== false;
+        if ($action === 'perf_status') { echo json_encode(['ok'=>true,'active'=>$active]); exit; }
+        if ($action === 'perf_disable') {
+            if (is_file($htaccess)) { $c = trim(preg_replace('/'.preg_quote($ms,'/').'.*?'.preg_quote($me,'/').'/s','',file_get_contents($htaccess))); @file_put_contents($htaccess, $c.($c?"\n":'')); }
+            echo json_encode(['ok'=>true,'active'=>false]); exit;
+        }
+        // enable: build the block from the selected features.
+        $opts = is_array($_POST['opts'] ?? null) ? $_POST['opts'] : explode(',', (string)($_POST['opts'] ?? 'gzip,cache,headers'));
+        $block = "$ms\n";
+        if (in_array('gzip', $opts, true)) {
+            $block .= "<IfModule mod_deflate.c>\nAddOutputFilterByType DEFLATE text/plain text/html text/xml text/css application/javascript application/json application/xml image/svg+xml\n</IfModule>\n";
+        }
+        if (in_array('cache', $opts, true)) {
+            $block .= "<IfModule mod_expires.c>\nExpiresActive On\nExpiresByType image/jpeg \"access plus 1 year\"\nExpiresByType image/png \"access plus 1 year\"\nExpiresByType image/gif \"access plus 1 year\"\nExpiresByType image/webp \"access plus 1 year\"\nExpiresByType image/svg+xml \"access plus 1 year\"\nExpiresByType text/css \"access plus 1 month\"\nExpiresByType application/javascript \"access plus 1 month\"\nExpiresByType application/font-woff2 \"access plus 1 year\"\nExpiresDefault \"access plus 2 days\"\n</IfModule>\n";
+        }
+        if (in_array('headers', $opts, true)) {
+            $block .= "<IfModule mod_headers.c>\nHeader unset ETag\n<FilesMatch \"\\.(ico|jpe?g|png|gif|webp|svg|css|js|woff2?)$\">\nHeader set Cache-Control \"public, max-age=2592000\"\n</FilesMatch>\n</IfModule>\nFileETag None\n";
+        }
+        $block .= $me;
+
+        // Isolated anti-500 test (the directives are guarded by IfModule so a missing
+        // module is harmless; we still confirm the host doesn't 500 on them).
+        $tested = 'skipped';
+        if (is_writable($root)) {
+            $dir = $root . '/_perf_test_' . bin2hex(random_bytes(3));
+            if (@mkdir($dir, 0755)) {
+                file_put_contents($dir.'/.htaccess', str_replace([$ms,$me],'',$block));
+                file_put_contents($dir.'/ok.php', "<?php echo 'OK';");
+                $proto=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+                $base=rtrim(dirname($proto.'://'.($_SERVER['HTTP_HOST']??'localhost').($_SERVER['REQUEST_URI']??'/')),'/');
+                $st=0; if(function_exists('curl_init')){$ch=curl_init($base.'/'.basename($dir).'/ok.php');curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>false]);curl_exec($ch);$st=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);unset($ch);}
+                @unlink($dir.'/.htaccess');@unlink($dir.'/ok.php');@rmdir($dir);
+                if ($st>=500) { echo json_encode(['ok'=>false,'error'=>'The host returned HTTP 500 for these directives — not applied.']); exit; }
+                $tested = ($st>=200&&$st<400)?'passed':'inconclusive';
+            }
+        }
+        if (!is_writable($root) && !(is_file($htaccess)&&is_writable($htaccess))) { echo json_encode(['ok'=>false,'error'=>'.htaccess not writable']); exit; }
+        if (is_file($htaccess)) @copy($htaccess, $htaccess.'.bak-'.date('YmdHis'));
+        $existing = is_file($htaccess) ? file_get_contents($htaccess) : '';
+        $existing = trim(preg_replace('/'.preg_quote($ms,'/').'.*?'.preg_quote($me,'/').'/s','',$existing));
+        $ok = @file_put_contents($htaccess, $block."\n\n".$existing."\n") !== false;
+        echo json_encode(['ok'=>$ok,'active'=>$ok,'tested'=>$tested,'error'=>$ok?'':'Write failed']);
+        exit;
+    }
+
+    // --- PERFORMANCE: generate a static full-page cache ---
+    // Fetches each published page/post over HTTP and stores the HTML under
+    // wp-content/cache/wpmigrate-static/<path>/index.html. A companion .htaccess
+    // rule (added by perf_enable if requested) can serve it for anonymous visitors.
+    if ($action === 'perf_static_cache') {
+        @set_time_limit(0);
+        $sc_db = $sandbox_db();
+        $r = try_db_connect($sc_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $sc_db['prefix'];
+        $home = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='home' LIMIT 1")->fetchColumn(), '/');
+        if ($home === '') { echo json_encode(['ok'=>false,'error'=>'home URL not found']); exit; }
+        $root = rtrim($abspath, '/'); $cacheDir = $root . '/wp-content/cache/wpmigrate-static';
+        @mkdir($cacheDir, 0755, true);
+        if (!is_dir($cacheDir) || !is_writable($cacheDir)) { echo json_encode(['ok'=>false,'error'=>'cache dir not writable']); exit; }
+        // URLs: home + published pages/posts (limit for safety).
+        $rows = $pdo->query("SELECT post_name, post_type FROM `{$prefix}posts` WHERE post_status='publish' AND post_type IN ('post','page') AND post_name <> '' LIMIT 300")->fetchAll(PDO::FETCH_ASSOC);
+        $urls = ['' => $home . '/'];
+        foreach ($rows as $p) $urls[$p['post_name']] = $home . '/' . rawurlencode($p['post_name']) . '/';
+        $saved = 0; $failed = 0;
+        foreach ($urls as $slug => $url) {
+            $body = false; $code = 0;
+            if (function_exists('curl_init')) { $ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>false]);$body=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);unset($ch); }
+            if ($code === 200 && $body && stripos($body, '</html>') !== false) {
+                $dir = $cacheDir . ($slug === '' ? '' : '/' . preg_replace('/[^a-z0-9\-_]/i','_',$slug));
+                @mkdir($dir, 0755, true);
+                if (@file_put_contents($dir . '/index.html', $body) !== false) $saved++; else $failed++;
+            } else { $failed++; }
+        }
+        echo json_encode(['ok'=>true,'saved'=>$saved,'failed'=>$failed,'dir'=>'wp-content/cache/wpmigrate-static',
+            'note'=>'Static HTML generated. Serving it to anonymous visitors requires a rewrite rule / caching plugin; this is a snapshot cache.']);
+        exit;
+    }
+
+    // --- PERFORMANCE: quick internal check (TTFB, size, asset count) ---
+    if ($action === 'perf_check') {
+        @set_time_limit(60);
+        $url = current_url() . '/';
+        $ttfb = null; $total = null; $size = 0; $body = '';
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_TIMEOUT=>30,CURLOPT_SSL_VERIFYPEER=>false]);
+            $body = (string)curl_exec($ch);
+            $ttfb = curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+            $total = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+            $size = strlen($body);
+            unset($ch);
+        } else { echo json_encode(['ok'=>false,'error'=>'curl required for the internal check']); exit; }
+        // Count referenced assets in the HTML.
+        $assets = 0;
+        if (preg_match_all('#<(?:script|link|img|source)\b[^>]*\b(?:src|href)=["\'][^"\']+["\']#i', $body, $m)) $assets = count($m[0]);
+        echo json_encode(['ok'=>true,'url'=>$url,
+            'ttfb_ms'=>$ttfb!==null?round($ttfb*1000):null,'total_ms'=>$total!==null?round($total*1000):null,
+            'size'=>human_size($size),'assets'=>$assets]);
+        exit;
+    }
+
     // --- PLUGIN SEARCH (wordpress.org API) ---
     // Lets the user find a plugin to vet in the sandbox before installing it live.
     if ($action === 'plugin_search' || $action === 'plugin_popular') {
@@ -6120,6 +6252,39 @@ foreach ($php_cfg_rows as $r):
 <div id="cleanup_log" class="log" style="display:none;margin-top:12px"></div>
 </div>
 
+<!-- PERFORMANCE -->
+<div class="card" style="border-color:#1e3a2f">
+<h2>🚀 <?= h(t('Performance')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+    <?= h(t('Speed up the site with browser compression and caching (via .htaccess, tested safely first), an optional static HTML snapshot cache, and a performance check — both a quick internal measurement and links to external tools.')) ?>
+</p>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">⚙️ <?= h(t('Browser optimizations (.htaccess)')) ?> <span id="perf_status" style="font-size:11px"></span></div>
+    <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;margin-bottom:8px">
+        <label><input type="checkbox" class="perf-opt" value="gzip" checked> <?= h(t('Gzip/deflate compression')) ?></label>
+        <label><input type="checkbox" class="perf-opt" value="cache" checked> <?= h(t('Browser cache (Expires/Cache-Control)')) ?></label>
+        <label><input type="checkbox" class="perf-opt" value="headers" checked> <?= h(t('Cache headers and ETag tuning')) ?></label>
+    </div>
+    <div class="actions"><button class="btn btn-sm btn-success" onclick="perfEnable()">⚡ <?= h(t('Apply optimizations')) ?></button>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="perfDisable()"><?= h(t('Disable')) ?></button></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:4px">📄 <?= h(t('Static page cache')) ?></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px"><?= h(t('Saves an HTML snapshot of published pages to wp-content/cache (a static full-page cache).')) ?></div>
+    <div class="actions"><button class="btn btn-sm btn-primary" onclick="perfStaticCache()">📄 <?= h(t('Generate static cache')) ?></button></div>
+</div>
+
+<div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">📈 <?= h(t('Performance check')) ?></div>
+    <div class="actions" style="margin-bottom:6px"><button class="btn btn-sm btn-primary" onclick="perfCheck()">📈 <?= h(t('Run internal check')) ?></button></div>
+    <div id="perf_check_result" style="font-size:12px;margin-bottom:8px"></div>
+    <div id="perf_ext_links" style="font-size:12px"></div>
+</div>
+<div id="perf_log" class="log" style="display:none;margin-top:12px"></div>
+</div>
+
 </div><!-- /tools -->
 
 <?php endif; ?>
@@ -6523,6 +6688,58 @@ const T_CL = {
     confirmJunk: <?= json_encode(t('Move these files to the pre-delete folder? Reversible via log.')) ?>,
     testing: <?= json_encode(t('Running Apache tests…')) ?>, htNote: <?= json_encode(t('Only on Apache; the PHP dev server does not process .htaccess.')) ?>,
 };
+
+// --- Performance ---
+async function perfStatus(){
+    try { const j = await (await fetch('?action=perf_status', {method:'POST'})).json();
+        if (j.ok){ const el=document.getElementById('perf_status'); el.innerHTML = j.active ? `<span class="badge badge-ok">${T_PF.active}</span>` : ''; } } catch(e){}
+}
+async function perfEnable(){
+    const opts = Array.from(document.querySelectorAll('.perf-opt:checked')).map(c=>c.value);
+    if (!opts.length){ alert(T_PF.pickOne); return; }
+    const fd = new FormData(); opts.forEach(o=>fd.append('opts[]',o));
+    const j = await (await fetch('?action=perf_enable', {method:'POST', body:fd})).json();
+    log('perf_log', j.ok ? `✓ ${T_PF.applied} (test: ${j.tested}).` : `✗ ${j.error}`, false); perfStatus();
+}
+async function perfDisable(){
+    const j = await (await fetch('?action=perf_disable', {method:'POST'})).json();
+    log('perf_log', j.ok ? `✓ ${T_PF.disabled}` : `✗ ${j.error}`, false); perfStatus();
+}
+async function perfStaticCache(){
+    log('perf_log', '⏳ ' + T_PF.generating, false);
+    const j = await (await fetch('?action=perf_static_cache', {method:'POST', body:teCreds(new FormData())})).json();
+    log('perf_log', j.ok ? `✓ ${T_PF.cached}: ${j.saved} (${j.failed} ${T_PF.failed}) → ${j.dir}` : `✗ ${j.error}`, false);
+}
+async function perfCheck(){
+    const out = document.getElementById('perf_check_result'); out.innerHTML = '⏳';
+    let j; try { j = await (await fetch('?action=perf_check', {method:'POST'})).json(); }
+    catch(e){ out.innerHTML = `<span style="color:#f87171">✗ ${e.message}</span>`; return; }
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${j.error}</span>`; }
+    else {
+        const g = v => v<300?'#6ee7b7':(v<800?'#fcd34d':'#f87171');
+        out.innerHTML = `<table style="font-size:12px;border-collapse:collapse">
+            <tr><td style="padding:3px 10px;color:var(--text-dim)">TTFB</td><td style="padding:3px 10px;color:${g(j.ttfb_ms)}">${j.ttfb_ms} ms</td></tr>
+            <tr><td style="padding:3px 10px;color:var(--text-dim)">${T_PF.loadTime}</td><td style="padding:3px 10px;color:${g(j.total_ms)}">${j.total_ms} ms</td></tr>
+            <tr><td style="padding:3px 10px;color:var(--text-dim)">${T_PF.pageSize}</td><td style="padding:3px 10px">${j.size}</td></tr>
+            <tr><td style="padding:3px 10px;color:var(--text-dim)">${T_PF.assetRefs}</td><td style="padding:3px 10px">${j.assets}</td></tr></table>`;
+    }
+    // External tools with the current URL.
+    const u = encodeURIComponent(window.location.origin + '/');
+    document.getElementById('perf_ext_links').innerHTML =
+        `<div style="color:var(--text-dim);margin-bottom:4px">${T_PF.externalTools}:</div>
+         <a href="https://pagespeed.web.dev/report?url=${u}" target="_blank" style="color:#7dd3fc">PageSpeed Insights</a> ·
+         <a href="https://gtmetrix.com/?url=${u}" target="_blank" style="color:#7dd3fc">GTmetrix</a> ·
+         <a href="https://tools.pingdom.com/#${u}" target="_blank" style="color:#7dd3fc">Pingdom</a>`;
+}
+const T_PF = {
+    active: <?= json_encode(t('Active')) ?>, pickOne: <?= json_encode(t('Select at least one optimization')) ?>,
+    applied: <?= json_encode(t('Optimizations applied')) ?>, disabled: <?= json_encode(t('Optimizations disabled')) ?>,
+    generating: <?= json_encode(t('Generating static cache…')) ?>, cached: <?= json_encode(t('Pages cached')) ?>, failed: <?= json_encode(t('failed')) ?>,
+    loadTime: <?= json_encode(t('Load time')) ?>, pageSize: <?= json_encode(t('Page size')) ?>, assetRefs: <?= json_encode(t('Asset references')) ?>,
+    externalTools: <?= json_encode(t('External tools')) ?>,
+};
+document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('perf_status')) perfStatus(); });
+
 const T_TE = {
     replicating: <?= json_encode(t('Replicating table')) ?>, rows: <?= json_encode(t('rows')) ?>,
     creatingFolder: <?= json_encode(t('Creating sandbox folder…')) ?>, sandboxReady: <?= json_encode(t('Sandbox ready')) ?>,

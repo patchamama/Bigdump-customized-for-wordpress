@@ -88,6 +88,20 @@ first, updating every reference and writing a reversible log:
   delete the rest.
 - **Sanitize** filenames with accents, spaces or symbols into safe ASCII names.
 
+### Performance
+
+Speed up the site with browser **gzip/deflate compression** and **cache headers** (written to
+`.htaccess`, tested in an isolated subfolder first so they can't 500 the site), an optional
+**static HTML page cache**, and a **performance check** — a quick internal measurement (TTFB, load
+time, page size, asset count) plus one-click links to PageSpeed Insights, GTmetrix and Pingdom.
+
+### Disk cleanup & Apache capabilities
+
+Find **orphan uploads** (on disk but not referenced in the database) and **large/suspicious files**
+(logs, backups, archives), moving them to a pre-delete folder with a restore log instead of
+deleting. Test which **Apache/.htaccess features** the host supports (rewrite, redirects, Basic
+auth, gzip, caching, headers) without touching the live `.htaccess`.
+
 ### Test Environment (isolated sandbox)
 
 Builds a runnable WordPress sandbox in a subfolder without risking the live site: it **replicates
@@ -278,6 +292,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `migrate 3.10.0` | Performance options (gzip, browser cache, static page cache, performance check with external-tool links); disk cleanup for orphan uploads and large/suspicious files; Apache capability tests; sandbox now fixes its DB-copy URL and relativizes assets; install popular/searched plugins into the sandbox and vet before going live |
 | `migrate 3.6.0` | phpMyAdmin temporary access time is now configurable (5/15/30/60 min); automatic asset recovery while browsing via an `.htaccess` fallback that fetches missing `/wp-content/` files from the original site on the fly, with a choice of placeholder/nothing/404 for images |
 | `migrate 3.4.0` | Fixed split export (no longer hangs — O(n) sizing) and parts now appear in Export files; fixed the Media URL Scanner count so it matches what Fix rewrites; added find & replace in links (Broken Link Checker) that verifies the resulting URL exists before saving |
 | `migrate 3.3.0` | URL Replacement can now run directly against the live database: it finds the source URLs, HTTP-verifies each target URL and replaces only the ones that respond (serialized-safe), with a reversible log |
