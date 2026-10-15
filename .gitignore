@@ -18,6 +18,7 @@ wp-config_.php
 # Migration tool runtime state — contains the auth hash
 .migrate_config
 .migrate_exports/
+.migrate_snapshots/
 _phpcfg_test_*/
 _perma_test_*/
 _sitepass_test_*/

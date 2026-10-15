@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.14.0');
+define('TOOL_VERSION',  '3.15.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -234,6 +234,25 @@ $GLOBALS['__I18N'] = [
         'Lift maintenance'                    => 'Quitar mantenimiento',
         'Use Quick Update to fix the site URL' => 'Usá Actualización rápida para corregir la URL del sitio',
         'Recreate .htaccess from WordPress Extras' => 'Recreá el .htaccess desde Extras de WordPress',
+        // Site snapshots
+        'Site snapshots'                      => 'Instantáneas del sitio',
+        'Saves a dated snapshot of the important configuration (.htaccess, php.ini, .user.ini, wp-config.php, robots.txt, .htpasswd) and the active plugins, so you can restore the site to that exact state if a later change breaks it. Nothing is changed when you create one; a restore always takes a safety snapshot of the current state first.'
+            => 'Guarda una instantánea fechada de la configuración importante (.htaccess, php.ini, .user.ini, wp-config.php, robots.txt, .htpasswd) y los plugins activos, para poder restaurar el sitio a ese estado exacto si un cambio posterior lo rompe. Crear una no cambia nada; una restauración siempre toma primero una instantánea de seguridad del estado actual.',
+        'Optional note (e.g. before plugin update)' => 'Nota opcional (ej.: antes de actualizar plugin)',
+        'Save snapshot'                       => 'Guardar instantánea',
+        'Snapshot saved'                      => 'Instantánea guardada',
+        'files'                               => 'archivos',
+        'active plugins'                      => 'plugins activos',
+        'No snapshots yet'                    => 'Aún no hay instantáneas',
+        'Restore'                             => 'Restaurar',
+        'Restored'                            => 'Restaurado',
+        'Deleted'                             => 'Eliminada',
+        'failed'                              => 'falló',
+        'no DB'                               => 'sin BD',
+        'safety snapshot'                     => 'instantánea de seguridad',
+        'Restore this snapshot? The current config files and active plugins will be overwritten (a safety snapshot is taken first).'
+            => '¿Restaurar esta instantánea? Los archivos de configuración actuales y los plugins activos se sobrescribirán (primero se toma una instantánea de seguridad).',
+        'Delete this snapshot permanently?'   => '¿Eliminar esta instantánea de forma permanente?',
         // Asset recovery
         'Recover missing assets from the original site' => 'Recuperar archivos faltantes del sitio original',
         'Scans the database for /wp-content/ files referenced by the site, checks which are missing on disk, and downloads them from the original site (useful when an FTP copy was incomplete). The original domain is auto-filled from the old site URL and remembered for later.'
@@ -3376,6 +3395,134 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SITE SNAPSHOT / RESTORE ---------------------------------------------
+    // Saves a dated snapshot of the important configuration (the config files that
+    // are present on disk + the active_plugins list) so the site can be restored to
+    // that exact state quickly if something later breaks it. Nothing live is touched
+    // on create; restore always takes a safety snapshot of the current state first.
+    if (strpos($action, 'snapshot_') === 0) {
+        $snap_dir = __DIR__ . '/.migrate_snapshots';
+        $root     = rtrim($abspath, '/');
+        // The config files worth snapshotting, relative to the site root.
+        $snap_files = ['.htaccess', 'php.ini', '.user.ini', 'wp-config.php', 'robots.txt', '.htpasswd'];
+        $snap_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+
+        // Builds one snapshot into $snap_dir, returning the manifest. Reused by create
+        // and by the safety snapshot taken before a restore.
+        $do_snapshot = function ($note) use ($snap_dir, $root, $snap_files, $snap_db) {
+            $stamp = date('Ymd-His');
+            $id    = 'snap_' . $stamp;
+            // Avoid clobbering a snapshot made in the same second.
+            if (is_dir($snap_dir . '/' . $id)) $id .= '_' . bin2hex(random_bytes(2));
+            $base  = $snap_dir . '/' . $id;
+            if (!@mkdir($base . '/files', 0755, true) && !is_dir($base . '/files'))
+                return ['ok' => false, 'error' => 'Cannot create snapshot folder'];
+            $saved = [];
+            foreach ($snap_files as $f) {
+                $src = $root . '/' . $f;
+                if (is_file($src) && @copy($src, $base . '/files/' . $f)) $saved[] = $f;
+            }
+            // active_plugins (raw serialized value, restored verbatim).
+            $active_raw = null; $active_list = [];
+            $r = try_db_connect($snap_db);
+            if ($r['ok']) {
+                $active_raw = (string)$r['pdo']->query("SELECT option_value FROM `{$snap_db['prefix']}options` WHERE option_name='active_plugins' LIMIT 1")->fetchColumn();
+                $u = @unserialize($active_raw); if (is_array($u)) $active_list = $u;
+            }
+            $manifest = [
+                'id' => $id, 'date' => date('c'), 'note' => (string)$note,
+                'files' => $saved, 'prefix' => $snap_db['prefix'],
+                'active_plugins' => $active_raw, 'active_count' => count($active_list),
+                'db_available' => $r['ok'], 'version' => TOOL_VERSION,
+            ];
+            file_put_contents($base . '/manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            return ['ok' => true, 'manifest' => $manifest];
+        };
+
+        if ($action === 'snapshot_create') {
+            $res = $do_snapshot(trim($_POST['note'] ?? ''));
+            if (!$res['ok']) { echo json_encode($res); exit; }
+            $m = $res['manifest'];
+            echo json_encode(['ok' => true, 'id' => $m['id'], 'files' => $m['files'],
+                'active_count' => $m['active_count'], 'date' => $m['date']]);
+            exit;
+        }
+
+        if ($action === 'snapshot_list') {
+            $out = [];
+            foreach (glob($snap_dir . '/snap_*', GLOB_ONLYDIR) ?: [] as $d) {
+                $mf = $d . '/manifest.json';
+                if (!is_file($mf)) continue;
+                $m = json_decode((string)file_get_contents($mf), true);
+                if (!is_array($m)) continue;
+                $out[] = ['id' => $m['id'] ?? basename($d), 'date' => $m['date'] ?? '',
+                    'note' => $m['note'] ?? '', 'files' => $m['files'] ?? [],
+                    'active_count' => $m['active_count'] ?? 0, 'db_available' => $m['db_available'] ?? false];
+            }
+            usort($out, fn($a, $b) => strcmp($b['id'], $a['id'])); // newest first
+            echo json_encode(['ok' => true, 'snapshots' => $out]);
+            exit;
+        }
+
+        if ($action === 'snapshot_restore') {
+            $id = preg_replace('/[^a-z0-9_\-]/i', '', $_POST['id'] ?? '');
+            $base = $snap_dir . '/' . $id;
+            if ($id === '' || !is_dir($base) || !is_file($base . '/manifest.json')) {
+                echo json_encode(['ok' => false, 'error' => 'Snapshot not found']); exit;
+            }
+            $m = json_decode((string)file_get_contents($base . '/manifest.json'), true);
+            if (!is_array($m)) { echo json_encode(['ok' => false, 'error' => 'Corrupt manifest']); exit; }
+            // Safety snapshot of the current state before overwriting anything.
+            $safety = $do_snapshot('auto-before-restore of ' . $id);
+            $restored = []; $errors = [];
+            foreach (($m['files'] ?? []) as $f) {
+                // Only the known config filenames are ever written (no traversal).
+                if (!in_array($f, $snap_files, true)) continue;
+                $src = $base . '/files/' . $f;
+                if (is_file($src) && @copy($src, $root . '/' . $f)) $restored[] = $f;
+                else $errors[] = $f;
+            }
+            // Reactivate exactly the plugins that were active when the snapshot was taken.
+            $plugins_restored = false;
+            if (!empty($m['active_plugins'])) {
+                $r = try_db_connect($snap_db);
+                if ($r['ok']) {
+                    $list = @unserialize($m['active_plugins']);
+                    if (is_array($list)) {
+                        $r['pdo']->prepare("UPDATE `{$snap_db['prefix']}options` SET option_value=? WHERE option_name='active_plugins'")
+                            ->execute([serialize(array_values($list))]);
+                        $plugins_restored = true;
+                    }
+                }
+            }
+            echo json_encode(['ok' => true, 'restored' => $restored, 'errors' => $errors,
+                'plugins_restored' => $plugins_restored,
+                'safety_id' => $safety['ok'] ? $safety['manifest']['id'] : null]);
+            exit;
+        }
+
+        if ($action === 'snapshot_delete') {
+            $id = preg_replace('/[^a-z0-9_\-]/i', '', $_POST['id'] ?? '');
+            $base = $snap_dir . '/' . $id;
+            if ($id === '' || !is_dir($base)) { echo json_encode(['ok' => false, 'error' => 'Snapshot not found']); exit; }
+            // Recursively remove only inside .migrate_snapshots/<id>.
+            $rm = function ($p) use (&$rm) {
+                foreach (glob($p . '/*') ?: [] as $c) { is_dir($c) ? $rm($c) : @unlink($c); }
+                @rmdir($p);
+            };
+            $rm($base);
+            echo json_encode(['ok' => !is_dir($base)]);
+            exit;
+        }
+
+        echo json_encode(['ok' => false, 'error' => 'Unknown snapshot action']);
+        exit;
+    }
+
     // --- SET ORIGIN DOMAIN (persist in .migrate_config) ---
     // Remembers the original WordPress site (domain + optional base path) so missing
     // assets can later be fetched from it. Kept for future processes too.
@@ -6007,6 +6154,19 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <div id="diag_results" style="font-size:12px"></div>
     <div id="diag_log" class="log" style="display:none"></div>
 </div>
+
+<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">💾 <?= h(t('Site snapshots')) ?></div>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+        <?= h(t('Saves a dated snapshot of the important configuration (.htaccess, php.ini, .user.ini, wp-config.php, robots.txt, .htpasswd) and the active plugins, so you can restore the site to that exact state if a later change breaks it. Nothing is changed when you create one; a restore always takes a safety snapshot of the current state first.')) ?>
+    </p>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px">
+        <input type="text" id="snap_note" placeholder="<?= h(t('Optional note (e.g. before plugin update)')) ?>" style="flex:1;min-width:220px">
+        <button class="btn btn-sm btn-primary" id="snap_btn" onclick="createSnapshot()">💾 <?= h(t('Save snapshot')) ?></button>
+    </div>
+    <div id="snap_list" style="font-size:12px"></div>
+    <div id="snap_log" class="log" style="display:none"></div>
+</div>
 </div>
 
 <!-- ASSET RECOVERY -->
@@ -6965,6 +7125,64 @@ const T_DIAG = {
     fixesAvail: <?= json_encode(t('Fixes available')) ?>, fixCache: <?= json_encode(t('Clear cache')) ?>, fixMaint: <?= json_encode(t('Lift maintenance')) ?>,
     fixUrl: <?= json_encode(t('Use Quick Update to fix the site URL')) ?>, fixHt: <?= json_encode(t('Recreate .htaccess from WordPress Extras')) ?>,
 };
+
+// --- Site snapshots: save/restore the important config + active plugins ---
+function snapCreds(fd){ ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('qu_db_'+k)?.value || document.getElementById('tls_db_'+k)?.value || '')); return fd; }
+async function createSnapshot(){
+    const btn = document.getElementById('snap_btn'); btn.disabled = true;
+    const fd = snapCreds(new FormData()); fd.append('note', document.getElementById('snap_note').value.trim());
+    try {
+        const j = await (await fetch('?action=snapshot_create', {method:'POST', body:fd})).json();
+        if (j.ok){ log('snap_log', `✓ ${T_SNAP.saved}: ${j.id} (${j.files.length} ${T_SNAP.files}, ${j.active_count} ${T_SNAP.plugins})`, false); document.getElementById('snap_note').value=''; loadSnapshots(); }
+        else log('snap_log', '✗ ' + (j.error||''), false);
+    } catch(e){ log('snap_log', '✗ ' + e.message, false); }
+    btn.disabled = false;
+}
+async function loadSnapshots(){
+    const box = document.getElementById('snap_list');
+    try {
+        const j = await (await fetch('?action=snapshot_list', {method:'POST', body:new FormData()})).json();
+        if (!j.ok || !j.snapshots.length){ box.innerHTML = `<div style="font-size:11px;color:var(--text-dim)">${T_SNAP.none}</div>`; return; }
+        let html = '';
+        for (const s of j.snapshots){
+            const d = s.date ? new Date(s.date).toLocaleString() : s.id;
+            html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+                <span style="flex:1">📅 <strong>${esc(d)}</strong>${s.note?` — <span style="color:var(--text-muted)">${esc(s.note)}</span>`:''}
+                <br><span style="font-size:11px;color:var(--text-dim)">${s.files.length} ${T_SNAP.files} · ${s.active_count} ${T_SNAP.plugins}${s.db_available?'':' · '+T_SNAP.noDb}</span></span>
+                <button class="btn btn-sm btn-primary" onclick="restoreSnapshot('${esc(s.id)}', this)">↺ ${T_SNAP.restore}</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteSnapshot('${esc(s.id)}')">🗑️</button>
+            </div>`;
+        }
+        box.innerHTML = html;
+    } catch(e){ box.innerHTML = `<div style="font-size:11px;color:#f87171">${esc(e.message)}</div>`; }
+}
+async function restoreSnapshot(id, btn){
+    if (!confirm(T_SNAP.confirmRestore)) return;
+    btn.disabled = true;
+    const fd = snapCreds(new FormData()); fd.append('id', id);
+    try {
+        const j = await (await fetch('?action=snapshot_restore', {method:'POST', body:fd})).json();
+        if (j.ok) log('snap_log', `✓ ${T_SNAP.restored}: ${j.restored.join(', ')||'—'}${j.plugins_restored?' + '+T_SNAP.plugins:''}${j.errors.length?' ('+T_SNAP.failed+': '+j.errors.join(', ')+')':''}${j.safety_id?' · '+T_SNAP.safety+' '+j.safety_id:''}`, false);
+        else log('snap_log', '✗ ' + (j.error||''), false);
+    } catch(e){ log('snap_log', '✗ ' + e.message, false); }
+    btn.disabled = false; loadSnapshots();
+}
+async function deleteSnapshot(id){
+    if (!confirm(T_SNAP.confirmDelete)) return;
+    const fd = new FormData(); fd.append('id', id);
+    const j = await (await fetch('?action=snapshot_delete', {method:'POST', body:fd})).json();
+    log('snap_log', j.ok ? `✓ ${T_SNAP.deleted}: ${id}` : '✗ ' + (j.error||''), false);
+    loadSnapshots();
+}
+const T_SNAP = {
+    saved: <?= json_encode(t('Snapshot saved')) ?>, files: <?= json_encode(t('files')) ?>, plugins: <?= json_encode(t('active plugins')) ?>,
+    none: <?= json_encode(t('No snapshots yet')) ?>, restore: <?= json_encode(t('Restore')) ?>, restored: <?= json_encode(t('Restored')) ?>,
+    deleted: <?= json_encode(t('Deleted')) ?>, failed: <?= json_encode(t('failed')) ?>, noDb: <?= json_encode(t('no DB')) ?>,
+    safety: <?= json_encode(t('safety snapshot')) ?>,
+    confirmRestore: <?= json_encode(t('Restore this snapshot? The current config files and active plugins will be overwritten (a safety snapshot is taken first).')) ?>,
+    confirmDelete: <?= json_encode(t('Delete this snapshot permanently?')) ?>,
+};
+document.addEventListener('DOMContentLoaded', loadSnapshots);
 
 // --- Asset recovery from the original site ---
 let AR_ABORT = false;

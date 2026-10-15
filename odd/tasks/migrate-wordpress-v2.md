@@ -186,6 +186,20 @@ Delivered in phases, one commit per phase. Release at the end.
       Apache-only verdicts (.htaccess 500 / redirect / php-config) noted; DB/file checks verifiable
       locally. Verified vs wp_test: diag_db OK (MariaDB 11.4), siteurl detected, 11 tables present.
 
+## v3.15 — site snapshots (save/restore global state)
+- [x] v3.15.0: Snapshot/restore of the important config. Endpoints under `snapshot_*`:
+      `snapshot_create` copies the config files present on disk (.htaccess, php.ini, .user.ini,
+      wp-config.php, robots.txt, .htpasswd) into `.migrate_snapshots/snap_<Ymd-His>/files/` and
+      saves the raw `active_plugins` value + metadata in manifest.json; `snapshot_list` returns the
+      snapshots newest-first; `snapshot_restore` takes a SAFETY snapshot of the current state first,
+      then copies the saved files back (only the known filenames — no traversal) and reactivates the
+      exact `active_plugins` list; `snapshot_delete` removes one snapshot folder recursively (scoped
+      to its own dir). UI: card inside Quick Update with a note field, Save, and a list with
+      Restore/Delete (both confirmed). Bilingual EN/ES. `.migrate_snapshots/` git-ignored.
+      Verified (isolated root + wp_test): create saved present files, restore recovered a broken
+      .htaccess and a deleted robots.txt, active_plugins restored byte-exact, traversal rejected.
+      Endpoints sit behind the auth gate (snapshot_list returns the login page when unauthenticated).
+
 ## Notes
 - README already rewritten + pushed (commit e0b5ea7): modern, tech badges, no emojis,
   both tools documented, curl download.
