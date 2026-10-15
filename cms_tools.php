@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.12.0');
+define('TOOL_VERSION',  '3.13.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -4050,6 +4050,48 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- EXPORT A PLUGIN AS A READY-TO-INSTALL .zip ---
+    // Packages a plugin's folder (or single .php file) from wp-content/plugins into
+    // a zip with the plugin dir at its root, downloadable via the token endpoint.
+    if ($action === 'plugin_export') {
+        @set_time_limit(0);
+        $root = rtrim($abspath, '/');
+        $plugins_dir = $root . '/wp-content/plugins';
+        $file = ltrim(str_replace('\\', '/', (string)($_POST['plugin'] ?? '')), '/');
+        if ($file === '' || strpos($file, '..') !== false) { echo json_encode(['ok' => false, 'error' => 'Invalid plugin']); exit; }
+        // The plugin lives at plugins/<slug>/... (dir) or plugins/<file>.php (single).
+        $slug = (strpos($file, '/') !== false) ? substr($file, 0, strpos($file, '/')) : preg_replace('/\.php$/i', '', $file);
+        $src  = $plugins_dir . '/' . $slug;
+        $single = false;
+        if (!is_dir($src)) { $src = $plugins_dir . '/' . $file; $single = true; }
+        if (!file_exists($src) || strpos(realpath($src) ?: '', realpath($plugins_dir) ?: '~') !== 0) {
+            echo json_encode(['ok' => false, 'error' => 'Plugin not found']); exit;
+        }
+        if (!class_exists('ZipArchive')) { echo json_encode(['ok' => false, 'error' => 'ZipArchive not available']); exit; }
+        $dl_dir = __DIR__ . '/.migrate_exports';
+        if (!is_dir($dl_dir)) @mkdir($dl_dir, 0750, true);
+        $token = bin2hex(random_bytes(6));
+        $safe  = preg_replace('/[^a-z0-9._-]/i', '-', $single ? basename($file, '.php') : $slug);
+        $zip_name = 'plugin_' . $safe . '_' . $token . '.zip';
+        $zip_path = $dl_dir . '/' . $zip_name;
+        $zip = new ZipArchive();
+        if ($zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) { echo json_encode(['ok' => false, 'error' => 'Could not create zip']); exit; }
+        if ($single) {
+            $zip->addFile($src, basename($src));
+        } else {
+            // Add the folder with <slug>/ as the zip root so it installs cleanly.
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+            foreach ($it as $f) {
+                $rel = $slug . '/' . $it->getSubPathName();
+                if ($f->isDir()) $zip->addEmptyDir($rel); else $zip->addFile($f->getRealPath(), $rel);
+            }
+        }
+        $zip->close();
+        echo json_encode(['ok' => true, 'name' => $zip_name, 'size' => human_size(filesize($zip_path)),
+            'url' => basename(__FILE__) . '?action=download&token=' . $token . '&file=' . urlencode($zip_name)]);
+        exit;
+    }
+
     // --- TOGGLE PLUGINS ---
     if ($action === 'toggle_plugins') {
         $tog_db = [
@@ -7814,16 +7856,33 @@ async function loadPlugins() {
     j.installed.forEach(p => {
         const checked = p.active ? 'checked' : '';
         const badge   = p.active ? ' <span class="badge badge-ok">active</span>' : '';
-        html += `<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-bottom:1px solid #2d3148;cursor:pointer">
-            <input type="checkbox" value="${p.file}" ${checked} style="margin-top:2px;cursor:pointer;width:15px;height:15px;flex-shrink:0">
-            <span>
-                <span style="font-size:13px;color:#e2e8f0">${p.name}</span>${badge}<br>
-                <span style="font-size:11px;color:#718096">${p.file}</span>
+        html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)">
+            <input type="checkbox" value="${esc(p.file)}" ${checked} style="margin-top:2px;cursor:pointer;width:15px;height:15px;flex-shrink:0">
+            <span style="flex:1">
+                <span style="font-size:13px;color:var(--text)">${esc(p.name)}</span>${badge}<br>
+                <span style="font-size:11px;color:var(--text-dim)">${esc(p.file)}</span>
             </span>
-        </label>`;
+            <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);flex-shrink:0" onclick="exportPlugin('${esc(p.file)}', this)">⤓ .zip</button>
+        </div>`;
     });
     html += '</div>';
     el.innerHTML = html;
+}
+
+async function exportPlugin(file, btn){
+    const prev = btn.textContent; btn.disabled = true; btn.textContent = '⏳';
+    const fd = new FormData();
+    Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    fd.append('plugin', file);
+    try {
+        const r = await fetch('?action=plugin_export', {method:'POST', body:fd});
+        const j = await r.json();
+        if (j.ok){
+            log('tls_plugins_log', `✓ ${file}: <a href="${j.url}" target="_blank" style="color:#7dd3fc">${j.name}</a> (${j.size})`, false);
+            window.open(j.url, '_blank');
+        } else { log('tls_plugins_log', `✗ ${j.error}`, false); }
+    } catch(e){ log('tls_plugins_log', '✗ ' + e.message, false); }
+    btn.disabled = false; btn.textContent = prev;
 }
 
 async function deactivateAllPlugins() {
