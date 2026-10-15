@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.13.0');
+define('TOOL_VERSION',  '3.14.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -215,6 +215,25 @@ $GLOBALS['__I18N'] = [
         'Convert absolute wp-content URLs to relative + clear cache' => 'Convertir URLs absolutas de wp-content a relativas + limpiar caché',
         'Deactivate all plugins'              => 'Desactivar todos los plugins',
         'Run quick update'                    => 'Ejecutar actualización rápida',
+        // Quick diagnostics
+        'Quick diagnostics'                   => 'Diagnóstico rápido',
+        'Scans the frequent reasons a site won\'t display: database, site URL, WP tables, maintenance mode, broken plugins, stale cache, .htaccess (500/redirects), PHP config, password locks and shadowing index.html. Runs step by step with a progress bar; fixes are offered, never auto-applied.'
+            => 'Revisa las causas frecuentes de que un sitio no se muestre: base de datos, URL del sitio, tablas de WP, modo mantenimiento, plugins que rompen, caché obsoleta, .htaccess (500/redirecciones), configuración PHP, bloqueo por contraseña y un index.html que tape el sitio. Avanza paso a paso con barra de progreso; las soluciones se ofrecen, nunca se aplican solas.',
+        'Run quick diagnostics'               => 'Ejecutar diagnóstico rápido',
+        'Database'                            => 'Base de datos',
+        'Site URL'                            => 'URL del sitio',
+        'WordPress tables'                    => 'Tablas de WordPress',
+        'Plugins'                             => 'Plugins',
+        'Cache'                               => 'Caché',
+        'PHP config'                          => 'Configuración PHP',
+        'Password lock'                       => 'Bloqueo por contraseña',
+        'Redirects / index.html'              => 'Redirecciones / index.html',
+        'Diagnostics complete'                => 'Diagnóstico completo',
+        'Fixes available'                     => 'Soluciones disponibles',
+        'Clear cache'                         => 'Limpiar caché',
+        'Lift maintenance'                    => 'Quitar mantenimiento',
+        'Use Quick Update to fix the site URL' => 'Usá Actualización rápida para corregir la URL del sitio',
+        'Recreate .htaccess from WordPress Extras' => 'Recreá el .htaccess desde Extras de WordPress',
         // Asset recovery
         'Recover missing assets from the original site' => 'Recuperar archivos faltantes del sitio original',
         'Scans the database for /wp-content/ files referenced by the site, checks which are missing on disk, and downloads them from the original site (useful when an FTP copy was incomplete). The original domain is auto-filled from the old site URL and remembered for later.'
@@ -3182,6 +3201,181 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // ============================================================
+    // QUICK DIAGNOSTICS — one endpoint per check (fast, safe, reversible)
+    // Each returns {ok, status: ok|warn|error, text, fix?}.
+    // ============================================================
+    if (strpos($action, 'diag_') === 0) {
+        $diag_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $root = rtrim($abspath, '/');
+        $cur  = current_url();
+
+        if ($action === 'diag_db') {
+            $r = try_db_connect($diag_db);
+            if ($r['ok']) {
+                $ver = '';
+                try { $ver = (string)$r['pdo']->query('SELECT VERSION()')->fetchColumn(); } catch (Exception $e) {}
+                echo json_encode(['ok'=>true,'status'=>'ok','text'=>'Database connection OK' . ($ver?" (MySQL $ver)":'')]);
+            } else {
+                echo json_encode(['ok'=>true,'status'=>'error','text'=>'Database connection FAILED: ' . $r['error']]);
+            }
+            exit;
+        }
+
+        if ($action === 'diag_url') {
+            $r = try_db_connect($diag_db);
+            if (!$r['ok']) { echo json_encode(['ok'=>true,'status'=>'warn','text'=>'Cannot check siteurl — DB connection failed']); exit; }
+            $pdo = $r['pdo']; $prefix = $diag_db['prefix'];
+            $su = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='siteurl' LIMIT 1")->fetchColumn(), '/');
+            if ($su === '') { echo json_encode(['ok'=>true,'status'=>'warn','text'=>'siteurl not found in the database']); exit; }
+            $match = rtrim($su,'/') === rtrim($cur,'/');
+            echo json_encode(['ok'=>true,'status'=>$match?'ok':'error',
+                'text'=>"DB siteurl: $su " . ($match ? '(matches current URL)' : "≠ current URL ($cur) — fix via Quick Update"),
+                'fix'=>$match?null:'siteurl']);
+            exit;
+        }
+
+        if ($action === 'diag_tables') {
+            $r = try_db_connect($diag_db);
+            if (!$r['ok']) { echo json_encode(['ok'=>true,'status'=>'error','text'=>'DB connection failed']); exit; }
+            $pdo = $r['pdo']; $prefix = $diag_db['prefix'];
+            $have = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+            $std = ['posts','postmeta','users','usermeta','options','terms','term_relationships','term_taxonomy','comments','commentmeta','links'];
+            $missing = [];
+            foreach ($std as $t) if (!in_array($prefix.$t, $have, true)) $missing[] = $prefix.$t;
+            echo json_encode(['ok'=>true,'status'=>$missing?'error':'ok',
+                'text'=>$missing ? ('Missing WP tables: ' . implode(', ', $missing)) : 'All standard WP tables present']);
+            exit;
+        }
+
+        if ($action === 'diag_maintenance') {
+            $m = is_file($root . '/.maintenance');
+            $bp = '1';
+            $r = try_db_connect($diag_db);
+            if ($r['ok']) { $bp = (string)$r['pdo']->query("SELECT option_value FROM `{$diag_db['prefix']}options` WHERE option_name='blog_public' LIMIT 1")->fetchColumn(); }
+            $issue = $m || $bp === '0';
+            echo json_encode(['ok'=>true,'status'=>$issue?'warn':'ok',
+                'text'=>$m ? '.maintenance file present — site is in maintenance mode' : ($bp==='0' ? 'blog_public=0 (discouraging indexing)' : 'No maintenance mode'),
+                'fix'=>$m?'maintenance':null]);
+            exit;
+        }
+
+        if ($action === 'diag_plugins') {
+            // Save active_plugins, deactivate, GET home, find a culprit if it was broken,
+            // and ALWAYS restore the original list at the end.
+            $r = try_db_connect($diag_db);
+            if (!$r['ok']) { echo json_encode(['ok'=>true,'status'=>'warn','text'=>'DB connection failed']); exit; }
+            $pdo = $r['pdo']; $prefix = $diag_db['prefix'];
+            $orig_raw = (string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='active_plugins' LIMIT 1")->fetchColumn();
+            $orig = @unserialize($orig_raw); if (!is_array($orig)) $orig = [];
+            $getHome = function () use ($cur) {
+                $st=0;$body='';
+                if (function_exists('curl_init')) { $ch=curl_init($cur.'/'); curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>false]); $body=(string)curl_exec($ch); $st=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE); unset($ch); }
+                $fatal=(stripos($body,'Fatal error')!==false)||(stripos($body,'critical error')!==false);
+                return ['breaks'=>($st>=500||$fatal),'status'=>$st];
+            };
+            $setActive = fn($list) => $pdo->prepare("UPDATE `{$prefix}options` SET option_value=? WHERE option_name='active_plugins'")->execute([serialize(array_values($list))]);
+            $culprit = ''; $before = $getHome();
+            try {
+                if (!empty($orig) && $before['breaks']) {
+                    $setActive([]); $none = $getHome();
+                    if (!$none['breaks']) {
+                        // Reactivate one by one to find the first that breaks.
+                        $acc = [];
+                        foreach ($orig as $pl) { $acc[] = $pl; $setActive($acc); $t = $getHome(); if ($t['breaks']) { $culprit = $pl; break; } }
+                    }
+                }
+            } finally {
+                $setActive($orig); // ALWAYS restore the original active plugins
+            }
+            if ($culprit) echo json_encode(['ok'=>true,'status'=>'error','text'=>"Plugin breaks the site: $culprit (original state restored)"]);
+            elseif ($before['breaks']) echo json_encode(['ok'=>true,'status'=>'error','text'=>'Home returns an error, but not isolated to a single plugin (restored)']);
+            else echo json_encode(['ok'=>true,'status'=>'ok','text'=>'Home loads with current plugins ('.count($orig).' active)']);
+            exit;
+        }
+
+        if ($action === 'diag_cache') {
+            $dirs = array_filter([$root.'/wp-content/cache', $root.'/wp-content/et-cache'], 'is_dir');
+            $files = 0;
+            foreach ($dirs as $d) foreach (glob($d.'/*') ?: [] as $f) $files++;
+            echo json_encode(['ok'=>true,'status'=>$files?'warn':'ok',
+                'text'=>$files ? ($files.' cached item(s) in '.count($dirs).' cache dir(s)') : 'No stale cache found',
+                'fix'=>$files?'cache':null]);
+            exit;
+        }
+
+        if ($action === 'diag_htaccess') {
+            $ht = $root.'/.htaccess';
+            if (!is_file($ht)) { echo json_encode(['ok'=>true,'status'=>'ok','text'=>'.htaccess not present']); exit; }
+            $c = file_get_contents($ht);
+            $issues = [];
+            if (preg_match('#Redirect\s+(301|302|permanent)?\s*/?\s+https?://#i', $c) || preg_match('#RewriteRule\s+.*https?://[^\s]+\s+\[[^\]]*R#i', $c))
+                $issues[] = 'external redirect';
+            // Isolated 500 test of the live rules.
+            $breaks = false; $tested = 'skipped';
+            if (is_writable($root)) {
+                $dir = $root.'/_ht_diag_'.bin2hex(random_bytes(3));
+                if (@mkdir($dir, 0755)) {
+                    @file_put_contents($dir.'/.htaccess', $c);
+                    @file_put_contents($dir.'/ok.php', "<?php echo 'OK';");
+                    $proto=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+                    $base=rtrim(dirname($proto.'://'.($_SERVER['HTTP_HOST']??'localhost').($_SERVER['REQUEST_URI']??'/')),'/');
+                    $st=0; if(function_exists('curl_init')){$ch=curl_init($base.'/'.basename($dir).'/ok.php');curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>false]);curl_exec($ch);$st=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);unset($ch);}
+                    @unlink($dir.'/.htaccess');@unlink($dir.'/ok.php');@rmdir($dir);
+                    $breaks = ($st>=500); $tested = $breaks?'500':'ok';
+                }
+            }
+            if ($breaks) $issues[] = 'returns HTTP 500 in isolation';
+            echo json_encode(['ok'=>true,'status'=>$issues?'error':'ok',
+                'text'=>$issues ? ('.htaccess issues: '.implode(', ',$issues)) : '.htaccess looks fine (tested: '.$tested.')',
+                'fix'=>$issues?'htaccess':null]);
+            exit;
+        }
+
+        if ($action === 'diag_phpconfig') {
+            $hits = [];
+            foreach ([$root.'/.htaccess'=>'php_value', $root.'/.user.ini'=>'ini', $root.'/php.ini'=>'ini'] as $f=>$kind) {
+                if (!is_file($f)) continue;
+                $c = file_get_contents($f);
+                if ($kind==='php_value' && preg_match('/php_value\s+/i',$c)) $hits[] = basename($f).' has php_value directives';
+                if ($kind==='ini' && trim($c)!=='') $hits[] = basename($f).' present';
+            }
+            echo json_encode(['ok'=>true,'status'=>'ok','text'=>$hits ? ('PHP config: '.implode('; ',$hits).' (verify on Apache)') : 'No custom PHP config files']);
+            exit;
+        }
+
+        if ($action === 'diag_passwords') {
+            $ht = $root.'/.htaccess'; $has = false;
+            if (is_file($ht) && preg_match('/AuthType\s+Basic|Require\s+valid-user/i', file_get_contents($ht))) $has = true;
+            $hp = is_file($root.'/.htpasswd');
+            echo json_encode(['ok'=>true,'status'=>$has?'warn':'ok',
+                'text'=>$has ? 'Site-wide HTTP Basic auth is active (.htaccess'.($hp?' + .htpasswd':'').') — visitors are blocked' : 'No site-wide password protection']);
+            exit;
+        }
+
+        if ($action === 'diag_redirects') {
+            $issues = [];
+            foreach (['index.html','index.htm'] as $f) {
+                if (is_file($root.'/'.$f)) {
+                    $issues[] = "$f present (may shadow index.php)";
+                    $c = @file_get_contents($root.'/'.$f, false, null, 0, 8192) ?: '';
+                    if (preg_match('#<meta[^>]+http-equiv=["\']refresh["\'][^>]*https?://#i', $c) || preg_match('#<(iframe|frame)[^>]+src=["\']https?://#i', $c) || preg_match('#location\.(href|replace)\s*=\s*["\']https?://#i', $c))
+                        $issues[] = "$f redirects/frames to another site";
+                }
+            }
+            echo json_encode(['ok'=>true,'status'=>$issues?'error':'ok',
+                'text'=>$issues ? implode('; ',$issues) : 'No shadowing index.html / external redirect']);
+            exit;
+        }
+
+        echo json_encode(['ok'=>false,'error'=>'Unknown diagnostic']);
+        exit;
+    }
+
     // --- SET ORIGIN DOMAIN (persist in .migrate_config) ---
     // Remembers the original WordPress site (domain + optional base path) so missing
     // assets can later be fetched from it. Kept for future processes too.
@@ -5800,6 +5994,19 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <button class="btn btn-primary" id="qu_btn" onclick="runQuickUpdate()">⚡ <?= h(t('Run quick update')) ?></button>
 </div>
 <div id="qu_log" class="log" style="display:none"></div>
+
+<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">🩺 <?= h(t('Quick diagnostics')) ?></div>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+        <?= h(t('Scans the frequent reasons a site won\'t display: database, site URL, WP tables, maintenance mode, broken plugins, stale cache, .htaccess (500/redirects), PHP config, password locks and shadowing index.html. Runs step by step with a progress bar; fixes are offered, never auto-applied.')) ?>
+    </p>
+    <div class="actions" style="margin-bottom:8px">
+        <button class="btn btn-sm btn-primary" id="diag_btn" onclick="runQuickDiagnostics()">🩺 <?= h(t('Run quick diagnostics')) ?></button>
+    </div>
+    <div id="diag_progress" style="display:none;margin-bottom:8px"><div class="progress"><div class="progress-bar" id="diag_bar" style="width:0%"></div></div><div id="diag_ptxt" style="font-size:11px;color:var(--text-dim);margin-top:3px"></div></div>
+    <div id="diag_results" style="font-size:12px"></div>
+    <div id="diag_log" class="log" style="display:none"></div>
+</div>
 </div>
 
 <!-- ASSET RECOVERY -->
@@ -6699,6 +6906,65 @@ async function runQuickUpdate(){
     } catch(e){ log('qu_log', '✗ ' + e.message, false); }
     btn.disabled = false; btn.textContent = '⚡ Run quick update';
 }
+
+// --- Quick diagnostics: run each check in sequence with a live progress bar ---
+async function runQuickDiagnostics(){
+    const btn = document.getElementById('diag_btn');
+    const out = document.getElementById('diag_results');
+    const prog = document.getElementById('diag_progress'), bar = document.getElementById('diag_bar'), ptxt = document.getElementById('diag_ptxt');
+    btn.disabled = true; out.innerHTML = ''; prog.style.display = 'block';
+    const checks = [
+        ['diag_db', T_DIAG.db], ['diag_url', T_DIAG.url], ['diag_tables', T_DIAG.tables],
+        ['diag_maintenance', T_DIAG.maintenance], ['diag_plugins', T_DIAG.plugins], ['diag_cache', T_DIAG.cache],
+        ['diag_htaccess', T_DIAG.htaccess], ['diag_phpconfig', T_DIAG.phpconfig], ['diag_passwords', T_DIAG.passwords],
+        ['diag_redirects', T_DIAG.redirects],
+    ];
+    const icon = {ok:'✅', warn:'⚠️', error:'❌'};
+    const color = {ok:'#6ee7b7', warn:'#fcd34d', error:'#f87171'};
+    const fixes = [];
+    for (let i=0; i<checks.length; i++){
+        const [action, label] = checks[i];
+        ptxt.textContent = `${i+1}/${checks.length} — ${label}`;
+        const fd = new FormData();
+        ['host','name','user','pass','prefix'].forEach(k => fd.append('db_'+k, document.getElementById('qu_db_'+k)?.value || document.getElementById('tls_db_'+k)?.value || ''));
+        let j;
+        try { j = await (await fetch('?action='+action, {method:'POST', body:fd})).json(); } catch(e){ j = {status:'warn', text:'check failed: '+e.message}; }
+        const s = j.status || (j.ok===false?'error':'warn');
+        out.innerHTML += `<div style="padding:4px 0;border-bottom:1px solid var(--border);color:${color[s]||'#a0aec0'}">${icon[s]||'•'} <strong>${esc(label)}</strong>: ${esc(j.text||j.error||'')}</div>`;
+        if (j.fix) fixes.push(j.fix);
+        bar.style.width = Math.round((i+1)/checks.length*100) + '%';
+    }
+    ptxt.textContent = T_DIAG.done;
+    // Offer one-click fixes for the issues found.
+    if (fixes.length){
+        let fb = `<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">${T_DIAG.fixesAvail}:</div><div class="actions" style="margin-top:6px">`;
+        if (fixes.includes('cache')) fb += `<button class="btn btn-sm btn-warning" onclick="diagFixCache()">🗑️ ${T_DIAG.fixCache}</button>`;
+        if (fixes.includes('maintenance')) fb += `<button class="btn btn-sm btn-warning" onclick="diagFixMaintenance()">🚧 ${T_DIAG.fixMaint}</button>`;
+        if (fixes.includes('siteurl')) fb += `<span style="font-size:11px;color:var(--text-dim);align-self:center">↑ ${T_DIAG.fixUrl}</span>`;
+        if (fixes.includes('htaccess')) fb += `<span style="font-size:11px;color:var(--text-dim);align-self:center">${T_DIAG.fixHt}</span>`;
+        fb += '</div>';
+        out.innerHTML += fb;
+    }
+    btn.disabled = false;
+}
+async function diagFixCache(){
+    const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v));
+    const j = await (await fetch('?action=clear_cache', {method:'POST', body:fd})).json();
+    log('diag_log', j.ok ? `✓ Cache cleared (${j.deleted} files)` : '✗ cache clear failed', false);
+}
+async function diagFixMaintenance(){
+    const fd = new FormData(); Object.entries(formData('tls')).forEach(([k,v]) => fd.append(k,v)); fd.append('enable','0');
+    const j = await (await fetch('?action=wp_toggle_maintenance', {method:'POST', body:fd})).json();
+    log('diag_log', j.ok ? '✓ Maintenance mode lifted' : '✗ '+j.error, false);
+}
+const T_DIAG = {
+    db: <?= json_encode(t('Database')) ?>, url: <?= json_encode(t('Site URL')) ?>, tables: <?= json_encode(t('WordPress tables')) ?>,
+    maintenance: <?= json_encode(t('Maintenance mode')) ?>, plugins: <?= json_encode(t('Plugins')) ?>, cache: <?= json_encode(t('Cache')) ?>,
+    htaccess: <?= json_encode(t('.htaccess')) ?>, phpconfig: <?= json_encode(t('PHP config')) ?>, passwords: <?= json_encode(t('Password lock')) ?>,
+    redirects: <?= json_encode(t('Redirects / index.html')) ?>, done: <?= json_encode(t('Diagnostics complete')) ?>,
+    fixesAvail: <?= json_encode(t('Fixes available')) ?>, fixCache: <?= json_encode(t('Clear cache')) ?>, fixMaint: <?= json_encode(t('Lift maintenance')) ?>,
+    fixUrl: <?= json_encode(t('Use Quick Update to fix the site URL')) ?>, fixHt: <?= json_encode(t('Recreate .htaccess from WordPress Extras')) ?>,
+};
 
 // --- Asset recovery from the original site ---
 let AR_ABORT = false;

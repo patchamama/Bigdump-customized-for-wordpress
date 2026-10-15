@@ -300,6 +300,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `cms 3.14.0` | Each plugin in the Plugin Manager can be exported as a ready-to-install `.zip` (folder packed at the zip root, path-traversal rejected); new one-click **Quick diagnostics** under Quick Update that scans the frequent reasons a site won't display (database, site URL, WP tables, maintenance mode, broken plugins, stale cache, `.htaccess` 500/redirects, PHP config, password locks, shadowing `index.html`) step by step with a progress bar and offers fixes without auto-applying them |
 | `cms 3.12.0` | Sandbox can be built as a WordPress multisite network (fixing its DB copy and network tables) with a form to add sub-sites; new "test all plugins" that activates everything at once and bisects to the conflicting plugin(s) |
 | `cms 3.11.0` | Renamed `migrate_wordpress.php` to `cms_tools.php`; detects the CMS on load (WordPress, Joomla, Drupal, MediaWiki) and reads DB credentials from its config, so export/import and phpMyAdmin work for all four (other tools remain WordPress-only) |
 | `migrate 3.10.0` | Performance options (gzip, browser cache, static page cache, performance check with external-tool links); disk cleanup for orphan uploads and large/suspicious files; Apache capability tests; sandbox now fixes its DB-copy URL and relativizes assets; install popular/searched plugins into the sandbox and vet before going live |

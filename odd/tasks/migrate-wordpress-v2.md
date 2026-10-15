@@ -170,6 +170,22 @@ Delivered in phases, one commit per phase. Release at the end.
   DB-set logs in, custom hash takes priority and disables DB pass.
 - .migrate_config chmod 0600; hash_equals used for constant-time compare.
 
+## v3.13–3.14 — export plugin .zip + quick diagnostics (plan proud-sauteeing-cocoa.md)
+- [x] v3.13.0 (commit 507955b): Phase A — `plugin_export` endpoint. Resolves slug from the plugin
+      `file`, zips the folder with `slug/` at the zip root (or the lone file) into
+      `.migrate_exports/plugin_<safe>_<token>.zip`, served by the token `download` endpoint. Rejects
+      paths outside wp-content/plugins and any `..`. Per-plugin `⤓ .zip` button; the list row became a
+      `<div>` so the button no longer toggles the checkbox. Zip-root structure verified.
+- [x] v3.14.0: Phase B — Quick diagnostics. 10 `diag_*` endpoints (db, url, tables, maintenance,
+      plugins, cache, htaccess, phpconfig, passwords, redirects), each returns {status, text, fix?}.
+      `diag_plugins` saves active_plugins, deactivates, probes the home over HTTP, reactivates one by
+      one to find the culprit, and ALWAYS restores the original list (verified exact against wp_test).
+      `diag_htaccess` tests rules in an isolated `_ht_diag_*` subfolder (never touches the live file).
+      JS `runQuickDiagnostics` runs each in sequence with a live progress bar and result lines, then
+      offers fixes (clear cache / lift maintenance) as explicit buttons — never auto-applied.
+      Apache-only verdicts (.htaccess 500 / redirect / php-config) noted; DB/file checks verifiable
+      locally. Verified vs wp_test: diag_db OK (MariaDB 11.4), siteurl detected, 11 tables present.
+
 ## Notes
 - README already rewritten + pushed (commit e0b5ea7): modern, tech badges, no emojis,
   both tools documented, curl download.
