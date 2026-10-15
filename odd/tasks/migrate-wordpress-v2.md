@@ -123,6 +123,19 @@ Delivered in phases, one commit per phase. Release at the end.
       in batches via verify_url with a progress bar; only reachable targets kept) + "Replace verified in DB".
 - Verified vs real test db: analyze found 353 distinct igs-bonn.de URLs; exact swap updated 25 rows (rollback). -> 3.3.0
 
+## v3.12 — multisite sandbox + all-plugins bisection (DONE)
+- [x] P1 multisite build: sandbox_create accepts multisite+ms_type, wp-config gets WP_ALLOW_MULTISITE/
+      MULTISITE/SUBDOMAIN_INSTALL/DOMAIN_CURRENT_SITE/PATH_CURRENT_SITE defines + a multisite .htaccess
+      (subdir). cms_ms_setup() creates wptest_site/blogs/sitemeta (CREATE LIKE live or minimal schema)
+      and seeds site 1 + network options. Verified vs real DB with cleanup.
+- [x] P2 sub-sites: cms_ms_add_site() inserts a wptest_blogs row and creates the 11 wptest_N_* per-blog
+      tables (CREATE LIKE base) with seeded options; sandbox_ms_add_site/list_sites endpoints + Multisite
+      sub-card UI. Verified: blog_id 2 + wptest_2_* created, siteurl seeded, cleanup.
+- [x] P3 all-plugins test: sandbox_plugins_set activates an arbitrary list and GET-classifies; JS
+      teTestAllPlugins activates all then bisects (halving) to the minimal breaking subset/culprit,
+      restoring active_plugins to empty. Bisection logic unit-tested (converges in log2 n).
+- NOTE: multisite routing + plugin execution only fully real on Apache; DB steps verified locally. -> 3.12.0
+
 ## v3.4 — fixes + broken-link find&replace (DONE)
 - [x] FIX Split export performance: the splitter wrote a throwaway .zip per statement to measure
       size — O(n²), a 733KB dump took 104s and large dumps hung. Rewrote to O(n): track raw length,

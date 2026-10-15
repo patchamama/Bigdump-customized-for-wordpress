@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.11.0');
+define('TOOL_VERSION',  '3.12.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -272,6 +272,26 @@ $GLOBALS['__I18N'] = [
             => 'Construye un WordPress aislado en una subcarpeta: replica las tablas de la base de datos con un prefijo de prueba y enlaza el core, plugins, temas y uploads (symlink, con copia como respaldo). Luego puede probar cada plugin uno a uno contra el sandbox, evaluar plugins nuevos de wordpress.org antes de instalarlos en producción, y generar un informe — todo sin arriesgar el sitio real. Usa la conexión de BD de la tarjeta Herramientas DB de arriba.',
         'Build sandbox'                       => 'Construir sandbox',
         'Smoke-test plugins'                  => 'Probar plugins',
+        'Test plugins one by one'             => 'Probar plugins uno por uno',
+        'Test all plugins (find conflicts)'   => 'Probar todos los plugins (hallar conflictos)',
+        'Build as multisite network'          => 'Construir como red multisite',
+        'Subdirectory'                        => 'Subdirectorio',
+        'Subdomain (needs wildcard DNS)'      => 'Subdominio (requiere DNS comodín)',
+        'Multisite network'                   => 'Red multisite',
+        'Sub-site path/subdomain'             => 'Ruta/subdominio del subsitio',
+        'Admin email'                         => 'Correo del administrador',
+        'Add sub-site'                        => 'Agregar subsitio',
+        'multisite'                           => 'multisite',
+        'Testing all plugins together'        => 'Probando todos los plugins juntos',
+        'All plugins load together'           => 'Todos los plugins cargan juntos',
+        'The site breaks with all plugins active' => 'El sitio se rompe con todos los plugins activos',
+        'isolating the culprit'               => 'aislando el culpable',
+        'Breaking plugin'                     => 'Plugin que rompe',
+        'Minimal breaking set'                => 'Conjunto mínimo que rompe',
+        'These plugins conflict with each other.' => 'Estos plugins entran en conflicto entre sí.',
+        'Sub-sites'                           => 'Subsitios',
+        'Enter a sub-site path/subdomain'     => 'Ingresá una ruta/subdominio de subsitio',
+        'Sub-site added'                      => 'Subsitio agregado',
         'Destroy sandbox'                     => 'Destruir sandbox',
         'Vet a new plugin from wordpress.org' => 'Evaluar un plugin nuevo de wordpress.org',
         'Plugin name…'                        => 'Nombre del plugin…',
@@ -655,6 +675,82 @@ function dir_size($dir) {
 // compressed size cheaply before committing a part to a real .zip on disk.
 // Every part repeats a header (FK checks off, charset) so it imports standalone
 // and in order; the final part restores FK checks.
+// Ensure the multisite network tables exist in the sandbox copy and seed site 1.
+// Creates {dst}site, {dst}blogs, {dst}sitemeta (CREATE LIKE the live network tables
+// when present, otherwise a minimal schema) and inserts the primary site/blog rows.
+function cms_ms_setup($pdo, $live_prefix, $dst, $host, $path, $subdomain) {
+    $out = ['created' => [], 'seeded' => false, 'error' => ''];
+    try {
+        $exists = fn($t) => (bool)$pdo->query("SHOW TABLES LIKE " . $pdo->quote($t))->fetchColumn();
+        // site
+        if (!$exists($dst.'site')) {
+            if ($exists($live_prefix.'site')) $pdo->exec("CREATE TABLE `{$dst}site` LIKE `{$live_prefix}site`");
+            else $pdo->exec("CREATE TABLE `{$dst}site` (id bigint(20) unsigned NOT NULL auto_increment, domain varchar(200) NOT NULL default '', path varchar(100) NOT NULL default '', PRIMARY KEY (id), KEY domain (domain(140),path(51)))");
+            $out['created'][] = $dst.'site';
+        }
+        // blogs
+        if (!$exists($dst.'blogs')) {
+            if ($exists($live_prefix.'blogs')) $pdo->exec("CREATE TABLE `{$dst}blogs` LIKE `{$live_prefix}blogs`");
+            else $pdo->exec("CREATE TABLE `{$dst}blogs` (blog_id bigint(20) NOT NULL auto_increment, site_id bigint(20) NOT NULL default '0', domain varchar(200) NOT NULL default '', path varchar(100) NOT NULL default '', registered datetime NOT NULL default '1970-01-01 00:00:00', last_updated datetime NOT NULL default '1970-01-01 00:00:00', public tinyint(2) NOT NULL default '1', archived tinyint(2) NOT NULL default '0', mature tinyint(2) NOT NULL default '0', spam tinyint(2) NOT NULL default '0', deleted tinyint(2) NOT NULL default '0', lang_id int(11) NOT NULL default '0', PRIMARY KEY (blog_id), KEY domain (domain(50),path(5)))");
+            $out['created'][] = $dst.'blogs';
+        }
+        // sitemeta
+        if (!$exists($dst.'sitemeta')) {
+            if ($exists($live_prefix.'sitemeta')) $pdo->exec("CREATE TABLE `{$dst}sitemeta` LIKE `{$live_prefix}sitemeta`");
+            else $pdo->exec("CREATE TABLE `{$dst}sitemeta` (meta_id bigint(20) NOT NULL auto_increment, site_id bigint(20) NOT NULL default '0', meta_key varchar(255) default NULL, meta_value longtext, PRIMARY KEY (meta_id), KEY meta_key (meta_key(191)), KEY site_id (site_id))");
+            $out['created'][] = $dst.'sitemeta';
+        }
+        // Seed the primary site + primary blog (row 1) if empty.
+        if ((int)$pdo->query("SELECT COUNT(*) FROM `{$dst}site`")->fetchColumn() === 0) {
+            $st = $pdo->prepare("INSERT INTO `{$dst}site` (id, domain, path) VALUES (1, ?, ?)"); $st->execute([$host, $path]);
+        }
+        if ((int)$pdo->query("SELECT COUNT(*) FROM `{$dst}blogs`")->fetchColumn() === 0) {
+            $st = $pdo->prepare("INSERT INTO `{$dst}blogs` (blog_id, site_id, domain, path, registered, last_updated, public) VALUES (1, 1, ?, ?, NOW(), NOW(), 1)");
+            $st->execute([$host, $path]);
+        }
+        // Minimal network options so WP boots the network.
+        foreach (['site_name'=>'Sandbox Network','admin_email'=>'admin@example.com','subdomain_install'=>($subdomain?'1':'0'),'wpmu_upgrade_site'=>'1'] as $k=>$v) {
+            if ((int)$pdo->query("SELECT COUNT(*) FROM `{$dst}sitemeta` WHERE site_id=1 AND meta_key=".$pdo->quote($k))->fetchColumn() === 0)
+                $pdo->prepare("INSERT INTO `{$dst}sitemeta` (site_id, meta_key, meta_value) VALUES (1, ?, ?)")->execute([$k,$v]);
+        }
+        $out['seeded'] = true;
+    } catch (Exception $e) { $out['error'] = $e->getMessage(); }
+    return $out;
+}
+
+// Add one sub-site to the sandbox multisite network: allocate a blog_id, insert
+// the blogs row, and create the 11 per-blog tables (CREATE LIKE the base tables)
+// with minimal seeded options. Returns the new blog id + url.
+function cms_ms_add_site($pdo, $dst, $host, $base_path, $slug, $title, $email, $subdomain) {
+    $slug = preg_replace('/[^a-z0-9\-]/', '', strtolower($slug));
+    if ($slug === '') return ['ok' => false, 'error' => 'Invalid sub-site slug'];
+    // Compute domain/path for the new blog.
+    if ($subdomain) { $domain = $slug . '.' . $host; $path = rtrim($base_path,'/').'/'; }
+    else            { $domain = $host; $path = rtrim($base_path,'/') . '/' . $slug . '/'; }
+    // Reject duplicates.
+    $dup = $pdo->prepare("SELECT blog_id FROM `{$dst}blogs` WHERE domain=? AND path=? LIMIT 1"); $dup->execute([$domain,$path]);
+    if ($dup->fetchColumn()) return ['ok' => false, 'error' => 'A sub-site with that path already exists'];
+    $pdo->prepare("INSERT INTO `{$dst}blogs` (site_id, domain, path, registered, last_updated, public) VALUES (1, ?, ?, NOW(), NOW(), 1)")->execute([$domain,$path]);
+    $blog_id = (int)$pdo->lastInsertId();
+    // Per-blog tables: wp_N_* created from the base wp_* ones.
+    $base_tables = ['posts','postmeta','options','terms','termmeta','term_taxonomy','term_relationships','comments','commentmeta','links'];
+    $created = 0;
+    foreach ($base_tables as $bt) {
+        $src = $dst . $bt; $new = $dst . $blog_id . '_' . $bt;
+        try { if ((bool)$pdo->query("SHOW TABLES LIKE ".$pdo->quote($src))->fetchColumn()) { $pdo->exec("DROP TABLE IF EXISTS `$new`"); $pdo->exec("CREATE TABLE `$new` LIKE `$src`"); $created++; } } catch (Exception $e) {}
+    }
+    // Seed minimal options for the sub-site.
+    $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $suburl = $proto . '://' . $domain . $path;
+    $optsT = $dst . $blog_id . '_options';
+    if ((bool)$pdo->query("SHOW TABLES LIKE ".$pdo->quote($optsT))->fetchColumn()) {
+        foreach (['siteurl'=>$suburl,'home'=>$suburl,'blogname'=>$title,'admin_email'=>$email,'template'=>'twentytwentyfour','stylesheet'=>'twentytwentyfour','active_plugins'=>serialize([])] as $k=>$v) {
+            $pdo->prepare("INSERT INTO `$optsT` (option_name, option_value, autoload) VALUES (?, ?, 'yes')")->execute([$k,$v]);
+        }
+    }
+    return ['ok' => true, 'blog_id' => $blog_id, 'url' => $suburl, 'tables_created' => $created];
+}
+
 function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
     if (!is_file($sql_path)) return ['ok' => false, 'error' => 'SQL file not found for splitting'];
     if (!class_exists('ZipArchive')) return ['ok' => false, 'error' => 'ZipArchive not available on this server'];
@@ -3307,16 +3403,41 @@ if ($authenticated && isset($_GET['action'])) {
         $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
         $base  = rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
         $sandbox_url = $base . '/' . basename($dir);
-        $wpcfg  = "<?php\n/* WP Migration Tool sandbox — isolated test environment */\n";
+        // Optional multisite network for the sandbox (subdirectory is the safe default).
+        $multisite = !empty($_POST['multisite']) && $_POST['multisite'] !== '0';
+        $ms_subdomain = ($_POST['ms_type'] ?? 'subdir') === 'subdomain';
+        $ms_host = parse_url($sandbox_url, PHP_URL_HOST) ?: ($_SERVER['HTTP_HOST'] ?? 'localhost');
+        $ms_path = rtrim(parse_url($sandbox_url, PHP_URL_PATH) ?: '/', '/') . '/';
+
+        $wpcfg  = "<?php\n/* CMS Tools sandbox — isolated test environment */\n";
         $wpcfg .= "define('DB_NAME', " . var_export($c_db['name'], true) . ");\n";
         $wpcfg .= "define('DB_USER', " . var_export($c_db['user'], true) . ");\n";
         $wpcfg .= "define('DB_PASSWORD', " . var_export($c_db['pass'], true) . ");\n";
         $wpcfg .= "define('DB_HOST', " . var_export($c_db['host'], true) . ");\n";
         $wpcfg .= "define('DB_CHARSET', 'utf8mb4');\n\$table_prefix = " . var_export($dst_prefix, true) . ";\n";
-        $wpcfg .= "define('WP_HOME', " . var_export($sandbox_url, true) . ");\ndefine('WP_SITEURL', " . var_export($sandbox_url, true) . ");\n";
+        if ($multisite) {
+            // Multisite defines must come BEFORE wp-settings.php is required.
+            $wpcfg .= "define('WP_ALLOW_MULTISITE', true);\ndefine('MULTISITE', true);\n";
+            $wpcfg .= "define('SUBDOMAIN_INSTALL', " . ($ms_subdomain ? 'true' : 'false') . ");\n";
+            $wpcfg .= "define('DOMAIN_CURRENT_SITE', " . var_export($ms_host, true) . ");\n";
+            $wpcfg .= "define('PATH_CURRENT_SITE', " . var_export($ms_path, true) . ");\n";
+            $wpcfg .= "define('SITE_ID_CURRENT_SITE', 1);\ndefine('BLOG_ID_CURRENT_SITE', 1);\n";
+        } else {
+            $wpcfg .= "define('WP_HOME', " . var_export($sandbox_url, true) . ");\ndefine('WP_SITEURL', " . var_export($sandbox_url, true) . ");\n";
+        }
         $wpcfg .= "define('WP_DEBUG', false);\nif (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');\nrequire_once ABSPATH . 'wp-settings.php';\n";
         @file_put_contents($dir . '/wp-config.php', $wpcfg);
         @chmod($dir . '/wp-config.php', 0600);
+
+        // Multisite .htaccess for the sandbox folder (its own; subdir ruleset).
+        if ($multisite && !$ms_subdomain) {
+            $msht = "RewriteEngine On\nRewriteBase {$ms_path}\nRewriteRule ^index\\.php$ - [L]\n"
+                . "RewriteRule ^(wp-(content|admin|includes).*) $1 [L]\n"
+                . "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
+                . "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\.php)$ $2 [L]\n"
+                . "RewriteRule . index.php [L]\n";
+            @file_put_contents($dir . '/.htaccess', $msht);
+        }
 
         // Make the sandbox DB copy actually usable: point siteurl/home at the
         // sandbox URL and convert absolute asset URLs to relative, so WordPress
@@ -3346,6 +3467,11 @@ if ($authenticated && isset($_GET['action'])) {
                 }
                 // Also deactivate plugins so the sandbox starts clean for plugin-by-plugin testing.
                 $pdo->prepare("UPDATE `{$dst_prefix}options` SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize([])]);
+
+                // Multisite: ensure the network tables exist in the copy and seed site 1.
+                if ($multisite) {
+                    $db_fixed['multisite'] = cms_ms_setup($pdo, $live_prefix, $dst_prefix, $ms_host, $ms_path, $ms_subdomain);
+                }
             } else {
                 $db_fixed['error'] = 'sandbox tables not found — replicate the database first';
             }
@@ -3353,7 +3479,7 @@ if ($authenticated && isset($_GET['action'])) {
 
         echo json_encode(['ok' => true, 'folder' => basename($dir), 'url' => $sandbox_url,
             'link_method' => $link_method, 'symlinks' => $n_symlinks, 'copied' => $n_copied,
-            'dst_prefix' => $dst_prefix, 'fresh' => $fresh, 'db' => $db_fixed]);
+            'dst_prefix' => $dst_prefix, 'fresh' => $fresh, 'multisite' => $multisite, 'db' => $db_fixed]);
         exit;
     }
 
@@ -3459,6 +3585,72 @@ if ($authenticated && isset($_GET['action'])) {
         $breaks = ($status >= 500) || $fatal;
         echo json_encode(['ok' => true, 'plugin' => $plugin, 'status' => $status, 'breaks' => $breaks,
             'loads' => ($status >= 200 && $status < 400 && !$fatal)]);
+        exit;
+    }
+
+    // --- SANDBOX MULTISITE: list sub-sites ---
+    if ($action === 'sandbox_ms_list_sites') {
+        $c_db = $sandbox_db();
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+        if (!$pdo->query("SHOW TABLES LIKE " . $pdo->quote($dst . 'blogs'))->fetchColumn()) {
+            echo json_encode(['ok' => true, 'multisite' => false, 'sites' => []]); exit;
+        }
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $sites = [];
+        foreach ($pdo->query("SELECT blog_id, domain, path FROM `{$dst}blogs` ORDER BY blog_id")->fetchAll(PDO::FETCH_ASSOC) as $b) {
+            $sites[] = ['blog_id' => (int)$b['blog_id'], 'url' => $proto . '://' . $b['domain'] . $b['path']];
+        }
+        echo json_encode(['ok' => true, 'multisite' => true, 'sites' => $sites]);
+        exit;
+    }
+
+    // --- SANDBOX MULTISITE: add a sub-site ---
+    if ($action === 'sandbox_ms_add_site') {
+        @set_time_limit(0);
+        $c_db = $sandbox_db();
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+        if (!$pdo->query("SHOW TABLES LIKE " . $pdo->quote($dst . 'blogs'))->fetchColumn()) {
+            echo json_encode(['ok' => false, 'error' => 'The sandbox is not a multisite network — rebuild it with multisite enabled']); exit;
+        }
+        // Primary site domain/path from blog 1.
+        $base = $pdo->query("SELECT domain, path FROM `{$dst}blogs` WHERE blog_id=1 LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: ['domain'=>($_SERVER['HTTP_HOST']??'localhost'),'path'=>'/'];
+        $subdomain = ($_POST['ms_type'] ?? 'subdir') === 'subdomain';
+        $res = cms_ms_add_site($pdo, $dst, $base['domain'], $base['path'],
+            $_POST['slug'] ?? '', trim($_POST['title'] ?? 'Sub site'), trim($_POST['email'] ?? 'admin@example.com'), $subdomain);
+        echo json_encode($res);
+        exit;
+    }
+
+    // --- SANDBOX: set active plugins to an arbitrary list (for all/bisection tests) ---
+    if ($action === 'sandbox_plugins_set') {
+        $c_db = $sandbox_db();
+        $list = json_decode($_POST['plugins'] ?? '[]', true); $list = is_array($list) ? array_values(array_filter($list)) : [];
+        $sandbox_url = trim($_POST['sandbox_url'] ?? '');
+        if ($sandbox_url === '') { echo json_encode(['ok' => false, 'error' => 'Missing sandbox URL']); exit; }
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $dst = $sandbox_prefix($c_db['prefix']);
+        if (!$pdo->query("SHOW TABLES LIKE " . $pdo->quote($dst . 'options'))->fetchColumn()) { echo json_encode(['ok' => false, 'error' => 'Sandbox tables not found — replicate first']); exit; }
+        $pdo->prepare("UPDATE `{$dst}options` SET option_value = ? WHERE option_name = 'active_plugins'")->execute([serialize($list)]);
+        // GET the sandbox home and classify.
+        $status = 0; $body = '';
+        if (function_exists('curl_init')) {
+            $ch = curl_init($sandbox_url . '/');
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 25, CURLOPT_SSL_VERIFYPEER => false]);
+            $body = (string)curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 25, 'ignore_errors' => true]]);
+            $body = (string)@file_get_contents($sandbox_url . '/', false, $ctx);
+            $hdrs = function_exists('http_get_last_response_headers') ? http_get_last_response_headers() : ($http_response_header ?? []);
+            if (isset($hdrs[0]) && preg_match('#\s(\d{3})\s#', $hdrs[0], $m)) $status = (int)$m[1];
+        }
+        $fatal = (stripos($body, 'Fatal error') !== false) || (stripos($body, 'There has been a critical error') !== false);
+        echo json_encode(['ok' => true, 'count' => count($list), 'status' => $status,
+            'breaks' => ($status >= 500 || $fatal), 'loads' => ($status >= 200 && $status < 400 && !$fatal)]);
         exit;
     }
 
@@ -6258,9 +6450,20 @@ foreach ($php_cfg_rows as $r):
 <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
     <?= h(t('Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.')) ?>
 </p>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:13px">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="te_multisite" onchange="document.getElementById('te_ms_type').disabled=!this.checked">
+        <?= h(t('Build as multisite network')) ?>
+    </label>
+    <select id="te_ms_type" disabled style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+        <option value="subdir"><?= h(t('Subdirectory')) ?></option>
+        <option value="subdomain"><?= h(t('Subdomain (needs wildcard DNS)')) ?></option>
+    </select>
+</div>
 <div class="actions" style="margin-bottom:10px">
     <button class="btn btn-primary" id="te_build_btn" onclick="teBuild()">🏗️ <?= h(t('Build sandbox')) ?></button>
-    <button class="btn btn-warning" id="te_plugins_btn" onclick="teSmokeTestPlugins()" style="display:none">🔌 <?= h(t('Smoke-test plugins')) ?></button>
+    <button class="btn btn-warning" id="te_plugins_btn" onclick="teSmokeTestPlugins()" style="display:none">🔌 <?= h(t('Test plugins one by one')) ?></button>
+    <button class="btn btn-warning" id="te_allplugins_btn" onclick="teTestAllPlugins()" style="display:none">🧩 <?= h(t('Test all plugins (find conflicts)')) ?></button>
     <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);display:none" id="te_stop" onclick="TE_ABORT=true">⏹ <?= h(t('Stop')) ?></button>
     <button class="btn btn-sm btn-danger" id="te_destroy_btn" onclick="teDestroy()" style="display:none">🗑️ <?= h(t('Destroy sandbox')) ?></button>
 </div>
@@ -6269,6 +6472,19 @@ foreach ($php_cfg_rows as $r):
     <div id="te_progress_txt" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
 </div>
 <div id="te_sandbox_info" style="font-size:12px;margin-bottom:10px"></div>
+
+<div id="te_ms_card" style="display:none;border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:10px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">🌐 <?= h(t('Multisite network')) ?></div>
+    <div id="te_ms_sites" style="font-size:12px;margin-bottom:8px"></div>
+    <div class="row">
+        <div class="field" style="margin:0"><label><?= h(t('Sub-site path/subdomain')) ?></label><input type="text" id="te_ms_slug" placeholder="site2"></div>
+        <div class="field" style="margin:0"><label><?= h(t('Title')) ?></label><input type="text" id="te_ms_title" placeholder="Second site"></div>
+    </div>
+    <div class="row">
+        <div class="field" style="margin:0"><label><?= h(t('Admin email')) ?></label><input type="email" id="te_ms_email" placeholder="admin@example.com"></div>
+        <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-sm btn-success" style="margin-top:0" onclick="teMsAddSite()">➕ <?= h(t('Add sub-site')) ?></button></div>
+    </div>
+</div>
 <div id="te_results" style="margin-bottom:10px"></div>
 
 <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
@@ -6561,10 +6777,13 @@ async function teBuild(){
         bar.style.width = pct + '%';
         ptxt.textContent = `${T_TE.replicating} ${done}/${start.tables.length} — ${tb.name} (${tb.rows} ${T_TE.rows})`;
     }
-    // 3) create the sandbox folder
+    // 3) create the sandbox folder (optionally as a multisite network)
     ptxt.textContent = T_TE.creatingFolder;
+    const cf = teCreds(new FormData());
+    const ms = document.getElementById('te_multisite').checked;
+    if (ms){ cf.append('multisite', '1'); cf.append('ms_type', document.getElementById('te_ms_type').value); }
     let sb;
-    try { const r = await fetch('?action=sandbox_create', {method:'POST', body:teCreds(new FormData())}); sb = await r.json(); }
+    try { const r = await fetch('?action=sandbox_create', {method:'POST', body:cf}); sb = await r.json(); }
     catch(e){ log('te_log','✗ '+e.message,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
     if (!sb.ok){ log('te_log','✗ '+sb.error,false); btn.disabled=false; btn.textContent='🏗️ Build sandbox'; return; }
     TE_SANDBOX = sb;
@@ -6572,16 +6791,81 @@ async function teBuild(){
     const dbline = dbinfo.siteurl
         ? `<span class="badge badge-ok">DB: siteurl set, ${dbinfo.relativized} ${T_TE.relativized}</span>`
         : `<span class="badge badge-err">DB: ${esc(dbinfo.error || 'not updated')}</span>`;
+    const msline = sb.multisite ? ` · <span class="badge badge-ok">${T_TE.multisite}</span>` : '';
     document.getElementById('te_sandbox_info').innerHTML =
         `✓ ${T_TE.sandboxReady}: <a href="${sb.url}/" target="_blank" style="color:#7dd3fc;font-family:monospace">${esc(sb.folder)}/</a><br>` +
         `<div style="margin-top:4px;font-size:11px;color:var(--text-dim)">` +
         `${T_TE.prefix}: <code>${esc(sb.dst_prefix)}</code> · ` +
         `<span class="badge ${sb.link_method==='symlink'?'badge-ok':'badge-warn'}">${sb.link_method}</span> ` +
-        `${sb.symlinks} ${T_TE.symlinks}, ${sb.copied} ${T_TE.copiedFiles} · ${dbline}</div>`;
-    log('te_log', `✓ ${start.count} tables replicated; sandbox created (${sb.symlinks} symlinks, ${sb.copied} copied); DB ${dbinfo.siteurl?'fixed':'NOT fixed'}.`, false);
+        `${sb.symlinks} ${T_TE.symlinks}, ${sb.copied} ${T_TE.copiedFiles} · ${dbline}${msline}</div>`;
+    log('te_log', `✓ ${start.count} tables replicated; sandbox created (${sb.symlinks} symlinks, ${sb.copied} copied); DB ${dbinfo.siteurl?'fixed':'NOT fixed'}${sb.multisite?'; multisite':''}.`, false);
     document.getElementById('te_plugins_btn').style.display = 'inline-flex';
+    document.getElementById('te_allplugins_btn').style.display = 'inline-flex';
     document.getElementById('te_destroy_btn').style.display = 'inline-flex';
+    // Multisite management card.
+    if (sb.multisite){ document.getElementById('te_ms_card').style.display = 'block'; teMsListSites(); }
+    else document.getElementById('te_ms_card').style.display = 'none';
     btn.disabled = false; btn.textContent = '🏗️ Rebuild sandbox';
+}
+
+// Test ALL plugins at once, then bisect to isolate the breaking plugin(s).
+async function teTestAllPlugins(){
+    if (!TE_SANDBOX){ alert('Build the sandbox first.'); return; }
+    let pl;
+    try { pl = await (await fetch('?action=sandbox_plugins_list', {method:'POST', body:teCreds(new FormData())})).json(); } catch(e){ log('te_log','✗ '+e.message,false); return; }
+    if (!pl.ok){ log('te_log','✗ '+pl.error,false); return; }
+    const all = pl.plugins.map(p=>p.file);
+    const out = document.getElementById('te_results');
+    const setAndTest = async (list) => {
+        const fd = teCreds(new FormData()); fd.append('plugins', JSON.stringify(list)); fd.append('sandbox_url', TE_SANDBOX.url);
+        try { return await (await fetch('?action=sandbox_plugins_set', {method:'POST', body:fd})).json(); } catch(e){ return {ok:false,breaks:true}; }
+    };
+    out.innerHTML = `<span style="color:var(--text-dim)">⏳ ${T_TE.testingAll} (${all.length})…</span>`;
+    const full = await setAndTest(all);
+    if (!full.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${full.error||'test failed'}</span>`; await setAndTest([]); return; }
+    if (!full.breaks){
+        out.innerHTML = `<div style="color:#6ee7b7">✓ ${T_TE.allTogetherOk} (${all.length} plugins, HTTP ${full.status}).</div>`;
+        await setAndTest([]); return;
+    }
+    // Bisect: find a minimal breaking subset.
+    out.innerHTML = `<span style="color:#fcd34d">⚠ ${T_TE.breaksAll} — ${T_TE.bisecting}…</span>`;
+    // Confirm each plugin alone is fine; collect the culprit via halving.
+    let suspects = all.slice();
+    while (suspects.length > 1){
+        const half = Math.ceil(suspects.length/2);
+        const a = suspects.slice(0, half), b = suspects.slice(half);
+        const ra = await setAndTest(a);
+        if (ra.breaks){ suspects = a; continue; }       // culprit in first half
+        const rb = await setAndTest(b);
+        if (rb.breaks){ suspects = b; continue; }        // culprit in second half
+        break; // neither half breaks alone -> it's a conflict across halves; stop at current set
+    }
+    await setAndTest([]); // restore clean
+    const names = suspects.map(f => (pl.plugins.find(p=>p.file===f)||{}).name || f);
+    out.innerHTML = suspects.length === 1
+        ? `<div style="color:#fca5a5">⚠ ${T_TE.culprit}: <strong>${esc(names[0])}</strong></div>`
+        : `<div style="color:#fca5a5">⚠ ${T_TE.minimalSet}: ${esc(names.join(', '))}</div><div style="font-size:11px;color:var(--text-dim)">${T_TE.conflictNote}</div>`;
+    log('te_log', `✓ All-plugins test: breaking subset = ${names.join(', ')}`, false);
+}
+
+// Multisite sub-site management.
+async function teMsListSites(){
+    const el = document.getElementById('te_ms_sites');
+    let j; try { j = await (await fetch('?action=sandbox_ms_list_sites', {method:'POST', body:teCreds(new FormData())})).json(); } catch(e){ return; }
+    if (!j.ok || !j.multisite){ el.innerHTML = ''; return; }
+    el.innerHTML = `<div style="color:var(--text-dim);margin-bottom:4px">${T_TE.subSites} (${j.sites.length}):</div>` +
+        j.sites.map(s => `<div style="font-family:monospace;font-size:11px">#${s.blog_id} <a href="${s.url}" target="_blank" style="color:#7dd3fc">${esc(s.url)}</a></div>`).join('');
+}
+async function teMsAddSite(){
+    const slug = document.getElementById('te_ms_slug').value.trim();
+    if (!slug){ alert(T_TE.needSlug); return; }
+    const fd = teCreds(new FormData());
+    fd.append('slug', slug); fd.append('title', document.getElementById('te_ms_title').value || slug);
+    fd.append('email', document.getElementById('te_ms_email').value || 'admin@example.com');
+    fd.append('ms_type', document.getElementById('te_ms_type').value);
+    const j = await (await fetch('?action=sandbox_ms_add_site', {method:'POST', body:fd})).json();
+    log('te_log', j.ok ? `✓ ${T_TE.subSiteAdded} #${j.blog_id}: ${j.url} (${j.tables_created} tables)` : `✗ ${j.error}`, false);
+    if (j.ok){ document.getElementById('te_ms_slug').value=''; teMsListSites(); }
 }
 
 async function teSmokeTestPlugins(){
@@ -6819,6 +7103,12 @@ const T_TE = {
     noSandboxInstall: <?= json_encode(t('No sandbox yet — install directly into the live site?')) ?>,
     breaksSandbox: <?= json_encode(t('breaks the sandbox')) ?>, notLive: <?= json_encode(t('Not installing live.')) ?>,
     loadsSandbox: <?= json_encode(t('loads fine in the sandbox')) ?>, offerLive: <?= json_encode(t('%s passed the test. Install it into the live site now?')) ?>,
+    multisite: <?= json_encode(t('multisite')) ?>, testingAll: <?= json_encode(t('Testing all plugins together')) ?>,
+    allTogetherOk: <?= json_encode(t('All plugins load together')) ?>, breaksAll: <?= json_encode(t('The site breaks with all plugins active')) ?>,
+    bisecting: <?= json_encode(t('isolating the culprit')) ?>, culprit: <?= json_encode(t('Breaking plugin')) ?>,
+    minimalSet: <?= json_encode(t('Minimal breaking set')) ?>, conflictNote: <?= json_encode(t('These plugins conflict with each other.')) ?>,
+    subSites: <?= json_encode(t('Sub-sites')) ?>, needSlug: <?= json_encode(t('Enter a sub-site path/subdomain')) ?>,
+    subSiteAdded: <?= json_encode(t('Sub-site added')) ?>,
 };
 
 // Light/dark toggle: flips data-theme live and remembers it in a cookie (read

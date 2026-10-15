@@ -114,6 +114,11 @@ plugin** one by one against the sandbox (flagging any that 500 / fatal), **vet n
 wordpress.org API before installing them live, run a **PHP-compatibility** check, and produce a
 report. Tables and folder are disposable.
 
+The sandbox can optionally be built as a **multisite network** (subdirectory or subdomain),
+creating the network tables in the copy and offering a form to **add sub-sites** to exercise
+multisite. Besides the one-by-one smoke test, a **test-all-plugins** run activates every plugin at
+once and, if the site breaks, **bisects** to the minimal conflicting plugin set.
+
 ### Database export and import
 
 - **Export** the full database via `mysqldump` (when available) or a pure-PHP PDO
@@ -295,6 +300,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| `cms 3.12.0` | Sandbox can be built as a WordPress multisite network (fixing its DB copy and network tables) with a form to add sub-sites; new "test all plugins" that activates everything at once and bisects to the conflicting plugin(s) |
 | `cms 3.11.0` | Renamed `migrate_wordpress.php` to `cms_tools.php`; detects the CMS on load (WordPress, Joomla, Drupal, MediaWiki) and reads DB credentials from its config, so export/import and phpMyAdmin work for all four (other tools remain WordPress-only) |
 | `migrate 3.10.0` | Performance options (gzip, browser cache, static page cache, performance check with external-tool links); disk cleanup for orphan uploads and large/suspicious files; Apache capability tests; sandbox now fixes its DB-copy URL and relativizes assets; install popular/searched plugins into the sandbox and vet before going live |
 | `migrate 3.6.0` | phpMyAdmin temporary access time is now configurable (5/15/30/60 min); automatic asset recovery while browsing via an `.htaccess` fallback that fetches missing `/wp-content/` files from the original site on the fly, with a choice of placeholder/nothing/404 for images |
