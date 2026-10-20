@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.15.0');
+define('TOOL_VERSION',  '3.16.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -261,6 +261,9 @@ $GLOBALS['__I18N'] = [
         'Save origin'                         => 'Guardar origen',
         'Scan for missing assets'             => 'Buscar archivos faltantes',
         'Download missing from origin'        => 'Descargar faltantes del origen',
+        'Copy list'                           => 'Copiar lista',
+        'missing file(s)'                     => 'archivo(s) faltante(s)',
+        'Copied'                              => 'Copiado',
         // Automatic asset recovery (.htaccess)
         'Automatic recovery while browsing (.htaccess)' => 'Recuperación automática al navegar (.htaccess)',
         'Routes any missing /wp-content/ file to a fallback that downloads it from the original site on the fly and caches it, so the site fills in as visitors browse. Tested safely before touching .htaccess. For images, choose what to show when the file is not at the origin either.'
@@ -6192,6 +6195,13 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <div id="ar_progress_txt" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
 </div>
 <div id="ar_log" class="log" style="display:none"></div>
+<div id="ar_missing_list" style="display:none;margin-top:10px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <strong style="font-size:12px" id="ar_missing_title"></strong>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted)" onclick="copyMissingAssets(this)">📋 <?= h(t('Copy list')) ?></button>
+    </div>
+    <div id="ar_missing_items" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:monospace;font-size:11px;line-height:1.6"></div>
+</div>
 
 <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">⚡ <?= h(t('Automatic recovery while browsing (.htaccess)')) ?></div>
@@ -7208,12 +7218,34 @@ async function scanMissingAssets(){
         else {
             AR_MISSING = j.missing || [];
             log('ar_log', `Scanned ${j.total_refs} asset reference(s): ${j.missing_count} missing on disk.`, false);
+            renderMissingAssets();
             const rbtn = document.getElementById('ar_recover_btn');
             if (AR_MISSING.length && document.getElementById('ar_origin').value.trim()) rbtn.style.display = 'inline-flex';
             else if (AR_MISSING.length) log('ar_log', 'Set the original site URL above to recover them.', false);
         }
     } catch(e){ log('ar_log', '✗ ' + e.message, false); }
     btn.disabled = false; btn.textContent = '🔍 Scan for missing assets';
+}
+
+// Lists the exact missing asset paths found by the scan, so the user can see which
+// files are gone (and copy them) instead of only a count.
+function renderMissingAssets(){
+    const box = document.getElementById('ar_missing_list');
+    const items = document.getElementById('ar_missing_items');
+    const title = document.getElementById('ar_missing_title');
+    if (!AR_MISSING.length){ box.style.display = 'none'; items.innerHTML = ''; return; }
+    title.textContent = `${AR_MISSING.length} ${T_AR.missingFiles}`;
+    items.innerHTML = AR_MISSING.map((p, i) =>
+        `<div id="ar_miss_${i}" style="padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(p)}">${esc(p)}</div>`
+    ).join('');
+    box.style.display = 'block';
+}
+function copyMissingAssets(btn){
+    const text = AR_MISSING.join('\n');
+    navigator.clipboard?.writeText(text).then(() => {
+        const old = btn.textContent; btn.textContent = '✓ ' + T_AR.copied;
+        setTimeout(() => { btn.textContent = old; }, 1500);
+    });
 }
 
 async function recoverAssets(){
@@ -7232,7 +7264,13 @@ async function recoverAssets(){
         try {
             const r = await fetch('?action=asset_recover', {method:'POST', body:fd});
             const j = await r.json();
-            if (j.ok) j.results.forEach(res => { res.ok ? ok++ : fail++; });
+            if (j.ok) j.results.forEach(res => {
+                res.ok ? ok++ : fail++;
+                // Mark the matching row so the user sees exactly what was recovered.
+                const idx = AR_MISSING.indexOf(res.path);
+                const row = idx >= 0 && document.getElementById('ar_miss_' + idx);
+                if (row){ row.style.color = res.ok ? '#6ee7b7' : '#f87171'; row.textContent = (res.ok ? '✓ ' : '✗ ') + row.textContent.replace(/^[✓✗]\s*/, ''); }
+            });
         } catch(e){ fail += slice.length; }
         done += slice.length;
         const pct = Math.round(done / AR_MISSING.length * 100);
@@ -7273,6 +7311,7 @@ const T_AR = {
     active: <?= json_encode(t('Active')) ?>, inactive: <?= json_encode(t('Inactive')) ?>,
     enabled: <?= json_encode(t('Auto-recovery enabled')) ?>, disabled: <?= json_encode(t('Auto-recovery disabled')) ?>,
     needOrigin: <?= json_encode(t('Set the original site URL first.')) ?>,
+    missingFiles: <?= json_encode(t('missing file(s)')) ?>, copied: <?= json_encode(t('Copied')) ?>,
 };
 document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('ar_auto_status')) autoRecoverStatus(); });
 

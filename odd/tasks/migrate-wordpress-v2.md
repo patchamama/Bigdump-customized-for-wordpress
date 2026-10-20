@@ -200,6 +200,13 @@ Delivered in phases, one commit per phase. Release at the end.
       .htaccess and a deleted robots.txt, active_plugins restored byte-exact, traversal rejected.
       Endpoints sit behind the auth gate (snapshot_list returns the login page when unauthenticated).
 
+## v3.16 — list the missing assets found by the recovery scanner
+- [x] v3.16.0: `assets_scan` already returned the full `missing[]` array and the front stored it in
+      AR_MISSING, but only a count was shown. Added `renderMissingAssets()` (scrollable monospace
+      panel, each path with a title tooltip), a `copyMissingAssets()` Copy-list button, and per-row
+      recovery marking (green ✓ / red ✗ keyed by result.path) inside `recoverAssets()`. Bilingual.
+      No backend change needed. php -l OK, HTTP 200.
+
 ## Notes
 - README already rewritten + pushed (commit e0b5ea7): modern, tech badges, no emojis,
   both tools documented, curl download.
