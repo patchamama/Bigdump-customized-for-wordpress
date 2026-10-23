@@ -148,6 +148,13 @@ $GLOBALS['__I18N'] = [
             => 'El acceso está protegido por una contraseña cifrada propia. Definí una nueva abajo para rotarla.',
         'Access currently uses the wp-config.php database password. Set a custom encrypted password below to use that instead.'
             => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
+        'Report' => 'Reporte',
+        'Generate report' => 'Generar reporte',
+        'Download JSON' => 'Descargar JSON',
+        'Read-only local audit. No WordPress code is executed. Unavailable checks are not successful checks. Review the JSON before sharing.'
+            => 'Auditoría local de solo lectura. No se ejecuta código de WordPress. Las comprobaciones no disponibles no son exitosas. Revisá el JSON antes de compartirlo.',
+        'Generating…' => 'Generando…',
+        'Report generation failed. Please log in again or retry.' => 'No se pudo generar el reporte. Ingresá nuevamente o reintentá.',
         // Header
         'Download tool'                       => 'Descargar herramienta',
         'Toggle light/dark'                   => 'Alternar claro/oscuro',
@@ -1522,8 +1529,231 @@ if (isset($_GET['action']) && $_GET['action'] === 'download') {
     exit;
 }
 
+// A separate collector: never reuse diagnostics that load PHP, reveal users or repair a site.
+function collect_site_report($db, $root, $wp_config_path, $is_wordpress) {
+    $report = [
+        'schema' => 'cms-tools-site-report', 'schema_version' => 1,
+        'generated_at' => gmdate('c'), 'tool_version' => TOOL_VERSION,
+        'scope' => [
+            'read_only' => true, 'wordpress_bootstrapped' => false,
+            'limits' => ['entries_per_directory' => 200, 'headers_per_inventory' => 400,
+                'header_bytes' => 8192, 'total_read_bytes' => 4194304, 'tables' => 200],
+            'excluded' => ['credentials', 'raw_config', 'logs', 'personal_content', 'user_records'],
+            'limitations' => ['Local indicators only; no vulnerability feed, HTTP probes or integrity verification.',
+                'Custom content paths, network activation and dynamically computed configuration are not resolved.',
+                'Database table row counts are estimates; inventories may be truncated.'],
+        ],
+        'filename' => 'site-report.json', 'site' => ['domain' => null, 'settings' => null],
+        'wordpress' => ['version' => null, 'plugins' => [], 'themes' => []],
+        'php' => ['version' => PHP_VERSION, 'config' => [], 'extensions' => []],
+        'mysql' => ['version' => null, 'tables' => null],
+        'summary' => ['critical' => 0, 'warning' => 0, 'ok' => 0, 'unavailable' => 0],
+        'findings' => [],
+    ];
+    $add = function ($id, $severity, $message) use (&$report) {
+        $report['findings'][] = ['id' => $id, 'severity' => $severity,
+            'availability' => $severity === 'unavailable' ? 'unavailable' : 'available', 'message' => $message];
+        $report['summary'][$severity]++;
+    };
+    // Do not follow symlinks or export file contents, paths, errors or arbitrary ini values.
+    $safe = function ($path) use ($root) {
+        if (strpos($path, $root . '/') !== 0) return false;
+        $part = $root;
+        foreach (explode('/', substr($path, strlen($root) + 1)) as $segment) {
+            $part .= '/' . $segment;
+            if ($segment === '..' || is_link($part)) return false;
+        }
+        return true;
+    };
+    $readBytes = 0;
+    $read = function ($path, $limit = 8192) use ($safe, &$readBytes, $add) {
+        if (!$safe($path) || !is_file($path) || !is_readable($path)) return null;
+        if ($readBytes + $limit > 4194304) {
+            $add('inventory.read_limit', 'unavailable', 'Read budget exhausted; remaining metadata unavailable.');
+            return null;
+        }
+        $readBytes += $limit;
+        $handle = @fopen($path, 'rb');
+        if (!$handle) return null;
+        $text = fread($handle, $limit);
+        fclose($handle);
+        return $text === false ? null : $text;
+    };
+    $entries = function ($path) use ($add, $safe) {
+        if (!$safe($path) || !is_dir($path) || !is_readable($path)) return null;
+        $result = [];
+        $visited = 0;
+        try {
+            foreach (new DirectoryIterator($path) as $file) {
+                if ($file->isDot()) continue;
+                if ($visited++ === 200) {
+                    $add('inventory.limit', 'unavailable', 'Directory inventory truncated at 200 entries.');
+                    break;
+                }
+                if (!$file->isLink()) $result[] = $file->getFilename();
+            }
+        } catch (Throwable $e) { return null; }
+        sort($result);
+        return $result;
+    };
+    $version = function ($text, $pattern) {
+        return $text !== null && preg_match($pattern, $text, $m) ? $m[1] : null;
+    };
+    $add('php.version', version_compare(PHP_VERSION, '8.2', '<') ? 'warning' : 'ok',
+        'PHP version recorded; check current vendor support dates separately.');
+    foreach (['memory_limit', 'max_execution_time', 'upload_max_filesize', 'post_max_size'] as $key) {
+        $value = ini_get($key);
+        $report['php']['config'][$key] = $value !== false && preg_match('/^-?[0-9]+[KMG]?$/i', $value) ? $value : null;
+    }
+    foreach (['display_errors', 'expose_php', 'allow_url_include'] as $key) {
+        $value = ini_get($key);
+        $enabled = $value === false ? null : in_array(strtolower($value), ['1', 'on', 'yes', 'true'], true);
+        $report['php']['config'][$key] = $enabled;
+        $add('php.' . $key, $enabled === null ? 'unavailable' : ($enabled ? 'warning' : 'ok'),
+            $key . ($enabled === null ? ' unavailable.' : ($enabled ? ' enabled.' : ' disabled.')));
+    }
+    foreach (['pdo_mysql', 'mysqli', 'curl', 'openssl', 'mbstring', 'zip', 'gd', 'intl', 'fileinfo', 'Zend OPcache'] as $extension) {
+        $loaded = extension_loaded($extension);
+        $report['php']['extensions'][$extension] = $loaded;
+        $add('php.extension.' . $extension, $loaded ? 'ok' : 'warning', $extension . ($loaded ? ' loaded.' : ' not loaded.'));
+    }
+    $cfg = $is_wordpress && $wp_config_path ? $read($wp_config_path, 65536) : null;
+    foreach (['WP_DEBUG', 'DISALLOW_FILE_EDIT', 'FORCE_SSL_ADMIN', 'WP_CACHE'] as $constant) {
+        $literal = null;
+        if ($cfg !== null && preg_match('/define\s*\(\s*[\'"]' . $constant . '[\'"]\s*,\s*(true|false)\s*\)/i', $cfg, $m)) {
+            $literal = strtolower($m[1]) === 'true';
+        }
+        $risk = $constant === 'WP_DEBUG' ? $literal === true : $literal === false;
+        $add('wordpress.' . strtolower($constant), $literal === null ? 'unavailable' : ($risk ? 'warning' : 'ok'),
+            $constant . ($literal === null ? ' not available as a literal boolean.' : ($literal ? ' true (static inspection).' : ' false (static inspection).')));
+    }
+    if ($is_wordpress) {
+        $report['wordpress']['version'] = $version($read($root . '/wp-includes/version.php'), '/\$wp_version\s*=\s*[\'"]([0-9]+(?:\.[0-9]+){1,3})[\'"]/');
+    }
+    $add('wordpress.version', $report['wordpress']['version'] === null ? 'unavailable' : 'ok',
+        'WordPress core version ' . ($report['wordpress']['version'] === null ? 'unavailable.' : 'read without executing PHP; update status not checked.'));
+    $options = null;
+    $pdo = null;
+    // Only the detected WordPress credentials, never caller-supplied connection parameters.
+    if ($is_wordpress && !empty($db['name']) && preg_match('/^[a-zA-Z0-9_]{1,64}$/D', $db['prefix'])) {
+        try {
+            $pdo = new PDO("mysql:host={$db['host']};dbname={$db['name']};charset=utf8mb4", $db['user'], $db['pass'],
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]);
+        } catch (Throwable $e) { /* Errors may include credentials or hostnames; do not export them. */ }
+    }
+    $query = function ($sql) use ($pdo) {
+        if (!$pdo) return null;
+        try { return $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC); } catch (Throwable $e) { return null; }
+    };
+    if ($pdo) {
+        $rows = $query('SELECT VERSION()');
+        $raw = $rows ? (string)array_values($rows[0])[0] : '';
+        $report['mysql']['version'] = preg_match('/^([0-9]+\.[0-9]+\.[0-9]+)(?:[-.].*MariaDB)?/i', $raw, $m) ? $m[1] . (stripos($raw, 'MariaDB') !== false ? '-MariaDB' : '') : null;
+        $rows = $query("SELECT option_name, LEFT(option_value, 65537) AS option_value FROM `{$db['prefix']}options` WHERE option_name IN ('siteurl','home','blog_public','permalink_structure','users_can_register','default_role','timezone_string','stylesheet','template','active_plugins') LIMIT 10");
+        if ($rows !== null) {
+            $options = [];
+            foreach ($rows as $row) if (strlen($row['option_value']) <= 65536) $options[$row['option_name']] = $row['option_value'];
+        }
+        // Never emit custom table names: they can contain identifying data.
+        $rows = $query('SELECT TABLE_NAME AS table_name, ENGINE AS engine, TABLE_ROWS AS table_rows, DATA_LENGTH AS data_length, INDEX_LENGTH AS index_length FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() LIMIT 201');
+        if ($rows !== null) {
+            $report['mysql']['tables'] = [];
+            foreach (array_slice($rows, 0, 200) as $row) {
+                $suffix = substr($row['table_name'], strlen($db['prefix']));
+                if (strpos($row['table_name'], $db['prefix']) !== 0 || !in_array($suffix, ['posts','postmeta','comments','commentmeta','options','terms','termmeta','term_taxonomy','term_relationships','users','usermeta','links'], true)) continue;
+                $report['mysql']['tables'][] = ['table' => $suffix,
+                    'engine' => in_array($row['engine'], ['InnoDB','MyISAM','MEMORY','Aria'], true) ? $row['engine'] : null,
+                    'estimated_rows' => $row['table_rows'] === null ? null : (int)$row['table_rows'],
+                    'data_bytes' => (int)$row['data_length'], 'index_bytes' => (int)$row['index_length']];
+            }
+            if (count($rows) > 200) $add('mysql.tables.limit', 'unavailable', 'Table inventory truncated at 200 entries.');
+        }
+    }
+    foreach (['version','tables'] as $field) $add('mysql.' . $field, $report['mysql'][$field] === null ? 'unavailable' : 'ok',
+        'MySQL ' . $field . ($report['mysql'][$field] === null ? ' unavailable.' : ' collected (table counts are estimates).'));
+    $host = isset($options['siteurl']) ? parse_url($options['siteurl'], PHP_URL_HOST) : null;
+    if (is_string($host) && strlen($host) <= 253 && preg_match('/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iD', $host)) {
+        $report['site']['domain'] = strtolower($host);
+        $report['filename'] = strtolower($host) . '.json';
+    }
+    $add('site.domain', $report['site']['domain'] === null ? 'unavailable' : 'ok', 'Domain ' . ($report['site']['domain'] === null ? 'unavailable; not inferred from request Host or WP constants.' : 'derived from WordPress siteurl; credentials, path and query excluded.'));
+    $settings = [];
+    foreach (['blog_public','users_can_register'] as $key) $settings[$key] = isset($options[$key]) && in_array($options[$key], ['0','1'], true) ? $options[$key] === '1' : null;
+    $settings['pretty_permalinks'] = isset($options['permalink_structure']) ? $options['permalink_structure'] !== '' : null;
+    $settings['default_role'] = isset($options['default_role']) && in_array($options['default_role'], ['subscriber','contributor','author','editor','administrator'], true) ? $options['default_role'] : null;
+    $report['site']['settings'] = $settings;
+    $registrationUnknown = $settings['users_can_register'] === null || ($settings['users_can_register'] && $settings['default_role'] === null);
+    $add('site.registration', $registrationUnknown ? 'unavailable' : ($settings['users_can_register'] && $settings['default_role'] !== 'subscriber' ? 'critical' : 'ok'), 'Public registration and default role assessed only when available.');
+    foreach (['blog_public'=>'Search engine indexing', 'pretty_permalinks'=>'Pretty permalinks'] as $key=>$label) {
+        $add('seo.' . $key, $settings[$key] === null ? 'unavailable' : ($settings[$key] ? 'ok' : 'warning'), $label . ($settings[$key] === null ? ' unavailable.' : ($settings[$key] ? ' enabled.' : ' disabled.')));
+    }
+    $scheme = isset($options['siteurl']) ? parse_url($options['siteurl'], PHP_URL_SCHEME) : null;
+    $add('security.https', $scheme === null || $scheme === false ? 'unavailable' : ($scheme === 'https' ? 'ok' : 'warning'), 'HTTPS based on stored siteurl only; TLS not probed.');
+    $active = null;
+    if (isset($options['active_plugins'])) {
+        $decoded = @unserialize($options['active_plugins'], ['allowed_classes' => false]);
+        if (is_array($decoded) && count($decoded) <= 200 && count(array_filter($decoded, 'is_string')) === count($decoded)) $active = $decoded;
+    }
+    $add('wordpress.activity', $active === null ? 'unavailable' : 'ok', 'Single-site plugin activation ' . ($active === null ? 'unavailable.' : 'read; network activation is not assessed.'));
+    foreach (['plugins','themes'] as $kind) {
+        $directory = $root . '/wp-content/' . $kind;
+        $list = $is_wordpress ? $entries($directory) : null;
+        $add('wordpress.' . $kind, $list === null ? 'unavailable' : 'ok', ucfirst($kind) . ($list === null ? ' directory unavailable.' : ' bounded default-directory inventory.'));
+        $seen = 0;
+        $inspected = 0;
+        foreach ($list ?? [] as $entry) {
+            if (!preg_match('/^[a-z0-9_.-]{1,100}$/iD', $entry)) continue;
+            $files = $kind === 'themes' ? ['style.css'] : (is_dir($directory . '/' . $entry) ? $entries($directory . '/' . $entry) : [$entry]);
+            foreach ($files ?? [] as $file) {
+                if ($kind === 'plugins' && substr($file, -4) !== '.php') continue;
+                if (!preg_match('/^[a-z0-9_.-]{1,100}$/iD', $file)) continue;
+                $relative = $kind === 'plugins' && !is_dir($directory . '/' . $entry) ? $file : $entry . '/' . $file;
+                if ($inspected++ >= 400) { $add('wordpress.' . $kind . '.scan_limit', 'unavailable', 'Header scan truncated at 400 files.'); break 2; }
+                $text = $read($directory . '/' . $relative);
+                if ($text === null || !preg_match('/^[ \t\/*#]*' . ($kind === 'plugins' ? 'Plugin' : 'Theme') . ' Name\s*:/mi', $text)) continue;
+                if ($seen++ >= 200) { $add('wordpress.' . $kind . '.limit', 'unavailable', 'Inventory truncated at 200 components.'); break 2; }
+                $v = $version($text, '/^[ \t\/*#]*Version:\s*([0-9]+(?:\.[0-9]+){0,3}(?:[-+][a-z0-9.-]{1,30})?)\s*$/mi');
+                $activity = $kind === 'plugins' ? ($active === null ? null : in_array($relative, $active, true)) : (isset($options['stylesheet'], $options['template']) ? in_array($entry, [$options['stylesheet'], $options['template']], true) : null);
+                $report['wordpress'][$kind][] = ['id' => $relative, 'version' => $v, 'active' => $activity];
+                if ($v === null) $add('wordpress.' . $kind . '.version', 'unavailable', 'A component version header is unavailable.');
+            }
+        }
+    }
+    foreach (['.maintenance','readme.html','xmlrpc.php','debug.log','wp-content/debug.log'] as $file) {
+        $path = $root . '/' . $file;
+        $available = $is_wordpress && $safe($path) && is_readable(dirname($path));
+        $present = is_file($path);
+        $add('filesystem.' . $file, !$available ? 'unavailable' : ($present ? 'warning' : 'ok'), $file . (!$available ? ' not assessed; WordPress or directory unavailable.' : ($present ? ' present; HTTP exposure not tested.' : ' not present.')));
+    }
+    $perms = $wp_config_path ? @fileperms($wp_config_path) : false;
+    $add('security.config_permissions', $perms === false ? 'unavailable' : (($perms & 0004) ? 'critical' : 'ok'),
+        $perms === false ? 'Config permissions unavailable.' : (($perms & 0004) ? 'Config is world-readable; restrict permissions.' : 'Config is not world-readable.'));
+    $robots = $is_wordpress ? $read($root . '/robots.txt') : null;
+    $add('seo.robots', $robots === null ? 'unavailable' : (preg_match('/^\s*Disallow:\s*\/\s*$/mi', $robots) ? 'warning' : 'ok'),
+        $robots === null ? 'robots.txt unavailable; virtual robots not checked.' : 'Static robots.txt inspected for root disallow; no contents exported.');
+    $add('seo.sitemap', 'unavailable', 'Dynamic sitemap, page titles, meta descriptions and canonical tags not checked without executing WordPress.');
+    $add('security.updates', 'unavailable', 'Core/plugin/theme update and vulnerability status not verified offline.');
+    return $report;
+}
+
 if ($authenticated && isset($_GET['action'])) {
     $action = $_GET['action'];
+
+    if ($action === 'site_report') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            header('Allow: POST');
+            echo json_encode(['error' => 'Explicit POST generation required.']);
+            exit;
+        }
+        $report = collect_site_report($db, rtrim($abspath, '/'), $wp_config_path, $detected_cms === 'wordpress');
+        if (isset($_GET['download'])) header('Content-Disposition: attachment; filename="' . $report['filename'] . '"');
+        echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
 
     // --- RELOAD WP-CONFIG ---
     if ($action === 'get_wpconfig') {
@@ -6511,6 +6741,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <button class="tab active" onclick="showTab('export')">📤 <?= h(t('Export (Origin)')) ?></button>
     <button class="tab" onclick="showTab('import')">📥 <?= h(t('Import (Destination)')) ?></button>
     <button class="tab" onclick="showTab('tools')">🛠️ <?= h(t('DB Tools')) ?></button>
+    <button class="tab" onclick="showTab('report')">📋 <?= h(t('Report')) ?></button>
     <button class="tab" onclick="showTab('news')">📰 <?= h(t('News')) ?></button>
     <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
 </div>
@@ -6667,6 +6898,60 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 
 </div><!-- /import -->
+
+<!-- ===== REPORT TAB ===== -->
+<div id="tab-report" class="section">
+<div class="card">
+<h2>📋 <?= h(t('Report')) ?></h2>
+<p style="margin-bottom:16px"><?= h(t('Read-only local audit. No WordPress code is executed. Unavailable checks are not successful checks. Review the JSON before sharing.')) ?></p>
+<button type="button" class="btn btn-primary" id="report_generate" onclick="generateSiteReport()"
+    data-busy="<?= h(t('Generating…')) ?>" data-error="<?= h(t('Report generation failed. Please log in again or retry.')) ?>"><?= h(t('Generate report')) ?></button>
+<button type="button" class="btn" id="report_download" onclick="downloadSiteReport()" disabled><?= h(t('Download JSON')) ?></button>
+<p id="report_status" role="status" style="margin:16px 0"></p>
+<pre id="report_output" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:600px;overflow:auto"></pre>
+</div>
+</div>
+<script>
+let generatedSiteReport = null;
+async function generateSiteReport() {
+    const button = document.getElementById('report_generate');
+    const download = document.getElementById('report_download');
+    const status = document.getElementById('report_status');
+    const output = document.getElementById('report_output');
+    const label = button.textContent;
+    generatedSiteReport = null;
+    download.disabled = true;
+    button.disabled = true;
+    button.textContent = button.dataset.busy;
+    output.textContent = '';
+    status.textContent = '';
+    try {
+        const response = await fetch('?action=site_report', {method: 'POST', credentials: 'same-origin'});
+        if (!response.ok) throw new Error('Report unavailable');
+        const report = await response.json();
+        if (report.schema !== 'cms-tools-site-report') throw new Error('Invalid report');
+        generatedSiteReport = report;
+        status.textContent = Object.entries(report.summary).map(([level, count]) => `${level}: ${count}`).join(' | ');
+        output.textContent = JSON.stringify(report, null, 2);
+        download.disabled = false;
+    } catch (_) {
+        status.textContent = button.dataset.error;
+    } finally {
+        button.disabled = false;
+        button.textContent = label;
+    }
+}
+function downloadSiteReport() {
+    if (!generatedSiteReport) return;
+    const blob = new Blob([JSON.stringify(generatedSiteReport, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = generatedSiteReport.filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+</script>
 
 <!-- ===== INFO TAB ===== -->
 <div id="tab-info" class="section">

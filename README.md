@@ -54,6 +54,40 @@ A password-protected control panel for migrating and maintaining a WordPress sit
 It reads database credentials from `wp-config.php` automatically and drives every
 operation over PDO/mysqli.
 
+### Site report / Reporte (read-only JSON)
+
+1. Log in and open **Report** (**Reporte** in Spanish).
+2. Click **Generate report** to inspect local metadata. Nothing runs automatically
+   when opening the tab.
+3. Review the displayed JSON, then click **Download JSON**. The download preserves
+   the displayed report and its generation timestamp; it does not run another audit.
+
+The versioned `cms-tools-site-report` schema includes UTC generation time, scope and
+limits, PHP configuration/extension indicators, WordPress core and component versions,
+single-site plugin/theme activity, allowlisted site settings, MySQL version and standard
+WordPress table sizes/estimated row counts. Findings and summary counts distinguish
+`critical`, `warning`, `ok`, and **`unavailable`**. An unavailable check is never a pass;
+a report still works without WordPress or a database connection.
+
+| Boundary | Behavior |
+| --- | --- |
+| Privacy | No credentials, tokens, salts, raw configuration/logs, user records, emails, or personal content. Only selected metadata is exported. |
+| Read-only | Does not bootstrap WordPress or execute plugins/themes, probe the website, toggle plugins, repair tables, or modify site files. |
+| Filename | Uses the lowercase domain from the database's authoritative WordPress `siteurl`, excluding URL credentials/path/query. Falls back to `site-report.json`, never the browser's Host header. |
+| Limits | Default `wp-content/plugins` and `themes` only; bounded headers, directories and table metadata. Network activation/custom content paths are not resolved. Truncation is explicit. |
+| Interpretation | Local indicators, not a vulnerability scan or assurance of safety. Current update/support status, TLS, dynamic SEO output and file integrity are not verified. Table row counts are estimates. |
+
+The report remains in browser memory until refresh or regeneration; it is not saved on
+the server. Treat exported infrastructure metadata as private and review it before
+sharing. Private GitHub export and encrypted browser persistence are not implemented.
+The authenticated HTTP endpoint is `POST ?action=site_report`; add `&download=1` for a
+JSON attachment (this generates a fresh report).
+
+Run isolated synthetic HTTP coverage with `php tests/site-report.php`, then lint with
+`php -l cms_tools.php`. The runner uses a temporary installation and a namespaced PDO
+fixture, never a real database or the deployment's configuration. Temporary synthetic
+artifacts are left in the system temporary directory for inspection.
+
 ### Quick update (one-click post-migration)
 
 Given only the real DB credentials, the tool knows the **old** site URL (from the database) and
