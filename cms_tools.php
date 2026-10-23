@@ -12,7 +12,7 @@
 // Para cambiar la contraseña, ejecutar:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // y reemplazar PASSWORD_HASH abajo.
-define('TOOL_VERSION',  '3.16.0');
+define('TOOL_VERSION',  '3.17.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
 
@@ -200,6 +200,30 @@ $GLOBALS['__I18N'] = [
         'Access to this tool requires the wp-config database password by default; set your own encrypted password from the Access Password card.'
             => 'El acceso a esta herramienta requiere por defecto la contraseña de la base de datos de wp-config; establecé tu propia contraseña cifrada desde la tarjeta Contraseña de acceso.',
         'Environment Status'                  => 'Estado del entorno',
+        'PHP version'                         => 'Versión de PHP',
+        // News
+        'News'                                => 'Noticias',
+        'WordPress News'                      => 'Noticias de WordPress',
+        'Latest posts from the official WordPress.org news feed. Security or critical releases are highlighted and also shown as a banner at the top of the tool.'
+            => 'Últimas publicaciones del feed oficial de noticias de WordPress.org. Las versiones de seguridad o críticas se resaltan y además se muestran como un aviso en la parte superior de la herramienta.',
+        'Refresh news'                        => 'Actualizar noticias',
+        'Loading news…'                       => 'Cargando noticias…',
+        'No news available'                   => 'No hay noticias disponibles',
+        'Critical WordPress news'             => 'Noticia crítica de WordPress',
+        'see News tab'                        => 'ver pestaña Noticias',
+        // Self-update
+        'Update available:'                   => 'Actualización disponible:',
+        'Update now'                          => 'Actualizar ahora',
+        'Updating…'                           => 'Actualizando…',
+        'Updated'                             => 'Actualizado',
+        'The tool was updated to'             => 'La herramienta se actualizó a',
+        'Backup kept as'                      => 'Copia de seguridad guardada como',
+        'The page will now reload.'           => 'La página se recargará ahora.',
+        'Update the tool to the latest version? A backup of the current file is kept so you can revert.'
+            => '¿Actualizar la herramienta a la última versión? Se guarda una copia del archivo actual para poder revertir.',
+        'MySQL version'                       => 'Versión de MySQL',
+        'WordPress recommends 7.4+'           => 'WordPress recomienda 7.4+',
+        'unavailable (DB not connected)'      => 'no disponible (BD sin conexión)',
         'Detected CMS'                        => 'CMS detectado',
         'none detected'                       => 'ninguno detectado',
         'Migration & maintenance tools · Export & Import' => 'Herramientas de migración y mantenimiento · Exportar e importar',
@@ -472,6 +496,18 @@ $GLOBALS['__I18N'] = [
         // Security Audit
         'Security Audit'                      => 'Auditoría de seguridad',
         'Run Security Audit'                  => 'Ejecutar auditoría',
+        // Anti-hotlinking
+        'Anti-hotlinking protection'          => 'Protección anti-hotlinking',
+        'Hotlinking is when other websites embed this site\'s images or assets directly, so their visitors consume this server\'s bandwidth. This checks whether a referer-based protection exists, tests the proposed .htaccess rules in an isolated subfolder (they must not cause an HTTP 500), and only then applies them — backing up the current .htaccess first so you can revert.'
+            => 'El hotlinking ocurre cuando otros sitios insertan directamente las imágenes o recursos de este sitio, de modo que sus visitantes consumen el ancho de banda de este servidor. Esto comprueba si existe una protección basada en referer, prueba las reglas propuestas del .htaccess en una subcarpeta aislada (no deben provocar un error HTTP 500) y solo entonces las aplica, haciendo primero una copia de seguridad del .htaccess actual para poder revertir.',
+        'Check protection'                    => 'Comprobar protección',
+        'Test rules (isolated)'               => 'Probar reglas (aislado)',
+        'Apply protection'                    => 'Aplicar protección',
+        'Run the isolated test first.'        => 'Ejecutá primero la prueba aislada.',
+        'Anti-hotlink protection applied'     => 'Protección anti-hotlink aplicada',
+        'backup'                              => 'copia',
+        'Apply anti-hotlink rules to .htaccess? The current .htaccess is backed up first so you can revert.'
+            => '¿Aplicar reglas anti-hotlink al .htaccess? Primero se hace una copia del .htaccess actual para poder revertir.',
         'Hardening checks across users, WordPress core, filesystem and attack surface: weak/common passwords, default admin username, outdated WP version, default security keys, file permissions, exposed dumps, XML-RPC and REST exposure. Uses the DB connection configured above.'
             => 'Chequeos de endurecimiento sobre usuarios, núcleo de WordPress, sistema de archivos y superficie de ataque: contraseñas débiles/comunes, usuario admin por defecto, versión de WP desactualizada, claves de seguridad por defecto, permisos de archivos, dumps expuestos, exposición de XML-RPC y REST. Usa la conexión a la base de datos configurada arriba.',
         // WordPress Extras + phpMyAdmin
@@ -690,6 +726,24 @@ function check_cmd($cmd) {
         if ($ret === 0 && !empty($out[0])) return $out[0];
     }
     return false;
+}
+// Fetches a URL body with the same curl-CLI → curl-PHP → file_get_contents fallback
+// used across the tool. Returns the body string, or null on any failure. Used by the
+// self-update check and the news feed.
+function http_fetch_body($url, $headers = []) {
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 30, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_HTTPHEADER => $headers]);
+        $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        if ($code >= 200 && $code < 400 && $body !== false && $body !== '') return $body;
+    }
+    if (ini_get('allow_url_fopen')) {
+        $hdr = $headers ? implode("\r\n", $headers) . "\r\n" : "User-Agent: cms_tools\r\n";
+        $body = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 30, 'follow_location' => 1, 'header' => $hdr]]));
+        if ($body !== false && $body !== '') return $body;
+    }
+    return null;
 }
 function human_size($bytes) {
     if ($bytes >= 1073741824) return number_format($bytes/1073741824, 2) . ' GB';
@@ -4760,6 +4814,137 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- ANTI-HOTLINKING -----------------------------------------------------
+    // Hotlinking = other sites embedding this site's images/assets directly, so
+    // their visitors consume this server's bandwidth. These endpoints detect
+    // whether a referer-based protection is present, test the proposed .htaccess
+    // rules in an isolated subfolder (must not 500), and apply them with a backup.
+    if (strpos($action, 'hotlink_') === 0) {
+        $root = rtrim($abspath, '/');
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $hl_begin = '# BEGIN WP-Migrate Anti-Hotlink';
+        $hl_end   = '# END WP-Migrate Anti-Hotlink';
+        // The protection block: allow empty referer (direct hits, bookmarks) and the
+        // site's own host; block everything else for static asset types.
+        $build_rules = function ($host) use ($hl_begin, $hl_end) {
+            $h = preg_quote($host, '#');
+            return "$hl_begin\n"
+                . "<IfModule mod_rewrite.c>\n"
+                . "RewriteEngine On\n"
+                . "RewriteCond %{HTTP_REFERER} !^$ [NC]\n"
+                . "RewriteCond %{HTTP_REFERER} !^https?://(www\\.)?$h [NC]\n"
+                . "RewriteRule \\.(jpe?g|png|gif|webp|svg|bmp|ico|css|js)$ - [NC,F,L]\n"
+                . "</IfModule>\n"
+                . "$hl_end";
+        };
+
+        if ($action === 'hotlink_check') {
+            $htaccess = $root . '/.htaccess';
+            $content  = is_file($htaccess) ? (string)file_get_contents($htaccess) : '';
+            $protected = strpos($content, $hl_begin) !== false
+                || preg_match('/RewriteCond\s+%\{HTTP_REFERER\}/i', $content);
+            echo json_encode(['ok' => true, 'protected' => (bool)$protected,
+                'has_htaccess' => is_file($htaccess),
+                'text' => $protected
+                    ? 'A referer-based protection is already present in .htaccess'
+                    : 'No anti-hotlink protection found — external sites can embed this site\'s assets and use its bandwidth']);
+            exit;
+        }
+
+        if ($action === 'hotlink_test') {
+            if (!is_writable($root)) { echo json_encode(['ok' => false, 'error' => 'Web root is not writable; cannot create a test folder.']); exit; }
+            $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $base  = rtrim(dirname($proto . '://' . $host . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+            $dir   = $root . '/_hotlink_test_' . bin2hex(random_bytes(4));
+            if (!@mkdir($dir, 0755)) { echo json_encode(['ok' => false, 'error' => 'Could not create test folder']); exit; }
+            $cleanup = function () use ($dir) {
+                foreach (glob($dir . '/*') ?: [] as $f) @unlink($f);
+                foreach (glob($dir . '/.*') ?: [] as $f) { if (!in_array(basename($f), ['.', '..'], true)) @unlink($f); }
+                @rmdir($dir);
+            };
+            // Write the rules + a tiny asset to request with/without a referer.
+            file_put_contents($dir . '/.htaccess', $build_rules($host));
+            file_put_contents($dir . '/t.css', "body{}");
+            $probe = function ($referer) use ($base, $dir) {
+                $url = $base . '/' . basename($dir) . '/t.css';
+                $st = 0;
+                if (function_exists('curl_init')) {
+                    $ch = curl_init($url);
+                    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8, CURLOPT_CONNECTTIMEOUT => 5,
+                        CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false]);
+                    if ($referer !== null) curl_setopt($ch, CURLOPT_REFERER, $referer);
+                    curl_exec($ch); $st = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+                }
+                return $st;
+            };
+            $direct   = $probe(null);                           // no referer → should load (200)
+            $external = $probe('http://evil-example.com/page'); // foreign referer → should be blocked (403)
+            $cleanup();
+            $breaks  = ($direct >= 500 || $external >= 500);
+            // The protection works when mod_rewrite is active: direct loads, external forbidden.
+            $enforced = ($direct >= 200 && $direct < 400 && $external === 403);
+            echo json_encode(['ok' => true, 'breaks' => $breaks, 'direct' => $direct, 'external' => $external,
+                'enforced' => $enforced,
+                'note' => $breaks ? 'The rules would break the site (HTTP 500) — not safe to apply'
+                    : ($enforced ? 'Rules verified: direct requests load, external referers are blocked'
+                        : 'No 500, but enforcement could not be confirmed (mod_rewrite may be off on this host / dev server). Apply is allowed since it does not break the site.')]);
+            exit;
+        }
+
+        if ($action === 'hotlink_apply') {
+            $htaccess = $root . '/.htaccess';
+            $writable = (is_file($htaccess) && is_writable($htaccess)) || (!is_file($htaccess) && is_writable($root));
+            if (!$writable) { echo json_encode(['ok' => false, 'error' => '.htaccess is not writable']); exit; }
+            $backup = null;
+            if (is_file($htaccess)) {
+                $backup = $htaccess . '.bak-' . date('Ymd-His');
+                if (!@copy($htaccess, $backup)) { echo json_encode(['ok' => false, 'error' => 'Could not back up .htaccess']); exit; }
+            }
+            $content = is_file($htaccess) ? (string)file_get_contents($htaccess) : '';
+            // Replace any previous block, then prepend the fresh one.
+            $content = trim(preg_replace('/' . preg_quote($hl_begin, '/') . '.*?' . preg_quote($hl_end, '/') . '/s', '', $content));
+            $content = $build_rules($host) . ($content ? "\n\n" . $content : "\n");
+            if (@file_put_contents($htaccess, $content) === false) {
+                echo json_encode(['ok' => false, 'error' => 'Could not write .htaccess' . ($backup ? ' (backup kept: ' . basename($backup) . ')' : '')]); exit;
+            }
+            echo json_encode(['ok' => true, 'backup' => $backup ? basename($backup) : null,
+                'note' => 'Anti-hotlink rules applied. Revert by restoring the backup or removing the marked block.']);
+            exit;
+        }
+
+        echo json_encode(['ok' => false, 'error' => 'Unknown hotlink action']);
+        exit;
+    }
+
+    // --- WORDPRESS NEWS ------------------------------------------------------
+    // Fetches the official WordPress.org news RSS feed, returns the latest items,
+    // and flags any that look security/critical so the UI can banner them.
+    if ($action === 'wp_news') {
+        $body = http_fetch_body('https://wordpress.org/news/feed/', ['User-Agent: cms_tools/' . TOOL_VERSION]);
+        if ($body === null) { echo json_encode(['ok' => false, 'error' => 'Could not reach the WordPress news feed']); exit; }
+        $items = [];
+        $prev = libxml_use_internal_errors(true);
+        $xml  = simplexml_load_string($body);
+        libxml_use_internal_errors($prev);
+        if ($xml === false || !isset($xml->channel->item)) { echo json_encode(['ok' => false, 'error' => 'Could not parse the news feed']); exit; }
+        // Critical = the title/summary mentions a security or urgent release.
+        $crit_re = '/\b(security|vulnerab|critical|exploit|CVE|urgent|hotfix|security release|patch release)\b/i';
+        foreach ($xml->channel->item as $it) {
+            $title = trim((string)$it->title);
+            $link  = trim((string)$it->link);
+            $date  = trim((string)$it->pubDate);
+            $desc  = trim(strip_tags((string)$it->description));
+            if (mb_strlen($desc) > 220) $desc = mb_substr($desc, 0, 220) . '…';
+            $critical = (bool)preg_match($crit_re, $title . ' ' . $desc);
+            $items[] = compact('title', 'link', 'date', 'desc', 'critical');
+            if (count($items) >= 12) break;
+        }
+        $critical_items = array_values(array_filter($items, fn($i) => $i['critical']));
+        echo json_encode(['ok' => true, 'items' => $items, 'critical' => $critical_items,
+            'has_critical' => count($critical_items) > 0]);
+        exit;
+    }
+
     // --- SITE HEALTH CHECK ---
     if ($action === 'health_check') {
         @set_time_limit(180);
@@ -5716,6 +5901,65 @@ if ($authenticated && isset($_GET['action'])) {
         exit;
     }
 
+    // --- SELF-UPDATE: check the latest GitHub release and replace this file ---
+    // check_update queries the repo's latest release (tag vX.Y.Z-wp) and compares it
+    // with TOOL_VERSION. do_update downloads that release's cms_tools.php, validates it
+    // with `php -l`, backs up the current file, then replaces it in place (reversible).
+    if ($action === 'check_update') {
+        $api = 'https://api.github.com/repos/patchamama/Bigdump-customized-for-wordpress/releases/latest';
+        $body = http_fetch_body($api, ['User-Agent: cms_tools/' . TOOL_VERSION, 'Accept: application/vnd.github+json']);
+        if ($body === null) { echo json_encode(['ok' => false, 'error' => 'Could not reach GitHub']); exit; }
+        $data = json_decode($body, true);
+        $tag  = $data['tag_name'] ?? '';
+        if (!preg_match('/(\d+\.\d+\.\d+)/', $tag, $m)) { echo json_encode(['ok' => false, 'error' => 'No release version found']); exit; }
+        $latest = $m[1];
+        $newer  = version_compare($latest, TOOL_VERSION, '>');
+        echo json_encode(['ok' => true, 'current' => TOOL_VERSION, 'latest' => $latest, 'update_available' => $newer,
+            'url' => $data['html_url'] ?? '', 'notes' => mb_substr((string)($data['body'] ?? ''), 0, 600)]);
+        exit;
+    }
+
+    if ($action === 'do_update') {
+        $self = __FILE__;
+        if (!is_writable($self)) { echo json_encode(['ok' => false, 'error' => 'This file is not writable — cannot self-update']); exit; }
+        // Resolve the latest release's cms_tools.php download URL.
+        $api  = 'https://api.github.com/repos/patchamama/Bigdump-customized-for-wordpress/releases/latest';
+        $body = http_fetch_body($api, ['User-Agent: cms_tools/' . TOOL_VERSION, 'Accept: application/vnd.github+json']);
+        if ($body === null) { echo json_encode(['ok' => false, 'error' => 'Could not reach GitHub']); exit; }
+        $data = json_decode($body, true);
+        if (!preg_match('/(\d+\.\d+\.\d+)/', (string)($data['tag_name'] ?? ''), $m)) { echo json_encode(['ok' => false, 'error' => 'No release version found']); exit; }
+        $latest = $m[1];
+        if (version_compare($latest, TOOL_VERSION, '<=')) { echo json_encode(['ok' => false, 'error' => 'Already up to date (' . TOOL_VERSION . ')']); exit; }
+        $dl = '';
+        foreach (($data['assets'] ?? []) as $a) {
+            if (($a['name'] ?? '') === 'cms_tools.php') { $dl = $a['browser_download_url'] ?? ''; break; }
+        }
+        // Fall back to the tagged raw file if the asset isn't attached.
+        if ($dl === '') $dl = 'https://raw.githubusercontent.com/patchamama/Bigdump-customized-for-wordpress/' . $data['tag_name'] . '/cms_tools.php';
+        $new = http_fetch_body($dl, ['User-Agent: cms_tools/' . TOOL_VERSION]);
+        if ($new === null || strlen($new) < 5000 || strpos($new, '<?php') === false) {
+            echo json_encode(['ok' => false, 'error' => 'Downloaded file looks invalid']); exit;
+        }
+        // Validate the new file with `php -l` before swapping anything in.
+        $tmp = sys_get_temp_dir() . '/cms_tools_update_' . bin2hex(random_bytes(4)) . '.php';
+        file_put_contents($tmp, $new);
+        $lint_ok = true; $lint_msg = '';
+        if (check_cmd('php')) {
+            exec('php -l ' . escapeshellarg($tmp) . ' 2>&1', $o, $ret);
+            $lint_ok = ($ret === 0); $lint_msg = implode("\n", $o);
+        }
+        if (!$lint_ok) { @unlink($tmp); echo json_encode(['ok' => false, 'error' => 'New file failed php -l: ' . $lint_msg]); exit; }
+        // Back up the current file, then replace it in place.
+        $bak = dirname($self) . '/cms_tools.php.bak-' . TOOL_VERSION;
+        if (!@copy($self, $bak)) { @unlink($tmp); echo json_encode(['ok' => false, 'error' => 'Could not write backup ' . basename($bak)]); exit; }
+        if (!@rename($tmp, $self) && !(@copy($tmp, $self) && @unlink($tmp))) {
+            echo json_encode(['ok' => false, 'error' => 'Could not overwrite the tool file (backup kept at ' . basename($bak) . ')']); exit;
+        }
+        @chmod($self, 0644);
+        echo json_encode(['ok' => true, 'from' => TOOL_VERSION, 'to' => $latest, 'backup' => basename($bak)]);
+        exit;
+    }
+
     // --- FETCH bigdump.php INTO THE SITE ---
     // Downloads bigdump.php from the project repo into the WordPress root so it
     // can be opened directly. Returns the URL to open it in a new tab.
@@ -5863,6 +6107,11 @@ if ($authenticated && isset($_GET['action'])) {
 $site_url    = ($detected_cms === 'wordpress') ? detect_site_url($db) : '';
 $current_url = current_url();
 $db_test     = try_db_connect($db);
+// MySQL/MariaDB server version, read once from the live connection for the status card.
+$mysql_version = '';
+if ($db_test['ok'] && !empty($db_test['pdo'])) {
+    try { $mysql_version = (string)$db_test['pdo']->query('SELECT VERSION()')->fetchColumn(); } catch (Exception $e) {}
+}
 $abspath_size = is_dir($abspath) ? dir_size($abspath) : 0;
 // Is bigdump.php already present next to the site? If so we can link to open it.
 $bigdump_present = is_file(rtrim($abspath, '/') . '/bigdump.php');
@@ -5996,7 +6245,8 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
 <div>
     <h1>🚀 CMS Tools <span style="font-size:13px;font-weight:400;color:#4f6ef7;margin-left:6px">v<?= TOOL_VERSION ?></span>
-        <?php if ($cms_label): ?><span class="badge badge-ok" style="margin-left:6px;vertical-align:middle"><?= h($cms_label) ?></span><?php endif; ?></h1>
+        <?php if ($cms_label): ?><span class="badge badge-ok" style="margin-left:6px;vertical-align:middle"><?= h($cms_label) ?></span><?php endif; ?>
+        <span id="update_badge" style="display:none;margin-left:8px;vertical-align:middle"></span></h1>
     <div class="subtitle"><?= h(t('Migration & maintenance tools · Export & Import')) ?></div>
 </div>
 <div style="display:flex;gap:8px;align-items:center">
@@ -6015,6 +6265,8 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <?php if (!is_localhost()): ?>
 <div class="alert alert-warn">⚠️ <strong><?= h(t('Running on live server.')) ?></strong> <?= h(t('Delete this file after use!')) ?></div>
 <?php endif; ?>
+
+<div id="news_banner" class="alert" style="display:none;background:#3b1a1a;border-color:#7f1d1d;color:#fca5a5"></div>
 
 <!-- ACCESS PASSWORD -->
 <div class="card" style="border-color:#2d3148">
@@ -6090,6 +6342,23 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <span class="info-label">DB Connection</span>
     <span class="badge <?= $db_test['ok'] ? 'badge-ok' : 'badge-err' ?>">
         <?= $db_test['ok'] ? '✓ OK — ' . h($db['name']) . '@' . h($db['host']) : '✗ ' . h($db_test['error'] ?? '') ?>
+    </span>
+</div>
+<div class="info-row">
+    <span class="info-label"><?= h(t('PHP version')) ?></span>
+    <span class="info-val">
+        <span class="badge <?= version_compare(PHP_VERSION, '7.4', '>=') ? 'badge-ok' : 'badge-warn' ?>"><?= h(PHP_VERSION) ?></span>
+        <?php if (version_compare(PHP_VERSION, '7.4', '<')): ?><span style="color:var(--text-dim);font-size:11px"><?= h(t('WordPress recommends 7.4+')) ?></span><?php endif; ?>
+    </span>
+</div>
+<div class="info-row">
+    <span class="info-label"><?= h(t('MySQL version')) ?></span>
+    <span class="info-val">
+        <?php if ($mysql_version): ?>
+            <span class="badge badge-ok"><?= h($mysql_version) ?></span>
+        <?php else: ?>
+            <span class="badge badge-warn"><?= h(t('unavailable (DB not connected)')) ?></span>
+        <?php endif; ?>
     </span>
 </div>
 <div class="info-row">
@@ -6242,6 +6511,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <button class="tab active" onclick="showTab('export')">📤 <?= h(t('Export (Origin)')) ?></button>
     <button class="tab" onclick="showTab('import')">📥 <?= h(t('Import (Destination)')) ?></button>
     <button class="tab" onclick="showTab('tools')">🛠️ <?= h(t('DB Tools')) ?></button>
+    <button class="tab" onclick="showTab('news')">📰 <?= h(t('News')) ?></button>
     <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
 </div>
 
@@ -6438,6 +6708,20 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div>
 </div>
 </div><!-- /info -->
+
+<!-- ===== NEWS TAB ===== -->
+<div id="tab-news" class="section">
+<div class="card">
+<h2>📰 <?= h(t('WordPress News')) ?></h2>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+    <?= h(t('Latest posts from the official WordPress.org news feed. Security or critical releases are highlighted and also shown as a banner at the top of the tool.')) ?>
+</p>
+<div class="actions" style="margin-bottom:12px">
+    <button class="btn btn-sm btn-primary" id="news_btn" onclick="loadNews(true)">🔄 <?= h(t('Refresh news')) ?></button>
+</div>
+<div id="news_list" style="font-size:13px"></div>
+</div>
+</div><!-- /news -->
 
 <!-- ===== TOOLS TAB ===== -->
 <div id="tab-tools" class="section">
@@ -6719,6 +7003,20 @@ foreach ($php_cfg_rows as $r):
     <button id="tls_audit_btn" class="btn btn-danger" onclick="runSecurityAudit()">🛡️ <?= h(t('Run Security Audit')) ?></button>
 </div>
 <div id="tls_audit_results"></div>
+
+<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+    <h3 style="font-size:14px;margin:0 0 6px">🔗 <?= h(t('Anti-hotlinking protection')) ?></h3>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+        <?= h(t('Hotlinking is when other websites embed this site\'s images or assets directly, so their visitors consume this server\'s bandwidth. This checks whether a referer-based protection exists, tests the proposed .htaccess rules in an isolated subfolder (they must not cause an HTTP 500), and only then applies them — backing up the current .htaccess first so you can revert.')) ?>
+    </p>
+    <div class="actions" style="margin-bottom:10px">
+        <button class="btn btn-sm btn-primary" id="hl_check_btn" onclick="hotlinkCheck()">🔍 <?= h(t('Check protection')) ?></button>
+        <button class="btn btn-sm" style="background:var(--border);color:var(--text-muted);display:none" id="hl_test_btn" onclick="hotlinkTest()">🧪 <?= h(t('Test rules (isolated)')) ?></button>
+        <button class="btn btn-sm btn-success" id="hl_apply_btn" onclick="hotlinkApply()" style="display:none">🔗 <?= h(t('Apply protection')) ?></button>
+    </div>
+    <div id="hl_results" style="font-size:12px"></div>
+    <div id="hl_log" class="log" style="display:none"></div>
+</div>
 </div>
 
 <div class="card">
@@ -7686,6 +7984,70 @@ function toggleTheme(){
     const b = document.getElementById('theme_toggle');
     if (b) b.textContent = next === 'light' ? '🌙' : '☀️';
 }
+
+// --- Self-update: check GitHub for a newer release on load, offer to update ---
+async function checkForUpdate(){
+    const badge = document.getElementById('update_badge');
+    if (!badge) return;
+    try {
+        const j = await (await fetch('?action=check_update', {method:'POST', body:new FormData()})).json();
+        if (!j.ok || !j.update_available) return;
+        badge.style.display = 'inline-flex';
+        badge.innerHTML = `<span class="badge badge-warn" style="font-size:12px">⬆️ ${T_UPD.available} v${esc(j.latest)}</span>
+            <button class="btn btn-sm btn-primary" style="margin-left:6px" onclick="runSelfUpdate(this)">${T_UPD.updateNow}</button>`;
+    } catch(e){}
+}
+async function runSelfUpdate(btn){
+    if (!confirm(T_UPD.confirm)) return;
+    btn.disabled = true; btn.textContent = '⏳ ' + T_UPD.updating;
+    try {
+        const j = await (await fetch('?action=do_update', {method:'POST', body:new FormData()})).json();
+        if (j.ok){
+            btn.textContent = '✓ ' + T_UPD.done;
+            alert(`${T_UPD.updatedTo} v${j.to}.\n${T_UPD.backupKept}: ${j.backup}\n\n${T_UPD.reloadNow}`);
+            location.reload();
+        } else { btn.disabled = false; btn.textContent = T_UPD.updateNow; alert('✗ ' + (j.error||'')); }
+    } catch(e){ btn.disabled = false; btn.textContent = T_UPD.updateNow; alert('✗ ' + e.message); }
+}
+const T_UPD = {
+    available: <?= json_encode(t('Update available:')) ?>, updateNow: <?= json_encode(t('Update now')) ?>,
+    updating: <?= json_encode(t('Updating…')) ?>, done: <?= json_encode(t('Updated')) ?>,
+    updatedTo: <?= json_encode(t('The tool was updated to')) ?>, backupKept: <?= json_encode(t('Backup kept as')) ?>,
+    reloadNow: <?= json_encode(t('The page will now reload.')) ?>,
+    confirm: <?= json_encode(t('Update the tool to the latest version? A backup of the current file is kept so you can revert.')) ?>,
+};
+document.addEventListener('DOMContentLoaded', checkForUpdate);
+
+// --- WordPress news: list in the News tab + banner critical items on top ---
+let NEWS_LOADED = false;
+async function loadNews(force){
+    if (NEWS_LOADED && !force) return;
+    const box = document.getElementById('news_list');
+    if (box) box.innerHTML = `<p style="color:var(--text-dim)">⏳ ${T_NEWS.loading}</p>`;
+    try {
+        const j = await (await fetch('?action=wp_news', {method:'POST', body:new FormData()})).json();
+        if (!j.ok){ if (box) box.innerHTML = `<p style="color:#f87171">✗ ${esc(j.error||'')}</p>`; return; }
+        NEWS_LOADED = true;
+        if (box) box.innerHTML = j.items.map(it => `
+            <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+                <a href="${esc(it.link)}" target="_blank" rel="noopener" style="color:var(--link);font-weight:600;text-decoration:none">${it.critical?'🔴 ':''}${esc(it.title)}</a>
+                <div style="font-size:11px;color:var(--text-dim);margin:2px 0">${esc(it.date)}</div>
+                <div style="font-size:12px;color:var(--text-muted)">${esc(it.desc)}</div>
+            </div>`).join('') || `<p style="color:var(--text-dim)">${T_NEWS.none}</p>`;
+        // Critical banner at the top of the app.
+        const banner = document.getElementById('news_banner');
+        if (banner && j.has_critical){
+            const c = j.critical[0];
+            banner.style.display = 'block';
+            banner.innerHTML = `🔴 <strong>${T_NEWS.critical}:</strong> <a href="${esc(c.link)}" target="_blank" rel="noopener" style="color:#fca5a5">${esc(c.title)}</a> — <a href="#" onclick="showTab('news');return false" style="color:#fca5a5">${T_NEWS.seeAll}</a>`;
+        }
+    } catch(e){ if (box) box.innerHTML = `<p style="color:#f87171">✗ ${esc(e.message)}</p>`; }
+}
+const T_NEWS = {
+    loading: <?= json_encode(t('Loading news…')) ?>, none: <?= json_encode(t('No news available')) ?>,
+    critical: <?= json_encode(t('Critical WordPress news')) ?>, seeAll: <?= json_encode(t('see News tab')) ?>,
+};
+document.addEventListener('DOMContentLoaded', () => loadNews(false));
 
 function formData(prefix){
     return {
@@ -8811,6 +9173,50 @@ async function runSecurityAudit() {
     } catch(e) { out.innerHTML = `<p style="color:#f87171">✗ Request failed: ${e.message}</p>`; }
     btn.disabled = false; btn.textContent = '🛡️ Run Security Audit';
 }
+
+// --- Anti-hotlinking: check → test isolated (no 500) → apply with backup ---
+let HL_TESTED = false;
+async function hotlinkCheck(){
+    const out = document.getElementById('hl_results');
+    const j = await (await fetch('?action=hotlink_check', {method:'POST', body:new FormData()})).json();
+    if (!j.ok){ out.innerHTML = `<span style="color:#f87171">✗ ${esc(j.error||'')}</span>`; return; }
+    const color = j.protected ? '#6ee7b7' : '#fcd34d';
+    out.innerHTML = `<div style="color:${color};padding:4px 0">${j.protected?'✅':'⚠️'} ${esc(j.text)}</div>`;
+    // Offer the test (then apply) only when the site is not already protected.
+    document.getElementById('hl_test_btn').style.display = j.protected ? 'none' : 'inline-flex';
+    document.getElementById('hl_apply_btn').style.display = 'none';
+    HL_TESTED = false;
+}
+async function hotlinkTest(){
+    const btn = document.getElementById('hl_test_btn'); btn.disabled = true; btn.textContent = '⏳';
+    try {
+        const j = await (await fetch('?action=hotlink_test', {method:'POST', body:new FormData()})).json();
+        if (!j.ok){ log('hl_log', '✗ ' + (j.error||''), false); }
+        else {
+            log('hl_log', `${j.breaks?'❌':(j.enforced?'✅':'⚠️')} ${j.note} (direct=${j.direct}, external=${j.external})`, false);
+            // Apply is allowed only when the rules do NOT break the site (no 500).
+            HL_TESTED = !j.breaks;
+            document.getElementById('hl_apply_btn').style.display = j.breaks ? 'none' : 'inline-flex';
+        }
+    } catch(e){ log('hl_log', '✗ ' + e.message, false); }
+    btn.disabled = false; btn.textContent = '🧪 ' + T_HL.test;
+}
+async function hotlinkApply(){
+    if (!HL_TESTED){ alert(T_HL.testFirst); return; }
+    if (!confirm(T_HL.confirm)) return;
+    const btn = document.getElementById('hl_apply_btn'); btn.disabled = true;
+    try {
+        const j = await (await fetch('?action=hotlink_apply', {method:'POST', body:new FormData()})).json();
+        if (j.ok) log('hl_log', `✓ ${T_HL.applied}${j.backup?` · ${T_HL.backup}: ${j.backup}`:''}`, false);
+        else log('hl_log', '✗ ' + (j.error||''), false);
+    } catch(e){ log('hl_log', '✗ ' + e.message, false); }
+    btn.disabled = false; hotlinkCheck();
+}
+const T_HL = {
+    test: <?= json_encode(t('Test rules (isolated)')) ?>, testFirst: <?= json_encode(t('Run the isolated test first.')) ?>,
+    applied: <?= json_encode(t('Anti-hotlink protection applied')) ?>, backup: <?= json_encode(t('backup')) ?>,
+    confirm: <?= json_encode(t('Apply anti-hotlink rules to .htaccess? The current .htaccess is backed up first so you can revert.')) ?>,
+};
 
 // --- SEO ---
 async function runSeoAudit() {

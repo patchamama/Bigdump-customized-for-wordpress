@@ -36,3 +36,6 @@ _junk-remove-it/
 wp-content/_orphans-remove-it/
 _perf_test_*/
 _ht_diag_*/
+_hotlink_test_*/
+.htaccess.bak-*
+cms_tools.php.bak-*
