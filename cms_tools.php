@@ -1618,11 +1618,29 @@ function collect_site_report($db, $root, $wp_config_path, $is_wordpress) {
         $add('php.extension.' . $extension, $loaded ? 'ok' : 'warning', $extension . ($loaded ? ' loaded.' : ' not loaded.'));
     }
     $cfg = $is_wordpress && $wp_config_path ? $read($wp_config_path, 65536) : null;
+    // Tokenize without evaluating PHP: comments and quoted code cannot be definitions.
+    // Duplicate or non-literal definitions remain unknown instead of selecting a safe value.
+    $definitions = [];
+    $tokens = $cfg === null ? [] : array_values(array_filter(token_get_all($cfg), function ($token) {
+        return !is_array($token) || !in_array($token[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true);
+    }));
+    foreach ($tokens as $i => $token) {
+        if (!is_array($token) || !in_array($token[0], [T_STRING, T_NAME_FULLY_QUALIFIED], true)
+            || !in_array(strtolower($token[1]), ['define', '\define'], true)) continue;
+        $previous = $tokens[$i - 1] ?? null;
+        if (is_array($previous) && in_array($previous[0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON], true)) continue;
+        $name = $tokens[$i + 2] ?? null;
+        if (($tokens[$i + 1] ?? null) !== '(' || !is_array($name) || $name[0] !== T_CONSTANT_ENCAPSED_STRING
+            || ($tokens[$i + 3] ?? null) !== ',') continue;
+        $constant = substr($name[1], 1, -1);
+        $value = $tokens[$i + 4] ?? null;
+        $boolean = is_array($value) && $value[0] === T_STRING && in_array(strtolower($value[1]), ['true', 'false'], true)
+            && ($tokens[$i + 5] ?? null) === ')';
+        $definitions[$constant][] = $boolean ? strtolower($value[1]) === 'true' : null;
+    }
     foreach (['WP_DEBUG', 'DISALLOW_FILE_EDIT', 'FORCE_SSL_ADMIN', 'WP_CACHE'] as $constant) {
-        $literal = null;
-        if ($cfg !== null && preg_match('/define\s*\(\s*[\'"]' . $constant . '[\'"]\s*,\s*(true|false)\s*\)/i', $cfg, $m)) {
-            $literal = strtolower($m[1]) === 'true';
-        }
+        $values = $definitions[$constant] ?? [];
+        $literal = count($values) === 1 ? $values[0] : null;
         $risk = $constant === 'WP_DEBUG' ? $literal === true : $literal === false;
         $add('wordpress.' . strtolower($constant), $literal === null ? 'unavailable' : ($risk ? 'warning' : 'ok'),
             $constant . ($literal === null ? ' not available as a literal boolean.' : ($literal ? ' true (static inspection).' : ' false (static inspection).')));

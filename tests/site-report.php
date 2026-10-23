@@ -11,7 +11,7 @@ $source = preg_replace('/^<\?php/', '<?php namespace SiteReportFixture; use \\Di
 file_put_contents($site . '/cms_tools.php', $source);
 copy(__DIR__ . '/fixtures/site-report/prepend.php', $site . '/prepend.php');
 file_put_contents($site . '/.migrate_config', json_encode(['password_hash'=>hash('sha256', 'odc_migrate_2026_x9k' . 'SyntheticLogin123')]));
-file_put_contents($site . '/wp-config.php', "<?php\ndefine('DB_PASSWORD', 'CONFIG_SECRET');\ndefine('DB_USER', 'PRIVATE_USER');\ndefine('DB_NAME', 'fixture');\ndefine('WP_DEBUG', true);\ndefine('AUTH_KEY', 'SALT_SECRET');\n\$table_prefix = 'wp_';\nfile_put_contents(__DIR__.'/EXECUTED', 'bad');\n");
+file_put_contents($site . '/wp-config.php', "<?php\ndefine('DB_PASSWORD', 'CONFIG_SECRET');\ndefine('DB_USER', 'PRIVATE_USER');\ndefine('DB_NAME', 'fixture');\n// define('WP_DEBUG', false);\ndefine('WP_DEBUG', true);\n/* define('DISALLOW_FILE_EDIT', true); */\ndefine('DISALLOW_FILE_EDIT', false);\n# define('FORCE_SSL_ADMIN', false);\ndefine('FORCE_SSL_ADMIN', true);\ndefine('WP_CACHE', false);\ndefine('AUTH_KEY', 'SALT_SECRET');\n\$table_prefix = 'wp_';\nfile_put_contents(__DIR__.'/EXECUTED', 'bad');\n");
 chmod($site . '/wp-config.php', 0644); // Deterministic world-readable-permissions finding.
 mkdir($site . '/wp-includes');
 file_put_contents($site . '/wp-includes/version.php', "<?php \$wp_version = '6.8.1'; file_put_contents(__DIR__.'/EXECUTED', 'bad');");
@@ -65,6 +65,12 @@ try {
     [$body] = request('?action=site_report', ['db_host'=>'CALLER_SECRET', 'db_name'=>'CALLER_SECRET', 'siteurl'=>'https://attacker.test']);
     check((json_decode($body, true)['filename'] ?? '') === 'wp.example.test.json' && !str_contains($body, 'CALLER_SECRET'), 'caller credentials and domain ignored');
     $data = report();
+    $configFindings = array_column($data['findings'], null, 'id');
+    check($configFindings['wordpress.wp_debug']['severity'] === 'warning'
+        && $configFindings['wordpress.disallow_file_edit']['severity'] === 'warning'
+        && $configFindings['wordpress.force_ssl_admin']['severity'] === 'ok'
+        && $configFindings['wordpress.wp_cache']['severity'] === 'warning',
+        'active literal booleans determine severity; line/block/hash comments never produce false OK');
     check($data['filename'] === 'wp.example.test.json' && $data['site']['domain'] === 'wp.example.test', 'filename from authoritative siteurl, not HTTP host');
     check($data['wordpress']['version'] === '6.8.1', 'core version parsed without execution');
     check($data['wordpress']['plugins'][0]['active'] === true, 'plugin activity from DB');
