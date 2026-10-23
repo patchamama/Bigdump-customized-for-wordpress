@@ -77,16 +77,46 @@ a report still works without WordPress or a database connection.
 | Limits | Default `wp-content/plugins` and `themes` only; bounded headers, directories and table metadata. Network activation/custom content paths are not resolved. Truncation is explicit. |
 | Interpretation | Local indicators, not a vulnerability scan or assurance of safety. Current update/support status, TLS, dynamic SEO output and file integrity are not verified. Table row counts are estimates. |
 
-The report remains in browser memory until refresh or regeneration; it is not saved on
-the server. Treat exported infrastructure metadata as private and review it before
-sharing. Private GitHub export and encrypted browser persistence are not implemented.
+### Send the displayed report to a private GitHub repository
+
+1. Generate and review the report, then enter an HTTPS repository URL such as
+   `https://github.com/owner/private-repo` (an optional `.git` suffix is accepted).
+2. Enter a fine-grained token with access to that repository and **Contents: read and
+   write**. Organization policies may also require token approval or SSO authorization.
+3. Keep `wordpress-report` or choose another report branch. Click **Send to private
+   GitHub** and confirm. The tool creates a missing branch from the repository's
+   default branch, then creates or updates `<wordpress-domain>.json` at its root.
+
+Only private, already-initialized repositories on **github.com** are supported; create
+an initial commit (for example a README) first. The default branch is protected from
+report writes. Existing report files are updated using their SHA; concurrent updates
+and branch-protection failures are reported without automatic retries. GitHub retains
+old report versions in commit history. A branch created before a later upload failure
+may remain; check the repository before retrying.
+
+Use **HTTPS for the tool itself**, not only the GitHub URL. The token is sent in a POST
+body to this authenticated tool and then only to `https://api.github.com` with certificate
+validation and redirects disabled. It is never stored in configuration, session, JSON,
+URLs or browser storage, and the token field is cleared after each attempted send.
+Password managers or browser extensions remain outside the tool's control.
+
+The browser keeps the displayed JSON until refresh or regeneration. A matching copy
+is held in the authenticated PHP session for up to **30 minutes of export validity**
+and replaced when another report is generated; it can remain in the host's session
+storage until that session expires. Export uses that exact copy, not caller-supplied
+JSON or a fresh audit. Another tab generating a report invalidates the old snapshot.
+A missing authoritative WordPress domain allows download as `site-report.json` but
+blocks GitHub export. Treat infrastructure metadata as private and review it before
+sharing. No credential persistence or encrypted localStorage is added.
 The authenticated HTTP endpoint is `POST ?action=site_report`; add `&download=1` for a
 JSON attachment (this generates a fresh report).
 
-Run isolated synthetic HTTP coverage with `php tests/site-report.php`, then lint with
-`php -l cms_tools.php`. The runner uses a temporary installation and a namespaced PDO
-fixture, never a real database or the deployment's configuration. Temporary synthetic
-artifacts are left in the system temporary directory for inspection.
+Run isolated HTTP coverage with `php tests/site-report.php`, the synthetic cURL path
+with `SITE_REPORT_TEST_CURL=1 php tests/site-report.php`, UI controller checks with
+`node tests/site-report-ui.cjs`, and lint with `php -l cms_tools.php`. The runner uses a
+temporary installation, namespaced PDO fixture and synthetic GitHub transport, never a
+real database or repository. No real GitHub writes are made. Test artifacts use the
+system temporary directory (a harness may remove them when the command exits).
 
 ### Quick update (one-click post-migration)
 

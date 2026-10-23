@@ -150,6 +150,17 @@ $GLOBALS['__I18N'] = [
             => 'El acceso usa la contraseña de la base de datos de wp-config.php. Definí una contraseña cifrada propia abajo para usar esa en su lugar.',
         'Report' => 'Reporte',
         'Generate report' => 'Generar reporte',
+        'Send to private GitHub' => 'Enviar a GitHub privado',
+        'Private repository URL' => 'URL del repositorio privado',
+        'GitHub token (Contents: read and write)' => 'Token de GitHub (Contents: lectura y escritura)',
+        'Report branch' => 'Rama del reporte',
+        'Sending…' => 'Enviando…',
+        'Report saved to GitHub.' => 'Reporte guardado en GitHub.',
+        'GitHub export failed.' => 'No se pudo enviar el reporte a GitHub.',
+        'Send the displayed report to this private repository? Existing domain JSON will be updated; GitHub keeps its history.'
+            => '¿Enviar el reporte mostrado a este repositorio privado? Se actualizará el JSON del dominio; GitHub conserva el historial.',
+        'Use HTTPS for this tool. Review the JSON before sending. The token is not saved and is cleared after each attempt. Use an initialized private repository and a non-default report branch.'
+            => 'Usá HTTPS para esta herramienta. Revisá el JSON antes de enviarlo. El token no se guarda y se borra después de cada intento. Usá un repositorio privado inicializado y una rama de reportes distinta de la predeterminada.',
         'Download JSON' => 'Descargar JSON',
         'Read-only local audit. No WordPress code is executed. Unavailable checks are not successful checks. Review the JSON before sharing.'
             => 'Auditoría local de solo lectura. No se ejecuta código de WordPress. Las comprobaciones no disponibles no son exitosas. Revisá el JSON antes de compartirlo.',
@@ -1754,8 +1765,141 @@ function collect_site_report($db, $root, $wp_config_path, $is_wordpress) {
     return $report;
 }
 
+// Fixed GitHub origin only. Never follow redirects with a bearer token.
+function site_report_github_request($method, $path, $token, $payload = null) {
+    $url = 'https://api.github.com' . $path;
+    $headers = ['Accept: application/vnd.github+json', 'Authorization: Bearer ' . $token,
+        'X-GitHub-Api-Version: 2022-11-28', 'User-Agent: CMS-Tools-Site-Report', 'Content-Type: application/json'];
+    $body = $payload === null ? '' : json_encode($payload, JSON_THROW_ON_ERROR);
+    if (function_exists('curl_init')) {
+        $response = '';
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_CUSTOMREQUEST=>$method, CURLOPT_HTTPHEADER=>$headers,
+            CURLOPT_FOLLOWLOCATION=>false, CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2,
+            CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS, CURLOPT_CONNECTTIMEOUT=>5, CURLOPT_TIMEOUT=>12,
+            CURLOPT_WRITEFUNCTION=>function ($ch, $chunk) use (&$response) {
+                if (strlen($response) + strlen($chunk) > 1048576) return 0;
+                $response .= $chunk; return strlen($chunk);
+            }]);
+        if ($payload !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        $ok = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        if ($ok === false) throw new \RuntimeException('GitHub connection failed; verify TLS and connectivity.');
+    } else {
+        if (!ini_get('allow_url_fopen') || !in_array('https', stream_get_wrappers(), true)) {
+            throw new \RuntimeException('GitHub export requires cURL or HTTPS URL streams.');
+        }
+        $context = stream_context_create(['http'=>['method'=>$method, 'header'=>implode("\r\n", $headers),
+            'content'=>$body, 'ignore_errors'=>true, 'follow_location'=>0, 'timeout'=>12],
+            'ssl'=>['verify_peer'=>true, 'verify_peer_name'=>true, 'allow_self_signed'=>false]]);
+        $stream = @fopen($url, 'rb', false, $context);
+        if (!$stream) throw new \RuntimeException('GitHub connection failed; verify TLS and connectivity.');
+        $meta = stream_get_meta_data($stream);
+        $response = stream_get_contents($stream, 1048577);
+        $finished = stream_get_meta_data($stream);
+        fclose($stream);
+        if ($response === false || strlen($response) > 1048576 || !empty($finished['timed_out'])) {
+            throw new \RuntimeException('GitHub response incomplete or too large.');
+        }
+        $status = 0;
+        foreach ($meta['wrapper_data'] ?? [] as $header) {
+            if (preg_match('/^HTTP\/\S+\s+(\d{3})/', $header, $match)) $status = (int)$match[1];
+        }
+    }
+    // Upstream error bodies and URLs are never forwarded to the browser.
+    if ($status >= 300 && $status < 400) throw new \RuntimeException('GitHub redirects are not allowed.');
+    return [$status, json_decode($response, true)];
+}
+
+function site_report_valid_branch($branch) {
+    if (!is_string($branch) || strlen($branch) < 1 || strlen($branch) > 200) return false;
+    if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.\/-]*$/D', $branch)) return false;
+    if (strpos($branch, '..') !== false || strpos($branch, '//') !== false || substr($branch, -1) === '.' || substr($branch, -1) === '/') return false;
+    foreach (explode('/', $branch) as $part) {
+        if ($part[0] === '.' || substr($part, -5) === '.lock') return false;
+    }
+    return true;
+}
+
+function send_site_report_github($repository, $branch, $token, $snapshot) {
+    $repo = preg_replace('/\.git$/i', '', rtrim($repository, '/'));
+    if (!preg_match('#^https://github\.com/([a-z0-9][a-z0-9_-]{0,38})/([a-z0-9_.-]{1,100})$#iD', $repo, $match)
+        || in_array($match[2] ?? '', ['.', '..'], true) || !site_report_valid_branch($branch)
+        || !preg_match('/^[A-Za-z0-9_]{10,255}$/D', $token)) {
+        throw new \InvalidArgumentException('Invalid GitHub repository URL, branch or token.');
+    }
+    $base = '/repos/' . rawurlencode($match[1]) . '/' . rawurlencode($match[2]);
+    $request = function ($method, $path, $payload = null) use ($base, $token) {
+        return site_report_github_request($method, $base . $path, $token, $payload);
+    };
+    [$code, $metadata] = $request('GET', '');
+    if ($code !== 200) throw new \RuntimeException('Cannot access repository; verify token, permissions and rate limits.');
+    if (($metadata['private'] ?? null) !== true) throw new \RuntimeException('Only private GitHub repositories are allowed.');
+    $default = $metadata['default_branch'] ?? null;
+    if (!site_report_valid_branch($default)) throw new \RuntimeException('Initialize the private repository with a commit first.');
+    if ($branch === $default) throw new \InvalidArgumentException('Use a report branch, not the repository default branch.');
+    $refPath = '/git/ref/heads/' . implode('/', array_map('rawurlencode', explode('/', $branch)));
+    [$code, $ref] = $request('GET', $refPath);
+    if ($code === 404) {
+        [$baseCode, $baseRef] = $request('GET', '/git/ref/heads/' . implode('/', array_map('rawurlencode', explode('/', $default))));
+        $sha = $baseRef['object']['sha'] ?? '';
+        if ($baseCode !== 200 || !is_string($sha) || !preg_match('/^[a-f0-9]{40,64}$/D', $sha)) {
+            throw new \RuntimeException('Initialize the private repository with a commit first.');
+        }
+        [$created] = $request('POST', '/git/refs', ['ref'=>'refs/heads/' . $branch, 'sha'=>$sha]);
+        if ($created !== 201) throw new \RuntimeException('Could not create report branch; verify permissions or refresh after a conflict.');
+    } elseif ($code !== 200) {
+        throw new \RuntimeException('Cannot read report branch; verify repository initialization and permissions.');
+    }
+    $path = '/contents/' . rawurlencode($snapshot['filename']);
+    [$code, $file] = $request('GET', $path . '?ref=' . rawurlencode($branch));
+    $payload = ['message'=>'chore(report): update ' . $snapshot['filename'],
+        'branch'=>$branch, 'content'=>base64_encode($snapshot['json'])];
+    if ($code === 200) {
+        $sha = $file['sha'] ?? '';
+        if (($file['type'] ?? '') !== 'file' || !is_string($sha) || !preg_match('/^[a-f0-9]{40,64}$/D', $sha)) {
+            throw new \RuntimeException('Report path is not a regular GitHub file.');
+        }
+        $payload['sha'] = $sha;
+    } elseif ($code !== 404) {
+        throw new \RuntimeException('Cannot read report file; verify token and permissions.');
+    }
+    [$code] = $request('PUT', $path, $payload);
+    if (!in_array($code, [200, 201], true)) {
+        throw new \RuntimeException('GitHub write failed; verify Contents write permission, branch rules or a concurrent update. No retry was made.');
+    }
+    return ['ok'=>true, 'filename'=>$snapshot['filename'], 'branch'=>$branch];
+}
+
 if ($authenticated && isset($_GET['action'])) {
     $action = $_GET['action'];
+
+    if ($action === 'site_report_github') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        $fail = function ($code, $message) {
+            http_response_code($code); echo json_encode(['ok'=>false, 'error'=>$message]); exit;
+        };
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') { header('Allow: POST'); $fail(405, 'Explicit POST export required.'); }
+        $csrf = $_POST['csrf'] ?? null;
+        if (!is_string($csrf) || !isset($_SESSION['site_report_csrf']) || !hash_equals($_SESSION['site_report_csrf'], $csrf)) $fail(403, 'Invalid report session. Generate a report again.');
+        $snapshot = $_SESSION['site_report_snapshot'] ?? null;
+        if (!$snapshot || !is_string($_POST['report_id'] ?? null) || !hash_equals($snapshot['id'], $_POST['report_id'])
+            || time() - $snapshot['created'] > 1800 || !$snapshot['domain']) $fail(409, 'Report expired or domain unavailable. Generate a report again.');
+        foreach (['repository','branch','token'] as $field) {
+            if (!is_string($_POST[$field] ?? null) || strlen($_POST[$field]) > 512) $fail(400, 'Invalid GitHub export fields.');
+        }
+        // Release the session lock before network I/O. Credentials stay in request memory only.
+        session_write_close();
+        try {
+            $result = send_site_report_github(trim($_POST['repository']), $_POST['branch'], $_POST['token'], $snapshot);
+            echo json_encode($result);
+        } catch (\InvalidArgumentException $e) { $fail(400, $e->getMessage());
+        } catch (\RuntimeException $e) { $fail(502, $e->getMessage());
+        } catch (Throwable $e) { $fail(502, 'GitHub export failed. No automatic retry was made.'); }
+        exit;
+    }
 
     if ($action === 'site_report') {
         header('Content-Type: application/json; charset=utf-8');
@@ -1768,8 +1912,14 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
         $report = collect_site_report($db, rtrim($abspath, '/'), $wp_config_path, $detected_cms === 'wordpress');
+        $json = json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        $_SESSION['site_report_csrf'] ??= bin2hex(random_bytes(32));
+        $_SESSION['site_report_snapshot'] = ['id'=>bin2hex(random_bytes(16)), 'created'=>time(),
+            'json'=>$json, 'filename'=>$report['filename'], 'domain'=>$report['site']['domain']];
+        header('X-Site-Report-Id: ' . $_SESSION['site_report_snapshot']['id']);
+        header('X-Site-Report-CSRF: ' . $_SESSION['site_report_csrf']);
         if (isset($_GET['download'])) header('Content-Disposition: attachment; filename="' . $report['filename'] . '"');
-        echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        echo $json;
         exit;
     }
 
@@ -6927,10 +7077,25 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <button type="button" class="btn" id="report_download" onclick="downloadSiteReport()" disabled><?= h(t('Download JSON')) ?></button>
 <p id="report_status" role="status" style="margin:16px 0"></p>
 <pre id="report_output" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:600px;overflow:auto"></pre>
+<form id="report_github_form" onsubmit="sendSiteReportGitHub(); return false;" style="margin-top:24px" autocomplete="off">
+<p><?= h(t('Use HTTPS for this tool. Review the JSON before sending. The token is not saved and is cleared after each attempt. Use an initialized private repository and a non-default report branch.')) ?></p>
+<label for="report_repository"><?= h(t('Private repository URL')) ?></label>
+<input id="report_repository" name="repository" type="url" placeholder="https://github.com/owner/private-repo" required maxlength="250">
+<label for="report_token"><?= h(t('GitHub token (Contents: read and write)')) ?></label>
+<input id="report_token" name="token" type="password" required maxlength="255" autocomplete="off" spellcheck="false">
+<label for="report_branch"><?= h(t('Report branch')) ?></label>
+<input id="report_branch" name="branch" value="wordpress-report" required maxlength="200" spellcheck="false">
+<button type="submit" class="btn btn-primary" id="report_send" disabled
+    data-confirm="<?= h(t('Send the displayed report to this private repository? Existing domain JSON will be updated; GitHub keeps its history.')) ?>"
+    data-busy="<?= h(t('Sending…')) ?>" data-success="<?= h(t('Report saved to GitHub.')) ?>"
+    data-error="<?= h(t('GitHub export failed.')) ?>"><?= h(t('Send to private GitHub')) ?></button>
+<p id="report_github_status" role="status"></p>
+</form>
 </div>
 </div>
 <script>
 let generatedSiteReport = null;
+let siteReportBinding = null;
 async function generateSiteReport() {
     const button = document.getElementById('report_generate');
     const download = document.getElementById('report_download');
@@ -6938,6 +7103,8 @@ async function generateSiteReport() {
     const output = document.getElementById('report_output');
     const label = button.textContent;
     generatedSiteReport = null;
+    siteReportBinding = null;
+    document.getElementById('report_send').disabled = true;
     download.disabled = true;
     button.disabled = true;
     button.textContent = button.dataset.busy;
@@ -6949,12 +7116,42 @@ async function generateSiteReport() {
         const report = await response.json();
         if (report.schema !== 'cms-tools-site-report') throw new Error('Invalid report');
         generatedSiteReport = report;
+        siteReportBinding = {report_id: response.headers.get('X-Site-Report-Id'), csrf: response.headers.get('X-Site-Report-CSRF')};
+        document.getElementById('report_send').disabled = !report.site.domain || !siteReportBinding.report_id || !siteReportBinding.csrf;
+        document.getElementById('report_github_status').textContent = '';
         status.textContent = Object.entries(report.summary).map(([level, count]) => `${level}: ${count}`).join(' | ');
         output.textContent = JSON.stringify(report, null, 2);
         download.disabled = false;
     } catch (_) {
         status.textContent = button.dataset.error;
     } finally {
+        button.disabled = false;
+        button.textContent = label;
+    }
+}
+async function sendSiteReportGitHub() {
+    const button = document.getElementById('report_send');
+    const form = document.getElementById('report_github_form');
+    const status = document.getElementById('report_github_status');
+    if (button.disabled || !generatedSiteReport || !siteReportBinding || !form.reportValidity()) return;
+    if (!confirm(button.dataset.confirm)) return;
+    const label = button.textContent;
+    const data = new FormData(form);
+    data.set('report_id', siteReportBinding.report_id);
+    data.set('csrf', siteReportBinding.csrf);
+    button.disabled = true;
+    document.getElementById('report_generate').disabled = true;
+    status.textContent = button.dataset.busy;
+    try {
+        const response = await fetch('?action=site_report_github', {method:'POST', credentials:'same-origin', body:data});
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || button.dataset.error);
+        status.textContent = `${button.dataset.success} ${result.branch}/${result.filename}`;
+    } catch (error) {
+        status.textContent = button.dataset.error + ' ' + error.message;
+    } finally {
+        document.getElementById('report_token').value = '';
+        document.getElementById('report_generate').disabled = false;
         button.disabled = false;
         button.textContent = label;
     }

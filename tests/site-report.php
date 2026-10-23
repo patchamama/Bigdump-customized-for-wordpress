@@ -10,6 +10,8 @@ $source = file_get_contents(__DIR__ . '/../cms_tools.php');
 $source = preg_replace('/^<\?php/', '<?php namespace SiteReportFixture; use \\DirectoryIterator; use \\RecursiveIteratorIterator; use \\RecursiveDirectoryIterator; use \\FilesystemIterator; use \\Throwable; use \\Exception;', $source, 1);
 file_put_contents($site . '/cms_tools.php', $source);
 copy(__DIR__ . '/fixtures/site-report/prepend.php', $site . '/prepend.php');
+copy(__DIR__ . '/fixtures/site-report/github.php', $site . '/github.php');
+file_put_contents($site . '/prepend.php', "\nrequire __DIR__ . '/github.php';\n", FILE_APPEND);
 file_put_contents($site . '/.migrate_config', json_encode(['password_hash'=>hash('sha256', 'odc_migrate_2026_x9k' . 'SyntheticLogin123')]));
 file_put_contents($site . '/wp-config.php', "<?php\ndefine('DB_PASSWORD', 'CONFIG_SECRET');\ndefine('DB_USER', 'PRIVATE_USER');\ndefine('DB_NAME', 'fixture');\n// define('WP_DEBUG', false);\ndefine('WP_DEBUG', true);\n/* define('DISALLOW_FILE_EDIT', true); */\ndefine('DISALLOW_FILE_EDIT', false);\n# define('FORCE_SSL_ADMIN', false);\ndefine('FORCE_SSL_ADMIN', true);\ndefine('WP_CACHE', false);\ndefine('AUTH_KEY', 'SALT_SECRET');\n\$table_prefix = 'wp_';\nfile_put_contents(__DIR__.'/EXECUTED', 'bad');\n");
 chmod($site . '/wp-config.php', 0644); // Deterministic world-readable-permissions finding.
@@ -24,7 +26,7 @@ file_put_contents($site . '/robots.txt', "User-agent: *\nDisallow: /\n# PERSONAL
 $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
 $port = (int)substr(strrchr(stream_socket_get_name($socket, false), ':'), 1);
 fclose($socket);
-$process = proc_open([PHP_BINARY, '-n', '-d', 'auto_prepend_file=' . $site . '/prepend.php', '-d', 'session.save_path=' . $root, '-S', '127.0.0.1:' . $port, '-t', $site], [0=>['pipe','r'], 1=>['file',$root.'/server.log','a'], 2=>['file',$root.'/server.log','a']], $pipes);
+$process = proc_open([PHP_BINARY, '-n', '-d', 'disable_functions=' . (getenv('SITE_REPORT_TEST_CURL') === '1' ? '' : 'curl_init'), '-d', 'auto_prepend_file=' . $site . '/prepend.php', '-d', 'session.save_path=' . $root, '-S', '127.0.0.1:' . $port, '-t', $site], [0=>['pipe','r'], 1=>['file',$root.'/server.log','a'], 2=>['file',$root.'/server.log','a']], $pipes);
 if (!is_resource($process)) throw new RuntimeException('Cannot start test server');
 $cookie = '';
 function request($query, $data = null) {
@@ -82,6 +84,7 @@ try {
     check(!file_exists($site.'/EXECUTED') && !file_exists($site.'/wp-includes/EXECUTED') && !file_exists($site.'/wp-content/plugins/sample/EXECUTED'), 'WordPress and plugin PHP never executed');
     [$body, $headers] = request('?action=site_report&download=1', []);
     check(in_array('Content-Disposition: attachment; filename="wp.example.test.json"', $headers, true), 'JSON attachment filename');
+    require __DIR__ . '/site-report-github.php';
     $offline = report('&offline=1');
     check($offline['site']['domain'] === null && $offline['filename'] === 'site-report.json', 'no request-host domain fallback');
     check($offline['wordpress']['plugins'][0]['active'] === null && $offline['wordpress']['themes'][0]['active'] === null && $offline['summary']['unavailable'] > 0, 'offline activity unknown and partial report retained');
