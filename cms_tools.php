@@ -113,7 +113,9 @@ foreach (glob(rtrim($abspath, '/') . '/phpmyadmin*', GLOB_ONLYDIR) ?: [] as $d) 
 // Language resolution order: ?lang= query → cookie → Accept-Language → default 'en'.
 if (isset($_GET['lang']) && in_array($_GET['lang'], ['en', 'es'], true)) {
     $LANG = $_GET['lang'];
-    setcookie('migrate_lang', $LANG, time() + 31536000, '/');
+    if (!site_report_api_request()) {
+        setcookie('migrate_lang', $LANG, time() + 31536000, '/');
+    }
 } elseif (isset($_COOKIE['migrate_lang']) && in_array($_COOKIE['migrate_lang'], ['en', 'es'], true)) {
     $LANG = $_COOKIE['migrate_lang'];
 } else {
@@ -154,6 +156,12 @@ $GLOBALS['__I18N'] = [
         'Private repository URL' => 'URL del repositorio privado',
         'GitHub token (Contents: read and write)' => 'Token de GitHub (Contents: lectura y escritura)',
         'Report branch' => 'Rama del reporte',
+        'External read-only report API' => 'API externa de reporte de solo lectura',
+        'Create / rotate API token' => 'Crear / rotar token de API',
+        'Revoke API token' => 'Revocar token de API',
+        'Copy URL once' => 'Copiar URL una vez',
+        'URL tokens can leak in access logs and browser history. Prefer Authorization: Bearer for app calls. HTTPS required. Copy now; the URL is never restored.' => 'Los tokens en URL pueden filtrarse en registros de acceso e historial. Prefiera Authorization: Bearer para apps. Se requiere HTTPS. Copie ahora; la URL no se restaura.',
+        'API request failed.' => 'Falló la solicitud de API.',
         'Sending…' => 'Enviando…',
         'Report saved to GitHub.' => 'Reporte guardado en GitHub.',
         'GitHub export failed.' => 'No se pudo enviar el reporte a GitHub.',
@@ -973,8 +981,6 @@ function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
 // ============================================================
 // AUTHENTICATION
 // ============================================================
-session_start();
-
 $config_file = __DIR__ . '/.migrate_config';
 $stored_hash = '';
 $cfg_data = [];
@@ -984,13 +990,118 @@ if (file_exists($config_file)) {
 }
 // Merge-and-save the tool's JSON config so writers never clobber other keys
 // (e.g. saving origin_domain must not drop password_hash).
-function migrate_config_set(array $kv) {
+function migrate_config_set(array $kv, $atomic = false) {
     global $config_file;
-    $cur = file_exists($config_file) ? (json_decode(file_get_contents($config_file), true) ?: []) : [];
+    if (!$atomic) {
+        // Preserve existing callers exactly; strict persistence is opt-in for API tokens.
+        $cur = file_exists($config_file) ? (json_decode(file_get_contents($config_file), true) ?: []) : [];
+        $cur = array_merge($cur, $kv);
+        file_put_contents($config_file, json_encode($cur));
+        @chmod($config_file, 0600);
+        return $cur;
+    }
+    if (is_link($config_file) || (file_exists($config_file) && !is_file($config_file))) {
+        throw new \RuntimeException('Configuration target is not a regular file.');
+    }
+    $raw = file_exists($config_file) ? @file_get_contents($config_file) : '{}';
+    $cur = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($cur)) throw new \RuntimeException('Configuration could not be read.');
     $cur = array_merge($cur, $kv);
-    file_put_contents($config_file, json_encode($cur));
-    @chmod($config_file, 0600);
+    $json = json_encode($cur);
+    if (!is_string($json)) throw new \RuntimeException('Configuration could not be encoded.');
+    $temporary = @tempnam(dirname($config_file), '.migrate_config-');
+    if ($temporary === false) throw new \RuntimeException('Configuration temporary file unavailable.');
+    try {
+        // Same-directory rename commits complete bytes without truncating the active config.
+        if (dirname($temporary) !== realpath(dirname($config_file)) || !@chmod($temporary, 0600)
+            || @file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)
+            || @file_get_contents($temporary) !== $json || !@rename($temporary, $config_file)) {
+            throw new \RuntimeException('Configuration write did not complete.');
+        }
+        if (@file_get_contents($config_file) !== $json) throw new \RuntimeException('Configuration verification failed.');
+    } finally {
+        if (is_file($temporary)) @unlink($temporary);
+    }
     return $cur;
+}
+
+// Machine requests terminate before sessions, bootstrap passwords or admin dispatch.
+function site_report_api_reply($code, $payload) {
+    http_response_code($code);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    header('X-Content-Type-Options: nosniff');
+    if ($payload !== null) echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+function site_report_api_https() {
+    // Do not trust caller-supplied forwarding headers.
+    return (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+        || (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
+}
+function site_report_api_request() {
+    // Existing file-download links have their own token contract, not API privileges.
+    $action = $_GET['action'] ?? null;
+    return defined('SITE_REPORT_API_ONLY') || $action === 'site_report_api'
+        || isset($_SERVER['HTTP_AUTHORIZATION'])
+        || (array_key_exists('token', $_GET) && $action !== 'download');
+}
+$machine_report = site_report_api_request();
+if ($machine_report) {
+    $deny = function () { site_report_api_reply(401, ['error'=>'Unauthorized.']); };
+    if (($_GET['action'] ?? null) !== 'site_report_api') $deny();
+    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+        header('Allow: GET, OPTIONS');
+        site_report_api_reply(204, null);
+    }
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') $deny();
+    if (!site_report_api_https()) site_report_api_reply(400, ['error'=>'HTTPS required.']);
+    $token = $_GET['token'] ?? null;
+    if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+        $authorization = $_SERVER['HTTP_AUTHORIZATION'];
+        $token = is_string($authorization) && preg_match('/^Bearer ([a-f0-9]{64})$/D', $authorization, $match) ? $match[1] : null;
+    }
+    $hash = $cfg_data['site_report_api_hash'] ?? null;
+    if (!is_string($token) || !preg_match('/^[a-f0-9]{64}$/D', $token)
+        || !is_string($hash) || !preg_match('/^[a-f0-9]{64}$/D', $hash)
+        || !hash_equals($hash, hash('sha256', $token))) $deny();
+    site_report_api_reply(200, collect_site_report($db, rtrim($abspath, '/'), $wp_config_path, $detected_cms === 'wordpress'));
+}
+
+function site_report_api_store_hash($hash) {
+    try {
+        migrate_config_set(['site_report_api_hash'=>$hash], true);
+    } catch (Throwable $e) {
+        site_report_api_reply(503, ['error'=>'API token could not be saved. Check configuration permissions and try again.']);
+    }
+}
+
+session_start();
+// Token management has an independent authentication + CSRF gate, before password writes.
+if (($_GET['action'] ?? null) === 'site_report_token') {
+    if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') site_report_api_reply(405, ['error'=>'Explicit POST required.']);
+    $csrf = $_POST['csrf'] ?? null;
+    if (!is_string($csrf) || !isset($_SESSION['site_report_api_csrf'])
+        || !hash_equals($_SESSION['site_report_api_csrf'], $csrf)) site_report_api_reply(403, ['error'=>'Invalid API session.']);
+    if (!site_report_api_https()) site_report_api_reply(400, ['error'=>'HTTPS required.']);
+    $operation = $_POST['operation'] ?? null;
+    if (!in_array($operation, ['create', 'rotate', 'revoke'], true)) site_report_api_reply(400, ['error'=>'Invalid API operation.']);
+    if ($operation === 'revoke') {
+        site_report_api_store_hash(null);
+        site_report_api_reply(200, ['ok'=>true]);
+    }
+    // The authority and path are strictly validated; never use PHP_SELF or forwarded headers.
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '';
+    if (!preg_match('/^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[a-f0-9:]+\])(?::[0-9]{1,5})?$/iD', $host)
+        || !preg_match('#^/(?:[a-zA-Z0-9_.%~-]+/)*[a-zA-Z0-9_.~-]+\.php$#D', $script)) {
+        site_report_api_reply(400, ['error'=>'Cannot determine API URL.']);
+    }
+    $directory = rtrim(str_replace('\\', '/', dirname($script)), '/');
+    $token = bin2hex(random_bytes(32));
+    site_report_api_store_hash(hash('sha256', $token));
+    site_report_api_reply(200, ['url'=>'https://' . $host . $directory . '/cms_tool.php?action=site_report_api&token=' . $token]);
 }
 
 $auth_error = '';
@@ -7077,6 +7188,17 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 <button type="button" class="btn" id="report_download" onclick="downloadSiteReport()" disabled><?= h(t('Download JSON')) ?></button>
 <p id="report_status" role="status" style="margin:16px 0"></p>
 <pre id="report_output" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:600px;overflow:auto"></pre>
+<?php $_SESSION['site_report_api_csrf'] ??= bin2hex(random_bytes(32)); ?>
+<section aria-labelledby="report_api_title">
+<h3 id="report_api_title"><?= h(t('External read-only report API')) ?></h3>
+<p><?= h(t('URL tokens can leak in access logs and browser history. Prefer Authorization: Bearer for app calls. HTTPS required. Copy now; the URL is never restored.')) ?></p>
+<input type="hidden" id="report_api_csrf" value="<?= h($_SESSION['site_report_api_csrf']) ?>">
+<button type="button" class="btn" onclick="manageReportApi('rotate')"><?= h(t('Create / rotate API token')) ?></button>
+<button type="button" class="btn" onclick="manageReportApi('revoke')"><?= h(t('Revoke API token')) ?></button>
+<input id="report_api_url" type="text" readonly autocomplete="off" spellcheck="false" aria-label="API URL">
+<button type="button" class="btn" id="report_api_copy" onclick="copyReportApiUrl()" disabled><?= h(t('Copy URL once')) ?></button>
+<p id="report_api_status" role="status" data-error="<?= h(t('API request failed.')) ?>"></p>
+</section>
 <form id="report_github_form" onsubmit="sendSiteReportGitHub(); return false;" style="margin-top:24px" autocomplete="off">
 <p><?= h(t('Use HTTPS for this tool. Review the JSON before sending. The token is not saved and is cleared after each attempt. Use an initialized private repository and a non-default report branch.')) ?></p>
 <label for="report_repository"><?= h(t('Private repository URL')) ?></label>
@@ -7093,6 +7215,34 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </form>
 </div>
 </div>
+<script>
+// The URL exists only in the visible control until copied, revoked or the page leaves.
+async function manageReportApi(operation) {
+    const url = document.getElementById('report_api_url');
+    const copy = document.getElementById('report_api_copy');
+    const status = document.getElementById('report_api_status');
+    url.value = ''; copy.disabled = true; status.textContent = '';
+    const data = new URLSearchParams({operation, csrf: document.getElementById('report_api_csrf').value});
+    try {
+        const response = await fetch('?action=site_report_token', {method: 'POST', body: data, cache: 'no-store', credentials: 'same-origin'});
+        const result = await response.json();
+        if (!response.ok) throw new Error('API');
+        url.value = result.url || '';
+        copy.disabled = !url.value;
+    } catch (_) { status.textContent = status.dataset.error; }
+}
+async function copyReportApiUrl() {
+    const url = document.getElementById('report_api_url');
+    if (!url.value) return;
+    try { await navigator.clipboard.writeText(url.value); }
+    catch (_) { document.getElementById('report_api_status').textContent = document.getElementById('report_api_status').dataset.error; return; }
+    url.value = ''; document.getElementById('report_api_copy').disabled = true;
+}
+window.addEventListener('pagehide', () => {
+    document.getElementById('report_api_url').value = '';
+    document.getElementById('report_api_copy').disabled = true;
+});
+</script>
 <script>
 let generatedSiteReport = null;
 let siteReportBinding = null;

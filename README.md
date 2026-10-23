@@ -54,6 +54,51 @@ A password-protected control panel for migrating and maintaining a WordPress sit
 It reads database credentials from `wp-config.php` automatically and drives every
 operation over PDO/mysqli.
 
+### External read-only report API
+
+Deploy `cms_tool.php` **beside** `cms_tools.php` to enable the singular compatibility
+URL. The alias serves only external report JSON; keep using `cms_tools.php` for
+administration. Both files are required, including when the tools live in a subdirectory.
+
+1. Open the canonical tool over **HTTPS**, log in, and open **Report**.
+2. Click **Create / rotate API token** and **Copy URL once**. The URL is shown only
+   for this action, cleared after copying or leaving the page, and never restored.
+3. Use the URL from a trusted HTTP client, or preferably send the token in a header:
+
+```text
+https://example.test/tools/cms_tool.php?action=site_report_api&token=YOUR_API_TOKEN
+```
+
+```bash
+curl --fail --silent --show-error \
+  -H 'Authorization: Bearer YOUR_API_TOKEN' \
+  'https://example.test/tools/cms_tool.php?action=site_report_api'
+```
+
+**URL tokens can leak in server/proxy access logs and browser history.** Prefer
+`Authorization: Bearer` for application calls; redact query strings in infrastructure
+logs. Do not put live tokens in source control. Only a SHA-256 token hash is stored
+in `.migrate_config`; the token is independent of the login password and GitHub token.
+Rotating invalidates the previous token immediately; **Revoke API token** disables
+access. Lifecycle changes use verified same-directory atomic writes; an unsuccessful
+save returns HTTP 503 and never reports success or provides a new token URL. The error
+is `API token could not be saved. Check configuration permissions and try again.`
+Treat the previous token as potentially active until revocation succeeds. Temporary
+configuration files use mode `0600` and are removed after a failed write. Block web
+access to `.migrate_config` and `.migrate_config-*` temporary files at the web server.
+
+The generated URL uses the server's accepted Host authority. Configure an expected-host
+allowlist at your web server or trusted proxy and verify the URL before distributing it.
+
+Each successful GET collects a **fresh** secret-excluding report, without login or
+session cookies. Tokens grant no config, database download, repair, GitHub or write
+access. Invalid credentials return JSON HTTP 401. Responses use `no-store` and
+`nosniff`; HTTP token use is refused. HTTPS detection uses the server TLS state,
+not untrusted forwarding headers: TLS-terminating proxies must configure trusted
+server HTTPS state. OPTIONS does not collect a report or authenticate. No CORS is
+enabled: server-side HTTP clients work from any app; cross-origin browser apps
+should use their own backend rather than sending cookies or exposing this token.
+
 ### Site report / Reporte (read-only JSON)
 
 1. Log in and open **Report** (**Reporte** in Spanish).
