@@ -1,23 +1,23 @@
 <?php
 /**
  * WP Migration Tool
- * Protegido por contraseña + nombre de archivo aleatorio
- * Uso: renombrar este archivo a migrate_RANDOMCHARS.php
+ * Protected by a password + randomized filename
+ * Usage: rename this file to migrate_RANDOMCHARS.php
  */
 
 // ============================================================
-// CONFIGURACIÓN DE SEGURIDAD
+// SECURITY CONFIGURATION
 // ============================================================
-// Contraseña almacenada como hash (SHA-256 + salt)
-// Para cambiar la contraseña, ejecutar:
+// Password stored as a hash (SHA-256 + salt)
+// To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
-// y reemplazar PASSWORD_HASH abajo.
+// and replace PASSWORD_HASH below.
 define('TOOL_VERSION',  '3.17.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
-define('PASSWORD_HASH', ''); // vacío = primera ejecución, se pedirá crear contraseña
+define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
 // ============================================================
-// DETECCIÓN DE CMS Y CREDENCIALES DE BASE DE DATOS
+// CMS AND DATABASE CREDENTIAL DETECTION
 // ============================================================
 // Supports WordPress, Joomla, Drupal and MediaWiki: finds the config file in the
 // current or parent directory, identifies the CMS, and reads the DB credentials
@@ -971,7 +971,7 @@ function split_sql_to_zip_parts($sql_path, $out_dir, $base_name, $max_bytes) {
 }
 
 // ============================================================
-// AUTENTICACIÓN
+// AUTHENTICATION
 // ============================================================
 session_start();
 
@@ -1055,7 +1055,7 @@ if (isset($_GET['logout'])) {
 }
 
 // ============================================================
-// BIGDUMP EMBEDDED (requiere auth)
+// BIGDUMP EMBEDDED (requires auth)
 // ============================================================
 if ($authenticated && isset($_GET['action']) && $_GET['action'] === 'bigdump') {
     // Inject DB credentials from wp-config into BigDump variables
@@ -1453,7 +1453,7 @@ window.setTimeout(function(){makeRequest("<?php echo addslashes($next); ?>");},5
 }
 
 // ============================================================
-// ACCIONES AJAX (requieren auth)
+// AJAX ACTIONS (require auth)
 // ============================================================
 
 // --- DYNAMIC ASSET FALLBACK (public; invoked by .htaccess on missing files) ---
@@ -1513,12 +1513,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'asset_fallback') {
     http_response_code(404); exit;
 }
 
-// Download no requiere sesión activa — token + nombre de archivo como auth
+// Download does not require an active session — token + filename serve as auth
 if (isset($_GET['action']) && $_GET['action'] === 'download') {
     $token    = preg_replace('/[^a-f0-9]/', '', $_GET['token'] ?? '');
     $filename = basename($_GET['file'] ?? '');
     $dl_dir   = __DIR__ . '/.migrate_exports';
-    // Validar: el token debe estar en el nombre del archivo
+    // Validate: the token must be part of the filename
     if (!$token || !$filename || strpos($filename, $token) === false) {
         http_response_code(403); echo 'Invalid token'; exit;
     }
@@ -1981,7 +1981,7 @@ if ($authenticated && isset($_GET['action'])) {
         $method   = '';
         $error    = '';
 
-        // Método 1: mysqldump CLI
+        // Method 1: mysqldump CLI
         $mysqldump = check_cmd('mysqldump');
         if (!$exported && $mysqldump) {
             $pass_flag = $export_db['pass'] !== '' ? '--password=' . escapeshellarg($export_db['pass']) : '--password=""';
@@ -2003,7 +2003,7 @@ if ($authenticated && isset($_GET['action'])) {
             }
         }
 
-        // Método 2: PDO puro — escribe directo al archivo, sin acumular en memoria
+        // Method 2: plain PDO — write directly to the file without buffering in memory
         if (!$exported) {
             $r = try_db_connect($export_db);
             if ($r['ok']) {
@@ -2050,11 +2050,11 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Reemplazar URLs en el SQL (serialized-safe)
+        // Replace URLs in the SQL (serialized-safe)
         if ($source_url && $target_url && $source_url !== $target_url) {
             $content = file_get_contents($filepath);
 
-            // 1. Reemplazar en strings serializados primero (actualiza s:LENGTH correctamente)
+            // 1. Replace serialized strings first (update s:LENGTH correctly)
             $content = preg_replace_callback(
                 '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
                 function($m) use ($source_url, $target_url) {
@@ -2065,7 +2065,7 @@ if ($authenticated && isset($_GET['action'])) {
                 $content
             );
 
-            // 2. Reemplazar el resto (valores planos: siteurl, home, guid, etc.)
+            // 2. Replace the rest (plain values: siteurl, home, guid, etc.)
             $content = str_replace($source_url, $target_url, $content);
 
             file_put_contents($filepath, $content);
@@ -2102,7 +2102,7 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Comprimir a .gz
+        // Compress to .gz
         $gz_ok = false;
         if (function_exists('gzopen')) {
             $gz = gzopen($zippath, 'wb9');
@@ -2112,9 +2112,9 @@ if ($authenticated && isset($_GET['action'])) {
             gzclose($gz);
             if (file_exists($zippath) && filesize($zippath) > 0) $gz_ok = true;
         }
-        if (!$gz_ok) $zippath = $filepath; // servir .sql si no hay gzip
+        if (!$gz_ok) $zippath = $filepath; // serve .sql if gzip is unavailable
 
-        // Renombrar con token aleatorio dentro de la misma carpeta
+        // Rename with a random token within the same folder
         $dl_token   = bin2hex(random_bytes(6));
         $final_name = 'db_' . date('Ymd_His') . '_' . $dl_token . ($gz_ok ? '.sql.gz' : '.sql');
         $final_path = $dl_dir . '/' . $final_name;
@@ -2142,7 +2142,7 @@ if ($authenticated && isset($_GET['action'])) {
         $zip_name   = 'hosting_' . date('Ymd_His') . '_' . $dl_token . '.zip';
         $zip_path   = $dl_dir . '/' . $zip_name;
 
-        // Excluir paths que no deben ir en el zip
+        // Exclude paths that should not be included in the zip
         $excludes = [
             realpath($dl_dir),
             realpath(__DIR__ . '/.migrate_config'),
@@ -2155,7 +2155,7 @@ if ($authenticated && isset($_GET['action'])) {
         $zipped   = false;
         $method   = '';
 
-        // Método 1: zip CLI
+        // Method 1: zip CLI
         $zip_cmd = check_cmd('zip');
         if (!$zipped && $zip_cmd) {
             $excludes_str = '';
@@ -2176,7 +2176,7 @@ if ($authenticated && isset($_GET['action'])) {
             }
         }
 
-        // Método 2: ZipArchive PHP
+        // Method 2: PHP ZipArchive
         if (!$zipped && class_exists('ZipArchive')) {
             set_time_limit(600);
             $zip = new ZipArchive();
@@ -2188,7 +2188,7 @@ if ($authenticated && isset($_GET['action'])) {
                 foreach ($files as $file) {
                     if (!$file->isFile()) continue;
                     $real = $file->getRealPath();
-                    // Excluir paths
+                    // Exclude paths
                     $skip = false;
                     foreach (array_filter($excludes) as $ex) {
                         if (strpos($real, $ex) === 0) { $skip = true; break; }
@@ -2205,7 +2205,7 @@ if ($authenticated && isset($_GET['action'])) {
             }
         }
 
-        // Método 3: tar.gz CLI (fallback en Linux)
+        // Method 3: tar.gz CLI (Linux fallback)
         if (!$zipped && check_cmd('tar')) {
             $tar_path = $dl_dir . '/hosting_' . date('Ymd_His') . '_' . $dl_token . '.tar.gz';
             $exc_str  = '';
@@ -2261,14 +2261,14 @@ if ($authenticated && isset($_GET['action'])) {
         header('Content-Disposition: attachment; filename="' . basename($found) . '"');
         header('Content-Length: ' . filesize($found));
         readfile($found);
-        // Limpiar después de 1h (lazy cleanup)
+        // Clean up after 1h (lazy cleanup)
         if (filemtime($found) < time() - 3600) unlink($found);
         exit;
     }
 
-    // --- IMPORT DB (destino) ---
+    // --- IMPORT DB (destination) ---
     if ($action === 'import_db') {
-        // Verificar URL del destino
+        // Verify the destination URL
         $dest_url = trim($_POST['dest_url'] ?? '');
         $cur_url  = current_url();
         if ($dest_url && rtrim($dest_url, '/') !== rtrim($cur_url, '/')) {
@@ -2285,14 +2285,14 @@ if ($authenticated && isset($_GET['action'])) {
             'charset' => 'utf8mb4',
         ];
 
-        // Test conexión
+        // Test connection
         $r = try_db_connect($import_db);
         if (!$r['ok']) {
             echo json_encode(['ok' => false, 'error' => 'DB connection failed: ' . $r['error']]);
             exit;
         }
 
-        // Recibir archivo SQL: upload o archivo en servidor
+        // Receive SQL file: upload or existing server file
         $server_sql = isset($_POST['server_file']) ? basename($_POST['server_file']) : '';
         if ($server_sql) {
             $server_sql_path = rtrim($abspath, '/') . '/' . $server_sql;
@@ -2339,7 +2339,7 @@ if ($authenticated && isset($_GET['action'])) {
         $imported = false;
         $method   = '';
 
-        // Método 1: mysql CLI
+        // Method 1: mysql CLI
         $mysql_cmd = check_cmd('mysql');
         if (!$imported && $mysql_cmd) {
             $cmd = sprintf(
@@ -2355,14 +2355,14 @@ if ($authenticated && isset($_GET['action'])) {
             if ($ret === 0) { $imported = true; $method = 'mysql CLI'; }
         }
 
-        // Método 2: PDO chunk-by-chunk
+        // Method 2: PDO chunk-by-chunk
         if (!$imported) {
             $r = try_db_connect($import_db);
             if ($r['ok']) {
                 $pdo = $r['pdo'];
                 $pdo->exec("SET FOREIGN_KEY_CHECKS=0; SET NAMES utf8mb4;");
                 $content = file_get_contents($sql_path);
-                // Dividir por ; respetando strings
+                // Split on ; while respecting strings
                 $queries = preg_split('/;\s*\n/', $content);
                 $errors  = [];
                 foreach ($queries as $q) {
@@ -2382,7 +2382,7 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Verificar URL en DB tras importar
+        // Verify the URL in the DB after import
         $db_url = detect_site_url($import_db);
         $url_ok = rtrim($db_url, '/') === rtrim($cur_url, '/');
 
@@ -2457,7 +2457,7 @@ if ($authenticated && isset($_GET['action'])) {
     // --- EXTRACT ZIP ---
     if ($action === 'extract_zip') {
         @set_time_limit(0);
-        // Puede venir como archivo subido o como nombre de archivo ya en el servidor
+        // Accept either an uploaded file or the name of an existing server file
         $server_file = isset($_POST['server_file']) ? basename($_POST['server_file']) : '';
         if ($server_file) {
             $server_path = rtrim($abspath, '/') . '/' . $server_file;
@@ -2479,21 +2479,21 @@ if ($authenticated && isset($_GET['action'])) {
         $extracted = false;
         $method    = '';
 
-        // Método 1: unzip CLI
+        // Method 1: unzip CLI
         if (!$extracted && check_cmd('unzip')) {
             $cmd = sprintf('unzip -o %s -d %s 2>&1', escapeshellarg($tmp), escapeshellarg($dest));
             exec($cmd, $out_exec, $ret);
             if ($ret === 0) { $extracted = true; $method = 'unzip CLI'; }
         }
 
-        // Método 2: tar CLI (para .tar.gz)
+        // Method 2: tar CLI (for .tar.gz)
         if (!$extracted && preg_match('/\.tar\.gz$/', $name) && check_cmd('tar')) {
             $cmd = sprintf('tar -xzf %s -C %s 2>&1', escapeshellarg($tmp), escapeshellarg($dest));
             exec($cmd, $out_exec, $ret);
             if ($ret === 0) { $extracted = true; $method = 'tar CLI'; }
         }
 
-        // Método 3: ZipArchive PHP
+        // Method 3: PHP ZipArchive
         if (!$extracted && class_exists('ZipArchive')) {
             set_time_limit(600);
             $zip = new ZipArchive();
@@ -6499,7 +6499,7 @@ if ($authenticated && isset($_GET['action'])) {
 }
 
 // ============================================================
-// DETECCIÓN DE ENTORNO
+// ENVIRONMENT DETECTION
 // ============================================================
 // siteurl lives in wp_options — only meaningful for WordPress.
 $site_url    = ($detected_cms === 'wordpress') ? detect_site_url($db) : '';
