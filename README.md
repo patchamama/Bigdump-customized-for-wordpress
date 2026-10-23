@@ -1,5 +1,7 @@
 # Bigdump — WordPress Edition
 
+[Español](README.es.md) · [Pending work and known limitations](TODO.md)
+
 <p>
   <img alt="PHP" src="https://img.shields.io/badge/PHP-8.0%2B-777BB4?logo=php&logoColor=white">
   <img alt="MySQL" src="https://img.shields.io/badge/MySQL%2FMariaDB-5.6%2B-4479A1?logo=mysql&logoColor=white">
@@ -28,6 +30,32 @@ administration. No Composer, no framework, no build step — drop a file next to
 > **Security notice.** These tools expose database and filesystem operations through
 > the browser. Protect them behind authentication and delete them after use. See
 > [Security](#security).
+
+## Choose a script
+
+| File | Purpose | Boundary |
+| --- | --- | --- |
+| `cms_tools.php` | Authenticated migration, maintenance, reports and token management | Can modify live files, tables and accounts. |
+| `cms_tool.php` | Restricted compatibility URL for external report JSON | Requires `cms_tools.php` beside it; report tokens grant no administrative access. |
+| `bigdump.php` | Extended staggered SQL/CSV importer and WordPress migration tools | Import can drop/replace tables; use a separate backup and access restrictions. |
+| `bigdump_original.php` | Historical modified BigDump 0.36b reference with config discovery | Not the maintained panel or a hardened alternative; do not deploy merely because its name says original. |
+
+### Implemented versus pending
+
+- **Implemented and synthetically verified:** optional JSON report, private GitHub export,
+  external token API with create/rotate/revoke and persistence-failure handling, and English
+  internal comments. No passwords, database contents or personal records enter the report.
+- **Existing legacy tools:** migration, users, media, SEO, filesystem and sandbox tools
+  described below. Their presence does not mean every action was retested here.
+- **Not delivered:** a complete isolated WordPress upgrade-and-compatibility workflow.
+  The interrupted candidate is not integrated. Do not use the legacy sandbox or installer
+  as a substitute. See [TODO.md](TODO.md).
+- **Explicitly excluded:** automatic replacement of production. The planned upgrade flow
+  prepares/tests a separate installation and recommends manual migration after backup.
+
+These additions are local feature-branch work until published. Deploy matching files from
+one revision; download commands targeting `main` do not publish this branch or guarantee
+that its new features are already available there.
 
 ---
 
@@ -165,6 +193,9 @@ system temporary directory (a harness may remove them when the command exits).
 
 ### Quick update (one-click post-migration)
 
+**This repairs a migration; it does not upgrade WordPress core.** It modifies the live
+configuration/database. Back up both files and database before applying it.
+
 Given only the real DB credentials, the tool knows the **old** site URL (from the database) and
 the **current** URL (from the browser), so a freshly-moved site can be fixed in one guarded step:
 rewrite `wp-config.php` (backed up first), set `siteurl`/`home`, convert absolute `wp-content`
@@ -214,19 +245,24 @@ Find **orphan uploads** (on disk but not referenced in the database) and **large
 deleting. Test which **Apache/.htaccess features** the host supports (rewrite, redirects, Basic
 auth, gzip, caching, headers) without touching the live `.htaccess`.
 
-### Test Environment (isolated sandbox)
+### Test Environment (legacy sandbox; not upgrade isolation)
 
-Builds a runnable WordPress sandbox in a subfolder without risking the live site: it **replicates
-the database** tables under a test prefix (progress bar), and links the core, plugins, themes and
-uploads (symlink, falling back to copy) with its own `wp-config.php`. Then it can **smoke-test each
-plugin** one by one against the sandbox (flagging any that 500 / fatal), **vet new plugins** from the
-wordpress.org API before installing them live, run a **PHP-compatibility** check, and produce a
-report. Tables and folder are disposable.
+**Do not use this environment to update WordPress or prove production safety.** It copies
+tables under a derived prefix but shares core, plugins, themes and uploads through symlinks.
+Root PHP linking can include `wp-config.php`; a later sandbox configuration write can affect
+the live configuration. Different table prefixes do not restrict what code using production
+database credentials can access.
 
-The sandbox can optionally be built as a **multisite network** (subdirectory or subdomain),
-creating the network tables in the copy and offering a form to **add sub-sites** to exercise
-multisite. Besides the one-by-one smoke test, a **test-all-plugins** run activates every plugin at
-once and, if the site breaks, **bisects** to the minimal conflicting plugin set.
+Existing controls include per-plugin homepage smoke tests, all-plugin activation/bisection,
+plugin vetting, PHP requirement indicators and optional multisite/sub-site creation. These
+are not comprehensive compatibility checks. Network failures, redirects and missing assets
+need independent verification; a page that loads does not establish admin/REST/cron or
+business-function compatibility. Cleanup can affect all matching sandbox-prefix tables and
+`test_env_*` folders, not an independently owned run.
+
+Use a separate hosting/container/filesystem/database clone for experiments until isolation
+is corrected. A complete safe upgrade workflow remains pending. There is no production
+promotion operation in the new report/API feature.
 
 ### Database export and import
 
@@ -265,7 +301,8 @@ once and, if the site breaks, **bisects** to the minimal conflicting plugin set.
   and write them to `.htaccess` and/or `.user.ini`.
 - **Cache clear** — purge `wp-content/cache` and Divi `et-cache`.
 - **Hosting export** — package the site files into a `.zip` (or `.tar.gz`) for download,
-  excluding caches and backups.
+  excluding selected caches/backups. This action does **not generate a database dump**.
+  Archives can contain private configuration/content; keep them private.
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.
 
@@ -322,8 +359,9 @@ once and, if the site breaks, **bisects** to the minimal conflicting plugin set.
 ### Access control and language
 
 - Password-protected UI with a server-side session. By default the **wp-config `DB_PASSWORD`**
-  is the gate; if it is empty the tool forces you to create an encrypted password first, so it
-  is never left open. A custom encrypted password can be set and then takes priority.
+  is the gate; if it is empty the tool forces creation of a custom password first.
+  The custom password is stored as a salted hash, **not encrypted plaintext**, and takes
+  priority. This is not WordPress login, multi-user authorization or a secrets vault.
 - **Bilingual UI** — English / Spanish, switchable from the header.
 - **Light / dark theme** — toggle from the header, remembered across sessions.
 
@@ -357,6 +395,17 @@ by importing in sessions, with a live AJAX progress bar.
 
 ---
 
+## Backup and rollback boundaries
+
+Before any write operation, export the **database** and **site files** separately, store
+both outside the public web root, and verify restoration on a separate installation.
+Keep the original WordPress/PHP/database versions and hosting rules needed for that restore.
+
+Configuration snapshots cover selected configuration files and the active-plugin list;
+they are **not** complete backups of database, core, plugins, themes and uploads. Restore
+logs or renamed folders for individual cleanup operations do not replace a full backup.
+Neither the JSON report nor GitHub report history can restore a site.
+
 ## Requirements
 
 | Requirement | Minimum | Recommended |
@@ -389,16 +438,47 @@ These tools are maintenance utilities, not applications to leave running.
 2. Perform the task, then delete the script immediately.
 3. Never commit `wp-config.php`, `.migrate_config` or `bigdump.config.json`.
 4. On a remote server, restrict access with `.htaccess` IP filtering or HTTP basic auth.
-5. Verify the script and its state files are gone after use.
+5. Verify scripts, dumps, temporary files and state files are gone after use. If intentionally
+   keeping the report API available, retain both PHP files, restrict the canonical admin
+   URL separately, protect state files and revoke the token before decommissioning.
+6. Require HTTPS for the tool/API. Configure trusted TLS state behind a proxy and an
+   expected-Host allowlist; never distribute an unverified generated URL.
+7. Block HTTP access to configuration/state files, `.migrate_config-*` temporary files,
+   backups and exports at the server. Mode `0600` alone is not a web access policy.
+
+## Verification
+
+The new report/API checks use synthetic temporary installations, fake PDO and simulated
+GitHub transports, not a real deployment:
+
+```bash
+php -l cms_tools.php
+php -l cms_tool.php
+php tests/site-report.php
+SITE_REPORT_TEST_CURL=1 php tests/site-report.php
+php tests/site-report-api.php
+node tests/site-report-ui.cjs
+node tests/site-report-api-ui.cjs
+```
+
+PHP and Node are needed for these checks; Node is not a browser-runtime dependency. Coverage
+includes privacy/unknowns, mocked GitHub writes, token scope/CSRF, legacy downloads, lifecycle
+and failed atomic persistence. It does not prove real TLS/proxy settings, GitHub permissions,
+full database behavior, Apache rules, all legacy actions or WordPress-upgrade compatibility.
 
 ---
 
 ## File structure
 
 ```
-cms_tools.php    WordPress migration and maintenance suite (single file)
-bigdump.php              Staggered MySQL importer (single file)
-.migrate_config          Auth hash for cms_tools.php (git-ignored)
+cms_tools.php            WordPress maintenance panel and report implementation
+cms_tool.php             Restricted report alias; requires cms_tools.php
+bigdump.php              Extended staggered MySQL importer
+bigdump_original.php     Historical modified BigDump reference
+README.es.md             Detailed Spanish usage and scope
+TODO.md                  Pending work and known limitations
+tests/                   Synthetic report/API regression tests
+.migrate_config          Login/API hashes and tool settings (git-ignored)
 .migrate_exports/        Generated exports and split parts (git-ignored)
 bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 ```
@@ -409,6 +489,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
+| Unreleased feature work | Optional secret-excluding JSON report; private GitHub export with editable branch; restricted report API; independent hash-only tokens with verified atomic saves; English internal comments; bilingual documentation and explicit pending-work boundaries. No complete safe WordPress updater is shipped. |
 | `cms 3.17.0` | Environment Status now shows the **PHP and MySQL/MariaDB versions**; the tool **checks GitHub for a newer release** and, if one exists, highlights it near the version with a one-click **Update** button (downloads the release, validates it with `php -l`, backs up the current file as `cms_tools.php.bak-<old>`, then replaces it in place — reversible); new **anti-hotlinking** protection in Security that detects whether external sites can embed this site's assets and patches `.htaccess` with referer rules after testing them in an isolated subfolder (no HTTP 500) and backing up the current `.htaccess`; new **News tab** with the WordPress.org feed that raises a banner at the top of the app when a security/critical release is published |
 | `cms 3.16.0` | The "Recover missing assets" scanner now **lists the exact missing files** (not just a count) in a scrollable panel, with a one-click **Copy list** button; during recovery each row is marked recovered (green) or not-found (red) |
 | `cms 3.15.0` | **Site snapshots** under Quick Update: save a dated snapshot of the important configuration (`.htaccess`, `php.ini`, `.user.ini`, `wp-config.php`, `robots.txt`, `.htpasswd`) and the active-plugins list, then restore the site to that exact state in one click if a later change breaks it. Creating a snapshot changes nothing; a restore always takes a safety snapshot of the current state first, writes back only the known config filenames (no path traversal) and reactivates the exact plugins that were active |
