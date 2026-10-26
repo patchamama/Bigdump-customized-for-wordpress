@@ -84,7 +84,7 @@ $cms_defs = [
 foreach ([__DIR__, dirname(__DIR__)] as $base) {
     // Metadata discovery must not read legacy configuration contents before auth.
     // All existing commands retain their original CMS discovery behavior.
-    if (($_GET['action'] ?? null) === 'cms_install_discover') break;
+    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step'], true)) break;
     if ($detected_cms) break;
     foreach ($cms_defs as $cms => $def) {
         $path = $base . '/' . $def['file'];
@@ -137,6 +137,19 @@ $GLOBALS['__I18N'] = [
         'Enter the database password from wp-config.php' => 'Ingresá la contraseña de la base de datos definida en wp-config.php',
         'Access Password'                     => 'Contraseña de acceso',
         'Password'                            => 'Contraseña',
+        'Install CMS' => 'Instalar CMS',
+        'Draft only: choose a CMS and destination. No files or databases are changed.' => 'Solo borrador: elegí un CMS y destino. No se modifican archivos ni bases de datos.',
+        'Choose CMS' => 'Elegir CMS',
+        'Choose destination' => 'Elegir destino',
+        'App directory (no replacement)' => 'Carpeta de la app (sin reemplazo)',
+        'New isolated sandbox (not created yet)' => 'Nuevo sandbox aislado (aún no creado)',
+        'Nonempty-root replacement requires a later separately protected workflow. Config/core markers do not prove installation or an empty destination.' => 'Reemplazar una carpeta no vacía requiere un flujo posterior protegido por separado. Los indicadores de configuración/core no prueban instalación ni destino vacío.',
+        'Prepare draft' => 'Preparar borrador',
+        'Resume draft' => 'Retomar borrador',
+        'Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.' => 'Validación de base de datos no disponible: falta el adaptador. No se piden credenciales; compatibilidad de motores, prefijos, instalación y reutilización de configuración siguen sin verificar.',
+        'Draft awaiting database validation' => 'Borrador pendiente de validación de base de datos',
+        'No draft in this app/session' => 'No hay borrador en esta app/sesión',
+        'Draft request failed. Existing draft is unchanged; resume to check state.' => 'Falló la solicitud. El borrador existente no cambia; retomá para consultar su estado.',
         'New password'                        => 'Nueva contraseña',
         'Custom password'                     => 'Contraseña propia',
         'Confirm'                             => 'Confirmar',
@@ -1145,6 +1158,49 @@ if (($_GET['action'] ?? null) === 'cms_install_discover') {
     }
     // No destination parameter is consumed; discovery always refers to __DIR__.
     site_report_api_reply(200, cms_install_discovery());
+}
+// Fixed draft routes: session authority only; future adapters must extend explicit branches.
+$installer_action = $_GET['action'] ?? null;
+if (in_array($installer_action, ['cms_install_prepare', 'cms_install_state', 'cms_install_step'], true)) {
+    if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
+    $method = $installer_action === 'cms_install_state' ? 'GET' : 'POST';
+    if ($_SERVER['REQUEST_METHOD'] !== $method) {
+        header('Allow: '.$method);
+        site_report_api_reply(405, ['error'=>$method.' required.']);
+    }
+    if ($method === 'POST') {
+        $csrf = $_POST['csrf'] ?? null;
+        if (!is_string($csrf) || !isset($_SESSION['cms_install_csrf'])
+            || !hash_equals($_SESSION['cms_install_csrf'], $csrf)) site_report_api_reply(403, ['error'=>'Invalid installer session.']);
+    }
+    // Bind to this application, not legacy $abspath (which may refer to a parent CMS).
+    $app = hash('sha256', __DIR__);
+    $draft = $_SESSION['cms_install_draft'] ?? null;
+    if ($installer_action === 'cms_install_prepare') {
+        $cms = $_POST['cms'] ?? null;
+        $destination = $_POST['destination'] ?? null;
+        if (!in_array($cms, ['wordpress','joomla','drupal','mediawiki'], true)
+            || !in_array($destination, ['app-directory','sandbox'], true)) site_report_api_reply(400, ['error'=>'Invalid CMS or destination.']);
+        // No overwrite, even on expiry or app mismatch; no automatic recovery/repair.
+        if ($draft !== null) site_report_api_reply(409, ['error'=>'A draft already exists in this session.']);
+        $draft = ['app'=>$app, 'run_id'=>bin2hex(random_bytes(32)), 'cms'=>$cms, 'destination'=>$destination,
+            'stage'=>'awaiting_database_validation', 'created_at'=>time(), 'expires_at'=>time()+1800];
+        $_SESSION['cms_install_draft'] = $draft;
+    } elseif ($draft === null || ($draft['app'] ?? null) !== $app) {
+        if ($installer_action === 'cms_install_state') site_report_api_reply(200, ['draft'=>null]);
+        site_report_api_reply(404, ['error'=>'Draft not found.']);
+    }
+    if ($draft['expires_at'] <= time()) site_report_api_reply(410, ['error'=>'Draft expired. Start a new authenticated session.']);
+    if ($installer_action === 'cms_install_step') {
+        $id = $_POST['run_id'] ?? null;
+        $stage = $_POST['stage'] ?? null;
+        if (!is_string($id) || !is_string($stage)) site_report_api_reply(400, ['error'=>'Invalid draft input.']);
+        if (!hash_equals($draft['run_id'], $id)) site_report_api_reply(404, ['error'=>'Draft not found.']);
+        if ($stage !== $draft['stage']) site_report_api_reply(409, ['error'=>'Stale draft stage.']);
+        site_report_api_reply(503, ['error'=>'Database validation adapter unavailable. Draft unchanged.', 'code'=>'database_adapter_unavailable']);
+    }
+    unset($draft['app']);
+    site_report_api_reply($installer_action === 'cms_install_prepare' ? 201 : 200, ['draft'=>$draft]);
 }
 // Token management has an independent authentication + CSRF gate, before password writes.
 if (($_GET['action'] ?? null) === 'site_report_token') {
@@ -7089,6 +7145,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <button class="tab active" onclick="showTab('export')">📤 <?= h(t('Export (Origin)')) ?></button>
     <button class="tab" onclick="showTab('import')">📥 <?= h(t('Import (Destination)')) ?></button>
     <button class="tab" onclick="showTab('tools')">🛠️ <?= h(t('DB Tools')) ?></button>
+    <button class="tab" onclick="showTab('install')"><?= h(t('Install CMS')) ?></button>
     <button class="tab" onclick="showTab('report')">📋 <?= h(t('Report')) ?></button>
     <button class="tab" onclick="showTab('news')">📰 <?= h(t('News')) ?></button>
     <button class="tab" onclick="showTab('info')">ℹ️ <?= h(t('How to use')) ?></button>
@@ -7248,6 +7305,61 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 </div><!-- /import -->
 
 <!-- ===== REPORT TAB ===== -->
+<script>
+// Session-only draft controller: fixed routes, no credentials and no browser persistence.
+let cmsInstallBusy = false;
+let cmsInstallOwned = false;
+async function cmsInstallDraft(operation) {
+    if (cmsInstallBusy || !['prepare', 'state'].includes(operation)) return;
+    cmsInstallBusy = true;
+    const el = id => document.getElementById('install_' + id);
+    const controls = ['prepare', 'resume', 'cms', 'destination'];
+    controls.forEach(id => { el(id).disabled = true; });
+    try {
+        const options = {method: operation === 'state' ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin'};
+        if (operation === 'prepare') options.body = new URLSearchParams({
+            csrf: el('csrf').value, cms: el('cms').value, destination: el('destination').value
+        });
+        const response = await fetch('?action=cms_install_' + operation, options);
+        const data = await response.json();
+        if (!response.ok) throw new Error('draft unavailable');
+        const draft = data.draft;
+        if (draft !== null && (!draft || draft.stage !== 'awaiting_database_validation'
+            || !['wordpress','joomla','drupal','mediawiki'].includes(draft.cms)
+            || !['app-directory','sandbox'].includes(draft.destination))) throw new Error('invalid draft');
+        cmsInstallOwned = draft !== null;
+        if (draft) {
+            el('cms').value = draft.cms;
+            el('destination').value = draft.destination;
+        }
+        el('status').textContent = el('status').dataset[draft ? 'ready' : 'empty'];
+    } catch (_) {
+        el('status').textContent = el('status').dataset.error;
+    } finally {
+        cmsInstallBusy = false;
+        controls.forEach(id => { el(id).disabled = cmsInstallOwned && id !== 'resume'; });
+    }
+}
+</script>
+<div id="tab-install" class="section">
+<div class="card">
+<h2><?= h(t('Install CMS')) ?></h2>
+<p><?= h(t('Draft only: choose a CMS and destination. No files or databases are changed.')) ?></p>
+<p><?= h(t('Nonempty-root replacement requires a later separately protected workflow. Config/core markers do not prove installation or an empty destination.')) ?></p>
+<?php $_SESSION['cms_install_csrf'] ??= bin2hex(random_bytes(32)); ?>
+<input type="hidden" id="install_csrf" value="<?= h($_SESSION['cms_install_csrf']) ?>">
+<label for="install_cms"><?= h(t('Choose CMS')) ?></label>
+<select id="install_cms"><option value=""><?= h(t('Choose CMS')) ?></option><option value="wordpress">WordPress</option><option value="joomla">Joomla</option><option value="drupal">Drupal</option><option value="mediawiki">MediaWiki</option></select>
+<label for="install_destination"><?= h(t('Choose destination')) ?></label>
+<select id="install_destination"><option value=""><?= h(t('Choose destination')) ?></option><option value="app-directory"><?= h(t('App directory (no replacement)')) ?></option><option value="sandbox"><?= h(t('New isolated sandbox (not created yet)')) ?></option></select>
+<button type="button" id="install_prepare" onclick="cmsInstallDraft('prepare')"><?= h(t('Prepare draft')) ?></button>
+<button type="button" id="install_resume" onclick="cmsInstallDraft('state')"><?= h(t('Resume draft')) ?></button>
+<p id="install_status" role="status" data-ready="<?= h(t('Draft awaiting database validation')) ?>" data-empty="<?= h(t('No draft in this app/session')) ?>" data-error="<?= h(t('Draft request failed. Existing draft is unchanged; resume to check state.')) ?>"></p>
+<p><?= h(t('Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.')) ?></p>
+<button type="button" disabled><?= h(t('Draft awaiting database validation')) ?></button>
+</div>
+</div>
+
 <div id="tab-report" class="section">
 <div class="card">
 <h2>📋 <?= h(t('Report')) ?></h2>
@@ -7400,6 +7512,12 @@ function downloadSiteReport() {
 <li><?= t('Open the <strong>Import</strong> tab on the destination and import the <code>.sql</code>, <code>.gz</code> or <code>.zip</code> parts in order. The tool verifies the URL matches first.') ?></li>
 <li><?= t('For very large dumps, use the embedded <a href="?action=bigdump" style="color:#7dd3fc">BigDump</a> importer.') ?></li>
 </ol>
+</div>
+
+<div class="instructions" style="margin-top:16px">
+<h4><?= h(t('Install CMS')) ?></h4>
+<p><?= h(t('Draft only: choose a CMS and destination. No files or databases are changed.')) ?></p>
+<p><?= h(t('Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.')) ?></p>
 </div>
 
 <div class="instructions" style="margin-top:16px">

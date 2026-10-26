@@ -1,8 +1,10 @@
-# CMS installation discovery (foundation only)
+# CMS installation discovery and draft wizard
 
-**No CMS installation or public HTML wizard is available in this unit.** This
-read-only foundation provides evidence for a later, separately protected workflow.
-It does not replace the existing report, database tools or legacy CMS detection.
+**The Install CMS tab prepares a draft, not an installation.** Log in, explicitly
+choose WordPress/Joomla/Drupal/MediaWiki and the app directory or a new isolated
+sandbox, then prepare or resume the session draft. No directory is created.
+Database validation is visibly unavailable until its backend adapter is added.
+Existing report, database tools and legacy CMS detection are unchanged.
 
 ## Query the current application directory
 
@@ -16,7 +18,7 @@ The JSON schema is `cms-tools-install-discovery`, version 1. Responses use
 `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Unauthenticated
 requests return JSON 401; authenticated non-GET requests return 405. Report API
 tokens do not authorize discovery; existing machine-report dispatch takes priority.
-No CSRF token is needed for this read-only GET. There is no installer write route.
+No CSRF token is needed for this read-only GET. Draft routes are described below.
 
 Discovery uses the directory containing `cms_tools.php` (`__DIR__`), even when
 legacy tools detect a parent CMS. Arbitrary `path`/`directory` parameters are
@@ -61,11 +63,40 @@ creation, migration/replacement, backups/recovery, and paid-product integration.
 No config-only case is automatically reused or overwritten. Those require later
 explicit authenticated workflows and independent validation.
 
+## Session-only draft API
+
+All three fixed actions require the existing authenticated session. Machine-report
+precedence still applies: query tokens/Bearer cannot authorize these routes. These
+exact actions also bypass legacy config-content parsing before authentication.
+Responses are no-store JSON with nosniff; no secrets or absolute paths are returned.
+
+| Action | Method and input | Result |
+| --- | --- | --- |
+| `cms_install_prepare` | POST: independent installer `csrf`, scalar `cms`, `destination` (`app-directory` or `sandbox`) | 201 draft |
+| `cms_install_state` | GET | 200 draft or `draft: null` for this app/session |
+| `cms_install_step` | POST: installer `csrf`, `run_id`, `stage` | 503 `database_adapter_unavailable` for an owned current draft; no advancement |
+
+The tab provides the independent installer CSRF token. Prepare returns a random
+`run_id`, chosen CMS/destination, `stage: awaiting_database_validation`, and Unix
+`created_at`/`expires_at` timestamps (30-minute lifetime). The server binds the draft
+to the authenticated session and this application directory, never a parent CMS.
+Arbitrary paths/extra credentials are ignored, never stored. State is session-only:
+no config, CMS files, directories, database calls or counters are written.
+
+Wrong methods return 405, invalid CSRF 403, invalid inputs 400, unknown/foreign run
+IDs 404, stale stages/existing drafts 409, expired drafts 410. Expiry is not automatic
+repair: existing drafts, including expired/foreign-app drafts, cannot be overwritten.
+A fresh authenticated session is needed for another draft. Resume queries state;
+it does not resume backend installation. Nonempty-root replacement requires a later
+separately protected workflow. Config-only/no-CMS/parent-CMS cases can select a draft,
+but neither configuration reuse nor destination emptiness is inferred.
+
 ## Resumen en español
 
-Esta entrega solo descubre metadatos de la carpeta de la aplicación. **No instala
-CMS ni ofrece todavía un asistente HTML.** Un archivo de configuración, un marcador
-del núcleo o un controlador PHP no demuestran una instalación ni una conexión
-válida. Los motores son candidatos pendientes de validar para cada versión; no se
-leen configuraciones desde los nuevos ayudantes, no se conecta a bases de datos y
-no se escriben ajustes. La detección y las herramientas anteriores se conservan.
+La pestaña **Instalar CMS** permite elegir CMS y destino y preparar/retomar un
+borrador de sesión de 30 minutos. **No instala CMS ni pide contraseñas de BD.**
+La validación de base de datos está bloqueada hasta añadir el adaptador real.
+Configuraciones, marcadores y controladores no prueban instalación ni conexión.
+No se crean directorios ni se reutilizan/sobrescriben configuraciones o datos.
+Los motores y prefijos requieren validación posterior; plugins, temas, paquetes,
+copias, migración y reemplazo siguen pendientes.
