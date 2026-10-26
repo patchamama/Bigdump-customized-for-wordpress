@@ -82,6 +82,9 @@ $cms_defs = [
 
 // Look in the current dir and the parent for any known config file.
 foreach ([__DIR__, dirname(__DIR__)] as $base) {
+    // Metadata discovery must not read legacy configuration contents before auth.
+    // All existing commands retain their original CMS discovery behavior.
+    if (($_GET['action'] ?? null) === 'cms_install_discover') break;
     if ($detected_cms) break;
     foreach ($cms_defs as $cms => $def) {
         $path = $base . '/' . $def['file'];
@@ -1076,7 +1079,73 @@ function site_report_api_store_hash($hash) {
     }
 }
 
+// Installer discovery is independent of legacy CMS/DB globals and parent discovery.
+// Only metadata is inspected: never read, include or evaluate a CMS configuration.
+function cms_install_file_status($relative) {
+    $path = __DIR__;
+    $parts = explode('/', $relative);
+    foreach ($parts as $index => $part) {
+        $path .= '/' . $part;
+        if (is_link($path)) return 'unsafe-symlink';
+        if (!file_exists($path)) return 'absent';
+        if ($index < count($parts) - 1) {
+            if (!is_dir($path)) return 'unsafe-nonregular';
+        } elseif (!is_file($path)) {
+            return 'unsafe-nonregular';
+        }
+    }
+    return 'regular-file';
+}
+
+function cms_install_discovery() {
+    // These are evidence markers, not completeness checks or installed-site proof.
+    $profiles = [
+        'wordpress' => ['wp-config.php', 'wp-includes/version.php', ['mysql', 'mariadb']],
+        'joomla' => ['configuration.php', 'includes/version.php', ['mysql', 'mariadb', 'postgresql']],
+        'drupal' => ['sites/default/settings.php', 'core/lib/Drupal.php', ['mysql', 'mariadb', 'postgresql', 'sqlite']],
+        'mediawiki' => ['LocalSettings.php', 'includes/DefaultSettings.php', ['mysql', 'mariadb', 'postgresql', 'sqlite']],
+    ];
+    $cms = [];
+    foreach ($profiles as $name => [$config, $core, $engines]) {
+        $core_status = cms_install_file_status($core);
+        $cms[$name] = [
+            'config_status' => cms_install_file_status($config),
+            'core_marker_status' => $core_status,
+            'core_files_present' => $core_status === 'regular-file',
+            'engine_candidates' => $engines,
+            'engine_validation' => 'version-validation-pending',
+        ];
+    }
+    return [
+        'schema' => 'cms-tools-install-discovery',
+        'schema_version' => 1,
+        'scope' => 'app-directory',
+        'database_status' => 'unverified',
+        'installation_status' => 'unverified',
+        'php_drivers' => [
+            'mysqli' => extension_loaded('mysqli'),
+            'pdo_mysql' => extension_loaded('pdo_mysql'),
+            'pgsql' => extension_loaded('pgsql'),
+            'pdo_pgsql' => extension_loaded('pdo_pgsql'),
+            'sqlite3' => extension_loaded('sqlite3'),
+            'pdo_sqlite' => extension_loaded('pdo_sqlite'),
+        ],
+        'cms' => $cms,
+    ];
+}
+
 session_start();
+// Read-only installer metadata uses existing session authority, never report tokens.
+// Keep this ahead of password/bootstrap writes and behind machine-report dispatch.
+if (($_GET['action'] ?? null) === 'cms_install_discover') {
+    if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+        header('Allow: GET');
+        site_report_api_reply(405, ['error'=>'GET required.']);
+    }
+    // No destination parameter is consumed; discovery always refers to __DIR__.
+    site_report_api_reply(200, cms_install_discovery());
+}
 // Token management has an independent authentication + CSRF gate, before password writes.
 if (($_GET['action'] ?? null) === 'site_report_token') {
     if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
