@@ -1,0 +1,2 @@
+# Preserve the authenticated upstream fixture, including intentional blank-line tabs.
+tests/fixtures/wordpress-upgrade/akismet-default-6.8.3.htaccess -text whitespace=-blank-at-eol

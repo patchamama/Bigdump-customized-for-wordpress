@@ -47,11 +47,13 @@ administration. No Composer, no framework, no build step — drop a file next to
   internal comments. No passwords, database contents or personal records enter the report.
 - **Existing legacy tools:** migration, users, media, SEO, filesystem and sandbox tools
   described below. Their presence does not mean every action was retested here.
-- **Not delivered:** a complete isolated WordPress upgrade-and-compatibility workflow.
-  The interrupted candidate is not integrated. Do not use the legacy sandbox or installer
-  as a substitute. See [TODO.md](TODO.md).
-- **Explicitly excluded:** automatic replacement of production. The planned upgrade flow
+- **Independently reviewed local implementation:** staged WordPress upgrade smoke checks on separately provisioned
+  staging or optional offline Docker, with independent copies, restricted database accounts,
+  per-plugin/active-set, HTTP/REST, asset and effective PHP checks. Independent technical
+  review passed for this scope; smoke readiness is not complete application compatibility.
+- **Explicitly excluded:** automatic replacement of production. The upgrade flow
   prepares/tests a separate installation and recommends manual migration after backup.
+  Full progressive CMS installation, config-copy/replacement and recovery remain pending.
 
 These additions are local feature-branch work until published. Deploy matching files from
 one revision; download commands targeting `main` do not publish this branch or guarantee
@@ -245,6 +247,35 @@ Find **orphan uploads** (on disk but not referenced in the database) and **large
 deleting. Test which **Apache/.htaccess features** the host supports (rewrite, redirects, Basic
 auth, gzip, caching, headers) without touching the live `.htaccess`.
 
+### WordPress upgrade on separate staging or optional Docker
+
+Use **WordPress upgrade on separate staging** in Test Environment only after provisioning
+separate files, execution permissions and database credentials. Keep verified files **and full
+database** backups. Follow the [staging preparation guide](docs/staging-upgrade.md) for literal
+configuration, a SELECT-only baseline reader, an empty target schema/restricted writer and
+trusted HTTPS identity. The staged controller prepares independent copies, validates official
+core checksums, upgrades the copied database, tests plugins individually and as the original
+active set, and checks HTTP/REST, assets and effective PHP. Required failed/unavailable checks
+block readiness; reuse is restricted to unchanged upgrade-owned runs in the same session.
+Target credentials remain in private session/configuration, never progress JSON.
+
+[Optional Docker](docker/wordpress-upgrade/README.md) runs from a local CLI against an
+explicit offline backup and restricted plain SQL, never from web PHP or a live production
+path. The runner prefetches official core separately, then executes copied site code offline
+without host mounts, published ports or a Docker socket in the container. Docker is not
+required for reports, API or separate-host testing.
+
+Parent-observed isolated proof: genuine WordPress **6.8.3 → 7.1.3**, ready/runtime verified,
+17 OK / 1 environment warning / 0 failed, empty PHP log, 3,233 source hashes unchanged,
+and exactly three owned runtime resources cleaned. Independent code/integration review
+also passed. This is one fixture, **not** production compatibility, full installer or rollback proof.
+See [old-fixture tooling and limits](docs/wordpress-old-fixture.md).
+
+Known official Akismet rules are authenticated then omitted, never installed; passive
+`wp-content/index.php` is hash-bound and token-inspected. Unknown server/PHP overrides,
+links, MU plugins and drop-ins still fail closed. REST checks preserve source permalinks.
+Production migration/promotion/restoration remains manual after another full backup.
+
 ### Test Environment (legacy sandbox; not upgrade isolation)
 
 **Do not use this environment to update WordPress or prove production safety.** It copies
@@ -260,9 +291,8 @@ need independent verification; a page that loads does not establish admin/REST/c
 business-function compatibility. Cleanup can affect all matching sandbox-prefix tables and
 `test_env_*` folders, not an independently owned run.
 
-Use a separate hosting/container/filesystem/database clone for experiments until isolation
-is corrected. A complete safe upgrade workflow remains pending. There is no production
-promotion operation in the new report/API feature.
+Use the separate-staging or offline Docker upgrade workflow above instead. Neither the
+new updater nor report/API features provide a production promotion operation.
 
 ### Database export and import
 
@@ -489,7 +519,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 
 | Version | Changes |
 |---------|---------|
-| Unreleased feature work | Optional secret-excluding JSON report; private GitHub export with editable branch; restricted report API; independent hash-only tokens with verified atomic saves; English internal comments; bilingual documentation and explicit pending-work boundaries. No complete safe WordPress updater is shipped. |
+| Unreleased feature work | Optional secret-excluding JSON report; private GitHub export with editable branch; restricted report API; independent hash-only tokens with verified atomic saves; English internal comments; bilingual documentation and explicit pending-work boundaries. Separate-staging/optional offline Docker upgrade smoke workflow passed bounded independent technical review; local integration and final delivery remain separate. Production promotion and full progressive installation/recovery are not delivered. |
 | `cms 3.17.0` | Environment Status now shows the **PHP and MySQL/MariaDB versions**; the tool **checks GitHub for a newer release** and, if one exists, highlights it near the version with a one-click **Update** button (downloads the release, validates it with `php -l`, backs up the current file as `cms_tools.php.bak-<old>`, then replaces it in place — reversible); new **anti-hotlinking** protection in Security that detects whether external sites can embed this site's assets and patches `.htaccess` with referer rules after testing them in an isolated subfolder (no HTTP 500) and backing up the current `.htaccess`; new **News tab** with the WordPress.org feed that raises a banner at the top of the app when a security/critical release is published |
 | `cms 3.16.0` | The "Recover missing assets" scanner now **lists the exact missing files** (not just a count) in a scrollable panel, with a one-click **Copy list** button; during recovery each row is marked recovered (green) or not-found (red) |
 | `cms 3.15.0` | **Site snapshots** under Quick Update: save a dated snapshot of the important configuration (`.htaccess`, `php.ini`, `.user.ini`, `wp-config.php`, `robots.txt`, `.htpasswd`) and the active-plugins list, then restore the site to that exact state in one click if a later change breaks it. Creating a snapshot changes nothing; a restore always takes a safety snapshot of the current state first, writes back only the known config filenames (no path traversal) and reactivates the exact plugins that were active |

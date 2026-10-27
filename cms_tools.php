@@ -373,10 +373,47 @@ $GLOBALS['__I18N'] = [
         'Apply this optimization? Files on disk and database references will change (logged and reversible).'
             => '¿Aplicar esta optimización? Cambiarán archivos en disco y referencias en la base de datos (registrado y reversible).',
         'Changes written to a reversible log.' => 'Cambios escritos en un registro reversible.',
+        'WordPress upgrade on separate staging' => 'Actualización de WordPress en un staging separado',
+        'Run this only on another hosting account or staging machine with its own files, database and credentials. Never enable it on production.' => 'Ejecuta esto solo en otra cuenta de hosting o máquina de staging con archivos, base y credenciales propias. Nunca lo habilites en producción.',
+        'Prepare the separate hosting first' => 'Prepara primero el hosting separado',
+        'Restore verified files and database backups there, replace production database credentials, and set the baseline siteurl and home to the HTTPS staging URL before loading WordPress.' => 'Restaura allí las copias verificadas de archivos y base, reemplaza las credenciales de producción y ajusta siteurl y home a la URL HTTPS de staging antes de cargar WordPress.',
+        'Have the host verify filesystem/database separation, block production integrations and outbound side effects, and inspect inherited PHP/Apache rules. PHP cannot prove this infrastructure boundary.' => 'Pide al hosting que verifique la separación de archivos y bases, bloquee integraciones de producción y efectos externos, e inspeccione reglas PHP/Apache heredadas. PHP no puede demostrar esta separación de infraestructura.',
+        'Add these literal declarations to the staging wp-config.php before its WordPress bootstrap, replacing both example URLs. The isolation declaration records your host verification, not an automatic security certification.' => 'Agrega estas declaraciones literales al wp-config.php de staging antes de cargar WordPress, reemplazando ambas URLs de ejemplo. La declaración de aislamiento registra la verificación de tu hosting, no una certificación automática de seguridad.',
+        'Use a separate empty schema and restricted account for the upgraded copy. Configuration snapshots are not full backups. Unsupported layouts or unavailable checks block a recommendation.' => 'Usa otro esquema vacío y una cuenta restringida para la copia actualizada. Los snapshots de configuración no son backups completos. Las estructuras no compatibles o comprobaciones no disponibles bloquean una recomendación.',
+        'The baseline wp-config.php must use a direct SELECT-only account scoped only to its staging schema. Write privileges, roles, global grants and unresolved PHP configuration are refused before official downloads.' => 'El wp-config.php de origen debe usar una cuenta directa con solo SELECT sobre su esquema de staging. Se rechazan permisos de escritura, roles, permisos globales y configuración PHP no resuelta antes de las descargas oficiales.',
+        'Only literal constant definitions and table_prefix are supported, followed optionally by the standard ABSPATH and wp-settings.php bootstrap. Do not include executable setup, environment lookups or custom includes. Upgrade preparation never executes this config.' => 'Solo se admiten constantes y table_prefix literales, seguidos opcionalmente por la carga estándar de ABSPATH y wp-settings.php. No incluyas código de preparación ejecutable, consultas al entorno ni includes personalizados. La preparación nunca ejecuta esta configuración.',
+        'Run ownership stays in this authenticated session; upgrade preparation does not save a last-run setting or change authentication settings.' => 'La copia pertenece a esta sesión autenticada; la preparación no guarda un ajuste de última ejecución ni cambia los ajustes de autenticación.',
+        'Separate staging setup guide' => 'Guía de preparación de staging separado',
+        'I verified this is separate staging, without production credentials or access' => 'Verifiqué que esto es un staging separado, sin credenciales ni acceso a producción',
+        'Before any preparation or testing, keep a verified files backup and a full database backup. Configuration snapshots and file-only exports are not a restorable site backup.' => 'Antes de preparar o probar, conserva una copia verificada de archivos y una copia completa de la base de datos. Los snapshots de configuración y las exportaciones solo de archivos no permiten restaurar el sitio completo.',
+        'I have a restorable files and full database backup' => 'Tengo una copia restaurable de archivos y de la base de datos completa',
+        'New independently copied staging run' => 'Nueva copia independiente en staging',
+        'Retest completed upgrade-owned run from this session' => 'Volver a probar una copia terminada y propia de esta sesión',
+        'Optional Docker testing from an offline backup' => 'Pruebas opcionales con Docker desde un backup sin conexión',
+        'Docker is optional and runs only from your local terminal. Web PHP never starts Docker or receives its socket. Reports, API and separate hosting do not require Docker.' => 'Docker es opcional y se ejecuta solo desde tu terminal local. PHP web nunca inicia Docker ni recibe su socket. Los reportes, la API y el hosting separado no requieren Docker.',
+        'Read docker/wordpress-upgrade/README.md in the repository. Supply an explicit offline backup directory and plain single-database SQL, a trusted locally built image, the production origin and table prefix. Never point the CLI at live production.' => 'Lee docker/wordpress-upgrade/README.md en el repositorio. Indica un directorio explícito de backup sin conexión y SQL simple de una sola base, una imagen local de confianza, el origen de producción y el prefijo de tablas. Nunca apuntes el CLI a producción activa.',
+        'The CLI prefetches only official WordPress core, then tests independent copies offline with no published ports or host mounts. Results describe container settings only. Real Docker runtime validation remains required; synthetic tests are not runtime proof.' => 'El CLI descarga previamente solo el core oficial de WordPress y prueba copias independientes sin red, puertos publicados ni montajes del host. Los resultados describen solo la configuración del contenedor. Sigue siendo necesaria la validación real de Docker; las pruebas sintéticas no la demuestran.',
+        'Upgrade testing platform' => 'Plataforma de pruebas de actualización',
+        'Separate hosting or staging machine' => 'Hosting o máquina de staging separados',
+        'Docker: show local CLI instructions only' => 'Docker: mostrar solo instrucciones del CLI local',
+        'Run locally: bash docker/wordpress-upgrade/run.sh --help. Read docker/wordpress-upgrade/README.md. Use an explicit offline backup and plain SQL, never live production. No request was sent and no plugins were executed.' => 'Ejecuta localmente: bash docker/wordpress-upgrade/run.sh --help. Lee docker/wordpress-upgrade/README.md. Usa un backup explícito sin conexión y SQL simple, nunca producción activa. No se envió ninguna petición ni se ejecutaron plugins.',
+        'Separate sandbox database host' => 'Host de base de datos separado para sandbox',
+        'Separate empty sandbox schema' => 'Esquema separado y vacío para sandbox',
+        'Restricted sandbox database user' => 'Usuario de base de datos restringido al sandbox',
+        'Sandbox database password (retained in session and owned configuration)' => 'Contraseña del sandbox (se conserva en la sesión y en la configuración propia)',
+        'Run staging upgrade and checks' => 'Ejecutar actualización y comprobaciones en staging',
+        'Preparing or checking the separate staging installation.' => 'Preparando o comprobando la instalación de staging separada.',
+        'Not ready for a migration recommendation. Review every failed or unavailable check.' => 'No está listo para recomendar una migración. Revisa cada comprobación fallida o no disponible.',
+        'Required staging smoke checks passed; manual review remains.' => 'Pasaron las comprobaciones básicas requeridas de staging; falta la revisión manual.',
+        'The request could not be confirmed. Staging files or tables may already exist. Inspect the owned run before retrying; no automatic retry was made.' => 'No se pudo confirmar la petición. Pueden existir archivos o tablas de staging. Inspecciona la copia propia antes de reintentar; no se reintentó automáticamente.',
+        'These are bounded smoke checks, not comprehensive compatibility or proof of infrastructure isolation. No automatic production replacement is performed.' => 'Son comprobaciones básicas acotadas, no compatibilidad completa ni prueba de aislamiento de infraestructura. No se reemplaza producción automáticamente.',
+        'Run' => 'Ejecución',
+        'After a complete isolated test, take another full backup and plan a manual migration and rollback with your host. This tool will not promote, replace or restore production.' => 'Tras una prueba aislada completa, realiza otra copia completa y planifica una migración y reversión manual con tu hosting. Esta herramienta no promoverá, reemplazará ni restaurará producción.',
+        'Legacy sandbox below shares files and production credentials. Do not use it for core upgrades.' => 'El sandbox anterior de abajo comparte archivos y credenciales de producción. No lo uses para actualizar el core.',
         // Test Environment (sandbox)
         'Test Environment (sandbox)'          => 'Entorno de prueba (sandbox)',
-        'Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.'
-            => 'Construye un WordPress aislado en una subcarpeta: replica las tablas de la base de datos con un prefijo de prueba y enlaza el core, plugins, temas y uploads (symlink, con copia como respaldo). Luego puede probar cada plugin uno a uno contra el sandbox, evaluar plugins nuevos de wordpress.org antes de instalarlos en producción, y generar un informe — todo sin arriesgar el sitio real. Usa la conexión de BD de la tarjeta Herramientas DB de arriba.',
+        'Legacy sandbox copies tables under another prefix but shares files through symlinks and uses the source database account. It is not an isolated upgrade environment and can affect the source site. Use the separate-host upgrade workflow above only after provisioning and verifying staging.'
+            => 'El sandbox anterior copia tablas con otro prefijo, pero comparte archivos mediante enlaces y usa la cuenta de base del origen. No es un entorno aislado de actualización y puede afectar al sitio de origen. Usa el flujo de actualización en otro hosting solo después de preparar y verificar staging.',
         'Build sandbox'                       => 'Construir sandbox',
         'Smoke-test plugins'                  => 'Probar plugins',
         'Test plugins one by one'             => 'Probar plugins uno por uno',
@@ -2107,8 +2144,971 @@ function send_site_report_github($repository, $branch, $token, $snapshot) {
     return ['ok'=>true, 'filename'=>$snapshot['filename'], 'branch'=>$branch];
 }
 
+// Upgrade preparation is intentionally separate from the legacy, shared-file sandbox.
+// These admission checks do not write source files, clone tables, or activate plugins.
+function upgrade_source_inventory($root, $config) {
+    $root = rtrim($root, '/');
+    if (is_link($root) || realpath($root) !== $root || !$config || is_link($config)
+        || !is_file($config) || !is_readable($config)) {
+        throw new \RuntimeException('Source paths must be real, readable paths without symlinks.');
+    }
+    $configStat = @lstat($config);
+    if (!$configStat || $configStat['nlink'] !== 1) throw new \RuntimeException('Shared source files cannot be used for upgrade preparation.');
+    $pending = [$root . '/wp-content'];
+    $count = 0; $bytes = 0;
+    while ($pending) {
+        $directory = array_pop($pending);
+        if (is_link($directory) || !is_dir($directory)) throw new \RuntimeException('Source content must be a real directory without symlinks.');
+        $handle = @opendir($directory);
+        if (!$handle) throw new \RuntimeException('Source content is not fully readable.');
+        try {
+            while (false !== ($name = readdir($handle))) {
+                if ($name === '.' || $name === '..') continue;
+                if (++$count > 10000) throw new \RuntimeException('Source inventory limit reached; no complete-copy claim can be made.');
+                $path = $directory . '/' . $name;
+                $stat = @lstat($path);
+                if (!$stat || is_link($path)) throw new \RuntimeException('Shared source files cannot be used for upgrade preparation.');
+                $type = $stat['mode'] & 0170000;
+                if ($type === 0040000) { $pending[] = $path; continue; }
+                if ($type !== 0100000 || $stat['nlink'] !== 1) throw new \RuntimeException('Shared source files cannot be used for upgrade preparation.');
+                if (!is_readable($path)) throw new \RuntimeException('Source content is not fully readable.');
+                $bytes += $stat['size'];
+                if ($bytes > 268435456) throw new \RuntimeException('Source size limit reached; use an offline isolated clone.');
+            }
+        } finally { closedir($handle); }
+    }
+    return ['entries'=>$count, 'bytes'=>$bytes];
+}
+
+// Conservatively accept only direct schema-scoped privileges. Roles, global grants,
+// grant delegation, routines, events and wildcard schemas cannot prove isolation.
+function upgrade_restricted_grants(array $grants, $schema, $readOnly = false) {
+    if (!$grants || count($grants) > 64) return false;
+    $hasSchema = false;
+    $allowed = $readOnly ? ['SELECT'] : ['SELECT','INSERT','UPDATE','DELETE','CREATE','DROP','INDEX','ALTER','CREATE TEMPORARY TABLES','LOCK TABLES'];
+    $privileges = [];
+    foreach ($grants as $grant) {
+        if (!is_string($grant) || strlen($grant) > 8192 || !preg_match('/^GRANT (.+) ON (.+) TO (.+)$/D', $grant, $m)
+            || stripos($m[3], 'WITH ') !== false) return false;
+        if ($m[1] === 'USAGE' && $m[2] === '*.*') continue;
+        // MySQL escapes literal underscores/percent signs in database grants.
+        $escaped = str_replace(['_', '%'], ['\\_', '\\%'], $schema);
+        if ($m[2] !== '`' . $escaped . '`.*' || str_contains($schema, '%')) return false;
+        foreach (explode(', ', $m[1]) as $privilege) {
+            if (!in_array($privilege, $allowed, true)) return false;
+            $privileges[$privilege] = true;
+        }
+        $hasSchema = true;
+    }
+    $required = $readOnly ? ['SELECT'] : ['SELECT','INSERT','UPDATE','DELETE','CREATE','DROP','ALTER'];
+    return $hasSchema && !array_diff($required, array_keys($privileges));
+}
+
+function upgrade_target_database(array $source, array $input, $requireEmpty = true) {
+    foreach (['target_host','target_name','target_user','target_password'] as $key) {
+        if (!is_string($input[$key] ?? null) || $input[$key] === '' || strlen($input[$key]) > 255) {
+            throw new \InvalidArgumentException('Provide a separately restricted sandbox database account.');
+        }
+    }
+    if (!preg_match('/^[A-Za-z0-9_.-]+(?::[0-9]{1,5})?$/D', $input['target_host'])
+        || !preg_match('/^[A-Za-z0-9_]{1,64}$/D', $input['target_name'])
+        || !preg_match('/^[A-Za-z0-9_.-]{1,64}$/D', $input['target_user'])) {
+        throw new \InvalidArgumentException('Invalid sandbox database fields.');
+    }
+    // Equal schema/account names are refused even across different hosts: aliases
+    // and proxies make host-string inequality insufficient evidence of isolation.
+    if (strcasecmp($input['target_name'], (string)($source['name'] ?? '')) === 0
+        || strcasecmp($input['target_user'], (string)($source['user'] ?? '')) === 0) {
+        throw new \InvalidArgumentException('A different prefix is not isolation. Use a distinct schema and restricted account.');
+    }
+    try {
+        $host = explode(':', $input['target_host'], 2);
+        $pdo = new PDO('mysql:host=' . $host[0] . (isset($host[1]) ? ';port=' . $host[1] : '') . ';dbname=' . $input['target_name'] . ';charset=utf8mb4',
+            $input['target_user'], $input['target_password'], [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT=>5]);
+        if ($pdo->query('SELECT DATABASE()')->fetchColumn() !== $input['target_name']) throw new \RuntimeException();
+        $grants = $pdo->query('SHOW GRANTS FOR CURRENT_USER')->fetchAll(PDO::FETCH_COLUMN);
+        if (!upgrade_restricted_grants($grants, $input['target_name'])) throw new \RuntimeException();
+        if ($requireEmpty && $pdo->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_NUM)) {
+            throw new \InvalidArgumentException('The new sandbox schema must be empty. No tables were changed.');
+        }
+    } catch (\InvalidArgumentException $e) { throw $e;
+    } catch (Throwable $e) {
+        throw new \RuntimeException('Cannot establish database isolation. Ask the host for a direct account restricted only to the empty sandbox schema, without roles or global grants.');
+    }
+    return $pdo;
+}
+
+// Docker cache is an operator/runner trust boundary, never a network fallback.
+function upgrade_offline_cache() {
+    $dir=getenv('CMS_UPGRADE_OFFLINE_DIR');
+    if ($dir===false || $dir==='') return null;
+    if ($dir[0]!=='/' || realpath($dir)!==$dir) throw new \RuntimeException('Invalid offline cache directory.');
+    for ($parent=$dir; ; $parent=dirname($parent)) {
+        $s=@lstat($parent);
+        if (!$s || $s['uid']!==0 || ($s['mode'] & 0022) || is_writable($parent)) throw new \RuntimeException('Offline cache must be root-controlled and read-only to PHP.');
+        if ($parent==='/') break;
+    }
+    $files=[]; $hashes=[];
+    foreach (['release.json'=>2097152,'checksums.json'=>2097152,'package.zip'=>67108864,'provenance.json'=>8192] as $name=>$limit) {
+        $path=$dir.'/'.$name; $s=@lstat($path);
+        if (!$s || ($s['mode'] & 0170000)!==0100000 || $s['uid']!==0 || $s['nlink']!==1 || ($s['mode'] & 0022) || is_writable($path) || $s['size']<1 || $s['size']>$limit) throw new \RuntimeException('Offline cache file is missing, unsafe or oversized.');
+        $body=@file_get_contents($path,false,null,0,$limit+1);
+        if (!is_string($body) || strlen($body)!==$s['size']) throw new \RuntimeException('Offline cache changed during read.');
+        $hashes[$name]=hash('sha256',$body);
+        if ($name!=='package.zip') $files[$name]=json_decode($body,true);
+        if ($name!=='package.zip' && !is_array($files[$name])) throw new \RuntimeException('Malformed offline cache.');
+    }
+    $p=$files['provenance.json'];
+    if (($p['schema'] ?? null)!==1 || !is_int($p['captured_at'] ?? null) || $p['captured_at']>time() || time()-$p['captured_at']>3600
+        || !preg_match('/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/D',$p['version'] ?? '')
+        || ($p['package_url'] ?? '')!=='https://downloads.wordpress.org/release/wordpress-'.$p['version'].'.zip'
+        || ($p['sha256'] ?? '')!==$hashes['package.zip']) throw new \RuntimeException('Offline provenance is stale, malformed or does not match the package.');
+    return ['dir'=>$dir,'files'=>$files,'provenance'=>$p,'fingerprint'=>hash('sha256',json_encode($hashes))];
+}
+
+function upgrade_official_json($path) {
+    $cache=upgrade_offline_cache();
+    if ($cache!==null) {
+        if ($path==='/core/version-check/1.7/') return $cache['files']['release.json'];
+        if ($path==='/core/checksums/1.0/?version='.$cache['provenance']['version'].'&locale=en_US') return $cache['files']['checksums.json'];
+        throw new \RuntimeException('Offline metadata does not match the requested release.');
+    }
+    if (!preg_match('#^/core/(version-check/1\.7/|checksums/1\.0/\?version=[0-9]+\.[0-9]+(?:\.[0-9]+)?&locale=en_US)$#D', $path)) {
+        throw new \RuntimeException('Invalid official metadata endpoint.');
+    }
+    $context = stream_context_create(['http'=>['method'=>'GET', 'timeout'=>10, 'follow_location'=>0,
+        'max_redirects'=>0, 'ignore_errors'=>true, 'header'=>"Accept: application/json\r\nUser-Agent: CMS-Tools-Upgrade-Preflight\r\n"],
+        'ssl'=>['verify_peer'=>true, 'verify_peer_name'=>true, 'allow_self_signed'=>false]]);
+    $stream = @fopen('https://api.wordpress.org' . $path, 'rb', false, $context);
+    if (!$stream) throw new \RuntimeException('Official WordPress metadata is unavailable over verified HTTPS.');
+    try {
+        $headers = stream_get_meta_data($stream)['wrapper_data'] ?? [];
+        $status = null;
+        foreach ($headers as $header) if (preg_match('#^HTTP/\S+ ([0-9]{3})#', $header, $m)) $status = (int)$m[1];
+        $body = stream_get_contents($stream, 2097153);
+        if ($status !== 200 || $body === false || strlen($body) > 2097152 || !feof($stream)) {
+            throw new \RuntimeException('Official WordPress metadata failed or exceeded its limit. Redirects are not followed.');
+        }
+        $json = json_decode($body, true);
+        if (!is_array($json)) throw new \RuntimeException('Invalid official WordPress metadata.');
+        return $json;
+    } finally { fclose($stream); }
+}
+
+function upgrade_stable_release() {
+    $metadata = upgrade_official_json('/core/version-check/1.7/');
+    if (!is_array($metadata['offers'] ?? null) || count($metadata['offers']) > 100) {
+        throw new \RuntimeException('Invalid official WordPress release offers.');
+    }
+    $stable = [];
+    foreach ($metadata['offers'] as $offer) {
+        if (!is_array($offer) || ($offer['response'] ?? '') !== 'upgrade'
+            || ($offer['locale'] ?? '') !== 'en_US' || ($offer['channel'] ?? 'stable') !== 'stable'
+            || !preg_match('/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/D', $offer['version'] ?? '')) continue;
+        $version = $offer['version'];
+        $url = $offer['packages']['full'] ?? null;
+        if ($url !== 'https://downloads.wordpress.org/release/wordpress-' . $version . '.zip') continue;
+        if (!preg_match('/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/D', $offer['php_version'] ?? '')
+            || !preg_match('/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/D', $offer['mysql_version'] ?? '')) continue;
+        $stable[$version] = ['version'=>$version, 'package'=>$url, 'php'=>$offer['php_version'], 'mysql'=>$offer['mysql_version']];
+    }
+    if (!$stable) throw new \RuntimeException('No verified stable WordPress release offer is available.');
+    uksort($stable, 'version_compare');
+    $release = end($stable);
+    $metadata = upgrade_official_json('/core/checksums/1.0/?version=' . $release['version'] . '&locale=en_US');
+    $checksums = $metadata['checksums'] ?? null;
+    if (!is_array($checksums) || count($checksums) > 10000) throw new \RuntimeException('Official core checksums are unavailable.');
+    foreach ($checksums as $path => $hash) {
+        if (!is_string($path) || !preg_match('#^(?:[A-Za-z0-9_.,@-]+/)*[A-Za-z0-9_.,@-]+$#D', $path)
+            || in_array('..', explode('/', $path), true) || in_array('.', explode('/', $path), true)
+            || !is_string($hash) || !preg_match('/^[a-f0-9]{32}$/D', $hash)) {
+            throw new \RuntimeException('Invalid official core checksum manifest.');
+        }
+    }
+    foreach (['wp-includes/version.php','wp-settings.php','wp-admin/includes/upgrade.php'] as $required) {
+        if (!isset($checksums[$required])) throw new \RuntimeException('Official core checksum manifest is incomplete.');
+    }
+    // Metadata is not archive validation. No package is downloaded at this stage.
+    $release['checksums'] = $checksums;
+    $cache=upgrade_offline_cache();
+    if ($cache!==null) {
+        if ($release['version']!==$cache['provenance']['version'] || $release['package']!==$cache['provenance']['package_url']) throw new \RuntimeException('Offline release and provenance disagree.');
+        $release['offline_fingerprint']=$cache['fingerprint'];
+    }
+    return $release;
+}
+
+// Only literal, unconditional source identities are supported. Never execute config.
+function upgrade_source_identity($path, array $detected) {
+    $text = @file_get_contents($path, false, null, 0, 65537);
+    if ($text === false || strlen($text) > 65536) throw new \RuntimeException('Source configuration is unavailable or too large.');
+    $tokens = array_values(array_filter(token_get_all($text), function ($t) { return !is_array($t) || !in_array($t[0], [T_WHITESPACE,T_COMMENT,T_DOC_COMMENT], true); }));
+    $values = []; $prefixes = []; $depth = 0; $included = false;
+    $literal = function ($t) {
+        if (!is_array($t) || $t[0] !== T_CONSTANT_ENCAPSED_STRING) return null;
+        $v = substr($t[1], 1, -1);
+        // No escape interpretation. A dollar sign is literal in single quotes;
+        // double-quoted interpolation is intentionally outside this grammar.
+        return strpbrk($v, "\\\r\n") === false && ($t[1][0] === "'" || !str_contains($v, '$')) ? $v : null;
+    };
+    foreach ($tokens as $i=>$t) {
+        if ($t === '{') $depth++;
+        if ($t === '}') $depth--;
+        if (is_array($t) && in_array($t[0], [T_REQUIRE,T_REQUIRE_ONCE,T_INCLUDE,T_INCLUDE_ONCE], true)) $included = true;
+        if (is_array($t) && $t[0] === T_VARIABLE && $t[1] === '$table_prefix') {
+            $prefixes[] = !$depth && ($tokens[$i+1] ?? '') === '=' && ($tokens[$i+3] ?? '') === ';' ? $literal($tokens[$i+2] ?? null) : null;
+        }
+        if (!is_array($t) || !in_array($t[0], [T_STRING,T_NAME_FULLY_QUALIFIED], true) || !in_array(strtolower($t[1]), ['define','\\define'], true)) continue;
+        $name = $literal($tokens[$i+2] ?? null);
+        if ($name === null || ($tokens[$i+1] ?? '') !== '(' || ($tokens[$i+3] ?? '') !== ',') continue;
+        if (in_array($name, ['WP_CONTENT_DIR','WP_CONTENT_URL','WP_PLUGIN_DIR','WP_PLUGIN_URL','WPMU_PLUGIN_DIR','MULTISITE','CUSTOM_USER_TABLE','CUSTOM_USER_META_TABLE','SUNRISE'], true)) {
+            throw new \RuntimeException('Custom content, multisite and drop-in layouts require an offline isolated upgrade.');
+        }
+        if (!in_array($name, ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD','DB_CHARSET','DB_COLLATE'], true)) continue;
+        $previous = $tokens[$i-1] ?? null;
+        $top = !$depth && !$included && ($previous === ';' || (is_array($previous) && $previous[0] === T_OPEN_TAG));
+        $values[$name][] = $top && ($tokens[$i+5] ?? '') === ')' && ($tokens[$i+6] ?? '') === ';' ? $literal($tokens[$i+4] ?? null) : null;
+    }
+    $result = [];
+    foreach (['DB_HOST'=>'host','DB_NAME'=>'name','DB_USER'=>'user','DB_PASSWORD'=>'pass'] as $name=>$key) {
+        if (count($values[$name] ?? []) !== 1 || $values[$name][0] === null || $values[$name][0] === '' || $values[$name][0] !== ($detected[$key] ?? null)) {
+            throw new \RuntimeException('Source database identity is ambiguous; use literal unconditional database definitions without earlier includes.');
+        }
+        $result[$key] = $values[$name][0];
+    }
+    if (count($prefixes) !== 1 || !is_string($prefixes[0]) || !preg_match('/^[A-Za-z0-9_]{1,40}$/D', $prefixes[0]) || $prefixes[0] !== ($detected['prefix'] ?? '')) {
+        throw new \RuntimeException('Source table prefix is ambiguous or unsupported.');
+    }
+    $result['prefix'] = $prefixes[0];
+    if (!preg_match('/^[A-Za-z0-9_.-]+(?::[0-9]{1,5})?$/D', $result['host']) || !preg_match('/^[A-Za-z0-9_]{1,64}$/D', $result['name'])) throw new \RuntimeException('Unsupported source database address.');
+    // Validate the whole file, not just identity declarations: ignoring unknown PHP
+    // would silently discard effects which WordPress executes when loading config.
+    $grammarError = 'Only literal staging configuration and the standard WordPress bootstrap are supported. Remove executable configuration or prepare a minimal separate staging config.';
+    $allowed = ['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD','DB_CHARSET','DB_COLLATE',
+        'AUTH_KEY','SECURE_AUTH_KEY','LOGGED_IN_KEY','NONCE_KEY','AUTH_SALT','SECURE_AUTH_SALT','LOGGED_IN_SALT','NONCE_SALT',
+        'WP_DEBUG','WP_DEBUG_LOG','WP_DEBUG_DISPLAY','DISALLOW_FILE_EDIT','DISALLOW_FILE_MODS',
+        'WP_MEMORY_LIMIT','WP_MAX_MEMORY_LIMIT','AUTOMATIC_UPDATER_DISABLED','WP_AUTO_UPDATE_CORE','DISABLE_WP_CRON',
+        'WP_ENVIRONMENT_TYPE','CMS_TOOLS_PRODUCTION_URL','CMS_TOOLS_STAGING_URL','CMS_TOOLS_ISOLATION_VERIFIED'];
+    if (!isset($tokens[0]) || !is_array($tokens[0]) || $tokens[0][0] !== T_OPEN_TAG) throw new \RuntimeException($grammarError);
+    $seen = []; $i = 1;
+    while ($i < count($tokens)) {
+        $t = $tokens[$i];
+        if (is_array($t) && $t[0] === T_CLOSE_TAG && $i === count($tokens)-1) break;
+        if (is_array($t) && $t[0] === T_VARIABLE && $t[1] === '$table_prefix'
+            && ($tokens[$i+1] ?? '') === '=' && $literal($tokens[$i+2] ?? null) !== null && ($tokens[$i+3] ?? '') === ';') {
+            $i += 4; continue;
+        }
+        $name = $literal($tokens[$i+2] ?? null);
+        if (is_array($t) && in_array(strtolower($t[1]), ['define','\\define'], true) && in_array($name, $allowed, true)
+            && ($tokens[$i+1] ?? '') === '(' && ($tokens[$i+3] ?? '') === ',' && ($tokens[$i+5] ?? '') === ')' && ($tokens[$i+6] ?? '') === ';') {
+            $value = $tokens[$i+4] ?? null;
+            $scalar = $literal($value) !== null || (is_array($value) && (($value[0] === T_LNUMBER && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value[1]))
+                || ($value[0] === T_STRING && in_array(strtolower($value[1]), ['true','false'], true))));
+            if (!$scalar || isset($seen[$name])) throw new \RuntimeException($grammarError);
+            $seen[$name] = true; $i += 7; continue;
+        }
+        // The only permitted executable-looking tail is the conventional bootstrap.
+        // Match token spellings, never eval/include/require the baseline file.
+        $tail = '';
+        foreach (array_slice($tokens, $i) as $token) {
+            if (is_array($token) && $token[0] === T_CLOSE_TAG) continue;
+            if (is_array($token) && $token[0] === T_CONSTANT_ENCAPSED_STRING) {
+                $value = $literal($token);
+                if ($value === null) throw new \RuntimeException($grammarError);
+                $tail .= var_export($value, true);
+            } else $tail .= is_array($token) ? $token[1] : $token;
+        }
+        $bootstrap = "require_onceABSPATH.'wp-settings.php';";
+        $supported = [];
+        foreach (["__DIR__.'/'", "dirname(__FILE__).'/'"] as $base) {
+            $definition = "define('ABSPATH',".$base.");";
+            $supported[] = $definition.$bootstrap;
+            $supported[] = "if(!defined('ABSPATH')){".$definition.'}'.$bootstrap;
+            $supported[] = "if(!defined('ABSPATH'))".$definition.$bootstrap;
+        }
+        if (!in_array($tail, $supported, true)) throw new \RuntimeException($grammarError);
+        break;
+    }
+    return $result;
+}
+
+function upgrade_source_pdo(array $db) {
+    $host = explode(':', $db['host'], 2);
+    try {
+        $pdo = new PDO('mysql:host=' . $host[0] . (isset($host[1]) ? ';port=' . $host[1] : '') . ';dbname=' . $db['name'] . ';charset=utf8mb4', $db['user'], $db['pass'], [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT=>5]);
+        if ($pdo->query('SELECT DATABASE()')->fetchColumn() !== $db['name']) throw new \RuntimeException();
+        if (!upgrade_restricted_grants($pdo->query('SHOW GRANTS FOR CURRENT_USER')->fetchAll(PDO::FETCH_COLUMN), $db['name'], true)) throw new \RuntimeException();
+        return $pdo;
+    } catch (Throwable $e) { throw new \RuntimeException('Cannot verify the baseline database identity and SELECT-only grants. Use a direct read-only account scoped only to the staging baseline schema.'); }
+}
+
+function upgrade_files($root) {
+    $pending = ['']; $files = []; $count = 0;
+    while ($pending) {
+        $relative = array_pop($pending);
+        $dir = $root . ($relative === '' ? '' : '/' . $relative);
+        if (is_link($dir) || !is_dir($dir)) throw new \RuntimeException('Owned paths must not contain symlinks.');
+        $handle = @opendir($dir);
+        if (!$handle) throw new \RuntimeException('Owned paths are unreadable.');
+        try {
+            while (false !== ($name = readdir($handle))) {
+                if ($name === '.' || $name === '..') continue;
+                if (++$count > 20000) throw new \RuntimeException('Owned file inventory exceeded its limit.');
+                $rel = ($relative === '' ? '' : $relative . '/') . $name;
+                $path = $root . '/' . $rel; $s = @lstat($path);
+                if (!$s || is_link($path)) throw new \RuntimeException('Owned paths must not contain symlinks.');
+                if (($s['mode'] & 0170000) === 0040000) { $pending[] = $rel; continue; }
+                if (($s['mode'] & 0170000) !== 0100000 || $s['nlink'] !== 1) throw new \RuntimeException('Owned files must not be shared or special files.');
+                $hash = @hash_file('sha256', $path);
+                if ($hash === false) throw new \RuntimeException('Owned file could not be verified.');
+                $files[$rel] = [$s['dev'],$s['ino'],$s['size'],$hash];
+            }
+        } finally { closedir($handle); }
+    }
+    ksort($files);
+    return $files;
+}
+
+function upgrade_owned(array $run) {
+    if (!preg_match('/^[a-f0-9]{24}$/D', $run['id'] ?? '') || $run['dir'] !== $run['root'] . '/cms-upgrade-' . $run['id']) throw new \RuntimeException('Invalid upgrade ownership.');
+    foreach (['dir','work'] as $key) {
+        $s = @lstat($run[$key]);
+        if (!$s || is_link($run[$key]) || !is_dir($run[$key]) || realpath($run[$key]) !== $run[$key] || [$s['dev'],$s['ino']] !== $run[$key . '_inode']) throw new \RuntimeException('Upgrade directory ownership changed.');
+    }
+    if (hash_file('sha256',$run['root'].'/wp-config.php')!==$run['source_config_hash'] || upgrade_root_rules($run['root'])!==($run['root_rules'] ?? null) || upgrade_staging_context($run['root'].'/wp-config.php')!==($run['environment'] ?? null)) throw new \RuntimeException('Staging baseline identity changed. Stop testing and restore the independently verified staging baseline.');
+    if (upgrade_files($run['dir']) !== $run['manifest']) throw new \RuntimeException('Upgrade-owned files changed or became shared. Start a new isolated copy; no repair was attempted.');
+}
+
+function upgrade_write($path, $text) {
+    if (is_link($path) || (file_exists($path) && (!is_file($path) || (@lstat($path)['nlink'] ?? 0) !== 1))) throw new \RuntimeException('Refusing a shared destination file.');
+    if (!is_dir(dirname($path)) && !@mkdir(dirname($path), 0700, true)) throw new \RuntimeException('Could not create an owned directory.');
+    if (@file_put_contents($path, $text, LOCK_EX) !== strlen($text) || !@chmod($path, 0600)) throw new \RuntimeException('Could not write an owned file.');
+}
+
+// No automatic redirect handling: sandbox redirects are resolved by the caller and
+// checked before sending the secret header; official downloads never redirect.
+function upgrade_http($url, $token = null, $limit = 2097152, $destination = null) {
+    $u = parse_url($url);
+    if (!$u || ($u['scheme'] ?? '') !== 'https' || empty($u['host']) || isset($u['user']) || isset($u['pass']) || isset($u['fragment'])) throw new \RuntimeException('Unsafe HTTPS URL.');
+    $headers = "User-Agent: CMS-Tools-Isolated-Upgrade\r\n" . ($token === null ? '' : 'X-CMS-Upgrade: ' . $token . "\r\n");
+    $context = stream_context_create(['http'=>['method'=>'GET','timeout'=>15,'follow_location'=>0,'max_redirects'=>0,'ignore_errors'=>true,'header'=>$headers], 'ssl'=>['verify_peer'=>true,'verify_peer_name'=>true,'allow_self_signed'=>false]]);
+    $stream = @fopen($url, 'rb', false, $context);
+    if (!$stream) throw new \RuntimeException('HTTPS request unavailable; verify TLS and hosting loopback access.');
+    $output = null;
+    try {
+        $raw = stream_get_meta_data($stream)['wrapper_data'] ?? []; $status = 0; $fields = [];
+        foreach ($raw as $header) {
+            if (preg_match('#^HTTP/\S+ ([0-9]{3})#', $header, $m)) { $status = (int)$m[1]; $fields = []; }
+            elseif (str_contains($header, ':')) { [$name,$value] = explode(':',$header,2); $fields[strtolower(trim($name))] = trim($value); }
+        }
+        if ($destination !== null && $status !== 200) throw new \RuntimeException('Official archive request failed. Redirects are not followed.');
+        if ($destination !== null) { $output = @fopen($destination, 'xb'); if (!$output) throw new \RuntimeException('Could not create private package file.'); @chmod($destination,0600); }
+        $body = ''; $bytes = 0; $start = microtime(true);
+        while (!feof($stream)) {
+            $chunk = fread($stream, 65536);
+            if ($chunk === false || ($chunk === '' && !feof($stream)) || microtime(true)-$start > 20) throw new \RuntimeException('HTTP response timed out or was truncated.');
+            $bytes += strlen($chunk);
+            if ($bytes > $limit) throw new \RuntimeException('HTTP response exceeded its safety limit.');
+            if ($output) { if (fwrite($output,$chunk) !== strlen($chunk)) throw new \RuntimeException('Private package write failed.'); }
+            else $body .= $chunk;
+        }
+        return ['status'=>$status,'headers'=>$fields,'body'=>$body];
+    } finally { if (is_resource($output)) fclose($output); fclose($stream); }
+}
+
+function upgrade_sandbox_http(array $run, $url, $limit = 2097152, $authenticated = true) {
+    for ($redirects = 0; $redirects < 4; $redirects++) {
+        if (!str_starts_with($url, $run['url'] . '/') || preg_match('#(?:^|/)(?:\.|%2e){1,2}(?:/|%2f|$)|%5c|\\\\#i', parse_url($url,PHP_URL_PATH) ?: '')) throw new \RuntimeException('Redirect or asset escaped the sandbox.');
+        $response = upgrade_http($url, $authenticated ? $run['token'] : null, $limit);
+        if ($response['status'] >= 300 && $response['status'] < 400) {
+            $location = $response['headers']['location'] ?? '';
+            if (str_starts_with($location, '/')) {
+                $origin = parse_url($run['url']);
+                $location = 'https://' . $origin['host'] . (isset($origin['port']) ? ':' . $origin['port'] : '') . $location;
+            } elseif (!str_contains($location, '://')) $location = substr($url,0,strrpos(explode('?', $url,2)[0],'/')+1) . $location;
+            $url = $location; continue;
+        }
+        if ($authenticated && ($response['headers']['x-cms-upgrade-identity'] ?? '') !== $run['id']) throw new \RuntimeException('HTTP response did not prove sandbox identity.');
+        return $response;
+    }
+    throw new \RuntimeException('Sandbox redirect limit reached.');
+}
+
+function upgrade_archive(array &$run) {
+    $zip = new ZipArchive();
+    if ($zip->open($run['work'].'/package.zip') !== true) throw new \RuntimeException('Invalid WordPress ZIP archive.');
+    try {
+        if ($zip->numFiles < 4 || $zip->numFiles > 10000) throw new \RuntimeException('Archive entry limit exceeded or package incomplete.');
+        $entries = []; $seen = []; $bytes = 0;
+        for ($i=0; $i<$zip->numFiles; $i++) {
+            $s = $zip->statIndex($i); $name = $s['name'] ?? '';
+            if (!is_string($name) || !preg_match('#^wordpress/(?:[A-Za-z0-9_.,@+-]+/)*[A-Za-z0-9_.,@+-]*/?$#D',$name)
+                || in_array('..',explode('/',$name),true) || in_array('.',explode('/',$name),true)) throw new \RuntimeException('Unsafe archive path.');
+            $relative = substr($name,10); $key = rtrim($relative,'/');
+            // The official Akismet package carries Apache rules. Verify their bytes, but
+            // never install them: vendor overrides must not alter sandbox access policy.
+            $verifyOnly = $relative === 'wp-content/plugins/akismet/.htaccess';
+            if ((!$verifyOnly && preg_match('#(?:^|/)(?:\.htaccess|\.user\.ini|php\.ini)$#i',$key)) || in_array($key,['wp-config.php','.cms-owned.php','cms-upgrade-probe.php'],true)) throw new \RuntimeException('Archive attempted to replace isolation controls.');
+            if (isset($seen[$key])) throw new \RuntimeException('Duplicate archive path.');
+            $seen[$key] = true;
+            $opsys = 0; $attributes = 0;
+            if (!$zip->getExternalAttributesIndex($i,$opsys,$attributes)) throw new \RuntimeException('Archive file attributes unavailable.');
+            $type = ($attributes >> 16) & 0170000;
+            if ($opsys === 3 && !in_array($type,[0,0040000,0100000],true)) throw new \RuntimeException('Archive links and special files are forbidden.');
+            $directory = str_ends_with($name,'/');
+            if (($directory && $type === 0100000) || (!$directory && $type === 0040000) || ($s['encryption_method'] ?? 0) !== 0) throw new \RuntimeException('Unsafe archive entry type.');
+            if ($directory) continue;
+            $size = $s['size'] ?? -1; $bytes += $size;
+            if ($size < 0 || $size > 16777216 || $bytes > 268435456 || !isset($run['release']['checksums'][$relative])) throw new \RuntimeException('Archive size or checksum coverage is unsafe.');
+            $entries[] = ['index'=>$i,'path'=>$relative,'size'=>$size,'verify_only'=>$verifyOnly];
+        }
+        foreach ($run['release']['checksums'] as $path=>$hash) if (!isset($seen[$path])) throw new \RuntimeException('Archive is missing an official checksummed file.');
+        foreach (['wp-load.php','wp-settings.php','index.php','wp-includes/version.php','wp-admin/includes/upgrade.php'] as $required) if (!isset($seen[$required])) throw new \RuntimeException('Archive WordPress structure is incomplete.');
+        $run['entries'] = $entries; $run['cursor'] = 0;
+    } finally { $zip->close(); }
+}
+
+function upgrade_root_rules($root) {
+    $path=$root.'/.htaccess'; $s=@lstat($path);
+    if (!$s && !is_link($path)) return null;
+    if (!$s || is_link($path) || !is_file($path) || $s['nlink']!==1 || !is_readable($path) || $s['size']>65536) throw new \RuntimeException('Shared or unreadable root hosting rules require separate-host remediation before testing.');
+    $hash=@hash_file('sha256',$path);
+    if (!is_string($hash)) throw new \RuntimeException('Shared or unreadable root hosting rules require separate-host remediation before testing.');
+    return [$s['dev'],$s['ino'],$s['size'],$hash];
+}
+
+// Bind bounded inspection bytes to the existing inventory hash. The later copy
+// independently checks this same hash; benign inspection cannot authorize new bytes.
+function upgrade_source_inspect($path, array $expected) {
+    $s=@lstat($path);
+    if (!$s || is_link($path) || ($s['mode'] & 0170000)!==0100000 || $s['nlink']!==1
+        || $s['size']>65536 || [$s['dev'],$s['ino'],$s['size']]!==array_slice($expected,0,3)) return null;
+    $text=@file_get_contents($path,false,null,0,65537);
+    if (!is_string($text) || strlen($text)!==$expected[2] || hash('sha256',$text)!==$expected[3]) return null;
+    return $text;
+}
+
+function upgrade_source_resources($root, &$rulesOmitted = null) {
+    $rulesOmitted=[];
+    upgrade_source_inventory($root,$root.'/wp-config.php');
+    upgrade_root_rules($root);
+    foreach (['.user.ini','php.ini'] as $name) if (file_exists($root.'/'.$name)) throw new \RuntimeException('Local PHP override files need host-scoped manual isolation; no configuration was copied.');
+    if ((string)ini_get('auto_prepend_file') !== '' || (string)ini_get('auto_append_file') !== '') throw new \RuntimeException('Inherited PHP prepend/append configuration cannot be isolated safely.');
+    $files = upgrade_files($root.'/wp-content');
+    foreach ($files as $path=>$stat) {
+        // Official 6.8.3/7.1.3 bundled Akismet rules: authenticate, omit and report.
+        // No vendor server directives may replace our private sandbox rules.
+        if ($path==='plugins/akismet/.htaccess') {
+            $text=upgrade_source_inspect($root.'/wp-content/'.$path,$stat);
+            if ($text!==null && in_array(hash('sha256',$text),[
+                '6d8db93cbee3b408b9b8972684d20f33d739efd11d32ba584d6df272a7873011',
+                '63553e7f320285fe2417cdb00664a136958d70baa07d7325e86f0847f11dd17c'
+            ],true)) { $rulesOmitted[]='wp-content/'.$path; unset($files[$path]); continue; }
+        }
+        if ($path==='index.php') {
+            $text=upgrade_source_inspect($root.'/wp-content/'.$path,$stat);
+            $passive=$text!==null && str_starts_with($text,'<?php');
+            foreach (token_get_all($text ?? '') as $token) {
+                if (!is_array($token) || !in_array($token[0],[T_OPEN_TAG,T_COMMENT,T_DOC_COMMENT,T_WHITESPACE],true)) $passive=false;
+            }
+            if ($passive) continue;
+        }
+        if (str_starts_with($path,'mu-plugins/') || preg_match('#(?:^|/)(?:\.htaccess|\.user\.ini|php\.ini)$#i',$path)
+            || (str_ends_with($path,'.php') && !str_contains($path,'/'))) throw new \RuntimeException('MU plugins, drop-ins and content server overrides require an offline isolated upgrade.');
+    }
+    $result = [];
+    foreach ($files as $path=>$stat) $result['wp-content/'.$path] = $stat;
+    // Only non-executable root assets are copied; unrelated administration PHP is not.
+    $handle = opendir($root);
+    try {
+        while (false !== ($name=readdir($handle))) {
+            if (!preg_match('/\.(?:css|js|png|jpe?g|gif|webp|svg|ico|woff2?|ttf)$/i',$name)) continue;
+            $p=$root.'/'.$name; $s=lstat($p);
+            if (is_link($p) || !is_file($p) || $s['nlink'] !== 1) throw new \RuntimeException('Shared root assets cannot be copied.');
+            $result[$name]=[$s['dev'],$s['ino'],$s['size'],hash_file('sha256',$p)];
+        }
+    } finally { closedir($handle); }
+    // Never import arbitrary rewrite/handler directives into the test environment.
+    if (is_file($root.'/.htaccess')) {
+        $text=file_get_contents($root.'/.htaccess',false,null,0,65537);
+        if (strlen($text)>65536) throw new \RuntimeException('Source server rules exceed their inspection limit.');
+        foreach (preg_split('/\R/',$text) as $line) {
+            $line=trim($line);
+            if ($line==='' || str_starts_with($line,'#')) continue;
+            if (!preg_match('#^(?:<IfModule mod_rewrite\.c>|</IfModule>|RewriteEngine On|RewriteBase /[A-Za-z0-9_/-]*|RewriteRule \^index\\\.php\$ - \[L\]|RewriteCond %\{REQUEST_FILENAME\} !-[fd]|RewriteRule \. /[A-Za-z0-9_/-]*index\.php \[L\]|RewriteRule \. - \[E=HTTP_AUTHORIZATION:%\{HTTP:Authorization\}\])$#iD',$line)) throw new \RuntimeException('Custom source .htaccess rules need a manually isolated review.');
+        }
+    }
+    return $result;
+}
+
+function upgrade_source_tables($pdo, $prefix) {
+    $tables=[];
+    foreach ($pdo->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_NUM) as $row) {
+        if (!str_starts_with($row[0],$prefix)) continue;
+        if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D',$row[0]) || ($row[1] ?? '') !== 'BASE TABLE' || count($tables)>=200) throw new \RuntimeException('Unsupported source table layout.');
+        $rowCreate=$pdo->query('SHOW CREATE TABLE `'.$row[0].'`')->fetch(PDO::FETCH_NUM);
+        $sql=$rowCreate[1] ?? '';
+        if (!str_starts_with($sql,'CREATE TABLE `'.$row[0].'` (') || !preg_match('/\bENGINE=InnoDB\b/i',$sql)
+            || preg_match('/;|\b(?:REFERENCES|DEFINER|TABLESPACE|CONNECTION)\b|DATA DIRECTORY|INDEX DIRECTORY/i',$sql)) throw new \RuntimeException('Only self-contained InnoDB tables without cross-schema references are supported.');
+        $tables[$row[0]]=$sql;
+    }
+    if (!isset($tables[$prefix.'options']) || isset($tables[$prefix.'cms_upgrade_owner'])) throw new \RuntimeException('Required source options table is missing or reserved ownership table exists.');
+    foreach ($pdo->query('SHOW TRIGGERS')->fetchAll(PDO::FETCH_ASSOC) as $trigger) if (str_starts_with($trigger['Table'] ?? '',$prefix)) throw new \RuntimeException('Source triggers require an offline isolated upgrade.');
+    return $tables;
+}
+
+function upgrade_options($pdo, $prefix) {
+    $options=[];
+    foreach ($pdo->query('SELECT option_name, option_value FROM `'.$prefix.'options`')->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        if (in_array($row['option_name'],['siteurl','home','active_plugins','upload_path','upload_url_path'],true)) $options[$row['option_name']]=$row['option_value'];
+    }
+    $url=rtrim($options['siteurl'] ?? '', '/'); $u=parse_url($url);
+    if (!$u || ($u['scheme'] ?? '') !== 'https' || empty($u['host']) || isset($u['user']) || isset($u['pass']) || isset($u['query']) || isset($u['fragment'])
+        || !preg_match('#^/[A-Za-z0-9_/-]*$#D',($u['path'] ?? '/'))) throw new \RuntimeException('An authoritative HTTPS siteurl is required for sandbox identity.');
+    if (!empty($options['upload_path']) || !empty($options['upload_url_path'])) throw new \RuntimeException('Custom upload locations require an offline isolated upgrade.');
+    $active=@unserialize($options['active_plugins'] ?? '', ['allowed_classes'=>false]);
+    if (!is_array($active) || count($active)>200) throw new \RuntimeException('Source plugin activation state is unavailable.');
+    foreach ($active as $plugin) if (!is_string($plugin) || !preg_match('#^(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.php$#D',$plugin) || in_array('..',explode('/',$plugin),true)) throw new \RuntimeException('Invalid source plugin activation state.');
+    return [$url,array_values($active)];
+}
+
+function upgrade_finding(array &$run, $id, $status, $tip) {
+    $run['findings'][$id]=['check'=>$id,'severity'=>$status,'tip'=>$tip];
+}
+
+function upgrade_public(array $run) {
+    $done=$run['stage']==='done'; $ready=$done;
+    $required=['hosting-access-rules','core-integrity','file-copies','consistent-snapshot','core-database-upgrade','effective-php','containment','original-active-set','http-home','http-admin','http-rest','http-permalink'];
+    foreach (array_keys($run['plugins']) as $plugin) $required[]='plugin:'.$plugin;
+    foreach ($required as $check) if (($run['findings'][$check]['severity'] ?? null)!=='ok') $ready=false;
+    foreach ($run['findings'] as $finding) if (in_array($finding['severity'],['failed','unavailable'],true)) $ready=false;
+    return ['ok'=>true,'run_id'=>$run['id'],'stage'=>$run['stage'],'progress'=>$run['progress'],'ready'=>$ready,
+        'version'=>$run['release']['version'],'sandbox_url'=>$run['url'],'findings'=>array_values($run['findings']),
+        'recommendation'=>$ready ? 'Required isolated smoke checks passed, not comprehensive compatibility. Take a new files and full database backup, then plan a manual migration and rollback with your host. Production was not replaced.' : 'Not ready for a migration recommendation. Resolve failed or unavailable checks and retest. Production was not replaced.'];
+}
+
+function upgrade_probe_source() {
+    return <<<'PROBE'
+<?php
+// This endpoint is protected by the generated config and hosting access rules.
+require __DIR__ . '/wp-load.php';
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
+if (($_GET['mode'] ?? '') === 'upgrade') {
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    wp_upgrade();
+    $post = get_page_by_path('cms-upgrade-smoke', OBJECT, 'post');
+    $id = $post ? $post->ID : wp_insert_post(['post_title'=>'Isolated upgrade smoke check','post_name'=>'cms-upgrade-smoke','post_type'=>'post','post_status'=>'publish','post_content'=>'Isolated upgrade check.']);
+    if (is_wp_error($id) || !$id) { http_response_code(500); exit; }
+    flush_rewrite_rules(false);
+    echo json_encode(['probe_ok'=>true,'version'=>$wp_version,'db_version'=>(int)get_option('db_version'),'expected_db_version'=>(int)$wp_db_version,'rest_url'=>rest_url(),
+        'php'=>PHP_VERSION,'mysql'=>$wpdb->db_version(),'permalink'=>get_permalink($id),
+        'ini'=>array_combine(['memory_limit','max_execution_time','upload_max_filesize','post_max_size','auto_prepend_file','auto_append_file'],array_map('ini_get',['memory_limit','max_execution_time','upload_max_filesize','post_max_size','auto_prepend_file','auto_append_file'])),
+        'mysqli'=>extension_loaded('mysqli'),'mail_blocked'=>has_filter('pre_wp_mail') !== false,'cron_disabled'=>defined('DISABLE_WP_CRON') && DISABLE_WP_CRON,'indexing'=>(int)get_option('blog_public')]);
+} else echo json_encode(['probe_ok'=>true,'active'=>get_option('active_plugins',[])]);
+PROBE;
+}
+
+function upgrade_configuration(array &$run, $target) {
+    $text="<?php\n// Generated isolated configuration; never copied from production.\n";
+    $text.='if (!hash_equals('.var_export($run['token'],true).", (string)(\$_SERVER['HTTP_X_CMS_UPGRADE'] ?? ''))) { http_response_code(403); exit; }\n";
+    $text.="header('X-CMS-Upgrade-Identity: ". $run['id'] ."');\nheader('X-Robots-Tag: noindex, nofollow, noarchive');\n";
+    $constants=['DB_HOST'=>$run['target']['target_host'],'DB_NAME'=>$run['target']['target_name'],'DB_USER'=>$run['target']['target_user'],'DB_PASSWORD'=>$run['target']['target_password'],'DB_CHARSET'=>'utf8mb4','DB_COLLATE'=>'','WP_HOME'=>$run['url'],'WP_SITEURL'=>$run['url'],'DISABLE_WP_CRON'=>true,'ALTERNATE_WP_CRON'=>false,'WP_HTTP_BLOCK_EXTERNAL'=>true,'WP_ACCESSIBLE_HOSTS'=>'','DISALLOW_FILE_MODS'=>true,'AUTOMATIC_UPDATER_DISABLED'=>true,'WP_ENVIRONMENT_TYPE'=>'staging','WP_DEBUG'=>false,'WP_DEBUG_DISPLAY'=>false,'WP_DEBUG_LOG'=>false];
+    foreach (['AUTH_KEY','SECURE_AUTH_KEY','LOGGED_IN_KEY','NONCE_KEY','AUTH_SALT','SECURE_AUTH_SALT','LOGGED_IN_SALT','NONCE_SALT'] as $key) $constants[$key]=bin2hex(random_bytes(32));
+    foreach ($constants as $name=>$value) $text.='define('.var_export($name,true).', '.var_export($value,true).");\n";
+    $text.='$table_prefix = '.var_export($run['source']['prefix'],true).";\nif (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }\nrequire_once ABSPATH . 'wp-settings.php';\n";
+    upgrade_write($run['dir'].'/wp-config.php',$text);
+    upgrade_write($run['dir'].'/cms-upgrade-probe.php',upgrade_probe_source());
+    upgrade_write($run['dir'].'/wp-content/mu-plugins/000-cms-upgrade-containment.php', "<?php\nadd_filter('pre_wp_mail', '__return_true', PHP_INT_MAX);\nadd_filter('pre_option_blog_public', '__return_zero', PHP_INT_MAX);\nadd_filter('pre_http_request', function () { return new WP_Error('isolated_upgrade', 'Outbound WordPress HTTP is blocked in this isolated upgrade.'); }, PHP_INT_MAX);\nadd_filter('robots_txt', function () { return \"User-agent: *\\nDisallow: /\\n\"; }, PHP_INT_MAX);\n");
+    $p=$run['source']['prefix'];
+    foreach (['siteurl'=>$run['url'],'home'=>$run['url'],'blog_public'=>'0','active_plugins'=>serialize([]),'upload_path'=>'','upload_url_path'=>''] as $key=>$value) {
+        $target->prepare('UPDATE `'.$p.'options` SET option_value = ? WHERE option_name = ?')->execute([$value,$key]);
+    }
+}
+
+function upgrade_activate($target, array $run, array $plugins) {
+    $target->prepare('UPDATE `'.$run['source']['prefix'].'options` SET option_value = ? WHERE option_name = ?')->execute([serialize($plugins),'active_plugins']);
+    $value=$target->query('SELECT option_value FROM `'.$run['source']['prefix']."options` WHERE option_name = 'active_plugins'")->fetchColumn();
+    if ($value !== serialize($plugins)) throw new \RuntimeException('Could not verify restored sandbox plugin activation.');
+}
+
+function upgrade_target_owned(array $run) {
+    $pdo=upgrade_target_database($run['source'],$run['target'],false);
+    $actual=[];
+    foreach ($pdo->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_NUM) as $row) {
+        if (($row[1] ?? '')!=='BASE TABLE') throw new \RuntimeException('Sandbox database layout changed.');
+        $actual[]=$row[0];
+    }
+    $expected=[$run['source']['prefix'].'cms_upgrade_owner'];
+    $tables=array_keys($run['tables']);
+    $count=$run['stage']==='database' ? $run['table_cursor']+($run['row_cursor']>0?1:0) : count($tables);
+    $expected=array_merge($expected,array_slice($tables,0,$count)); sort($actual); sort($expected);
+    if ($actual!==$expected) throw new \RuntimeException('Sandbox database layout changed.');
+    $marker=$pdo->query('SELECT owner FROM `'.$run['source']['prefix'].'cms_upgrade_owner`')->fetchColumn();
+    if (!is_string($marker) || !hash_equals($run['owner'],$marker)) throw new \RuntimeException('Sandbox database ownership could not be verified.');
+    return $pdo;
+}
+
+function upgrade_step(array &$run) {
+    upgrade_owned($run);
+    $cache=upgrade_offline_cache();
+    if (($run['release']['offline_fingerprint'] ?? null)!==($cache['fingerprint'] ?? null)) throw new \RuntimeException('Offline cache changed since preparation.');
+    $stage=$run['stage'];
+    switch ($stage) {
+        case 'download':
+            if (!class_exists(__NAMESPACE__ . '\\ZipArchive') && !class_exists('ZipArchive')) throw new \RuntimeException('ZIP support is required; no package was installed.');
+            if ($cache!==null) {
+                if (!copy($cache['dir'].'/package.zip',$run['work'].'/package.zip') || hash_file('sha256',$run['work'].'/package.zip')!==$cache['provenance']['sha256']) throw new \RuntimeException('Offline package copy failed integrity verification.');
+            } else upgrade_http($run['release']['package'],null,67108864,$run['work'].'/package.zip');
+            $run['archive_hash']=hash_file('sha256',$run['work'].'/package.zip');
+            upgrade_archive($run);
+            $run['stage']='extract'; $run['progress']='Archive paths, attributes, sizes and checksum coverage validated.';
+            break;
+        case 'extract':
+            if (is_link($run['work'].'/package.zip') || (@lstat($run['work'].'/package.zip')['nlink'] ?? 0)!==1 || hash_file('sha256',$run['work'].'/package.zip') !== $run['archive_hash']) throw new \RuntimeException('Private archive changed.');
+            $zip=new ZipArchive();
+            if ($zip->open($run['work'].'/package.zip') !== true) throw new \RuntimeException('Private archive is unavailable.');
+            try {
+                foreach (array_slice($run['entries'],$run['cursor'],30) as $entry) {
+                    $body=$zip->getFromIndex($entry['index']);
+                    if (!is_string($body) || strlen($body)!==$entry['size'] || md5($body)!==$run['release']['checksums'][$entry['path']]) throw new \RuntimeException('Official package checksum mismatch.');
+                    if (empty($entry['verify_only'])) upgrade_write($run['dir'].'/'.$entry['path'],$body);
+                    $run['cursor']++;
+                }
+            } finally { $zip->close(); }
+            $run['progress']='Verified core files: '.$run['cursor'].' / '.count($run['entries']);
+            if ($run['cursor']===count($run['entries'])) {
+                $version=file_get_contents($run['dir'].'/wp-includes/version.php');
+                if (!preg_match('/\$wp_version\s*=\s*[\'\"]([0-9.]+)[\'\"]/',$version,$m) || $m[1]!==$run['release']['version']) throw new \RuntimeException('Package version does not match the stable release.');
+                $run['stage']='copy'; $run['cursor']=0; upgrade_finding($run,'core-integrity','ok','Official latest-stable core package and checksums verified; sandbox hosting controls preserved.');
+            }
+            break;
+        case 'copy':
+            $paths=array_keys($run['resources']);
+            foreach (array_slice($paths,$run['cursor'],30) as $path) {
+                $source=$run['root'].'/'.$path; $s=@lstat($source); $expected=$run['resources'][$path];
+                if (!$s || is_link($source) || $s['nlink']!==1 || [$s['dev'],$s['ino'],$s['size'],hash_file('sha256',$source)]!==$expected) throw new \RuntimeException('Source resource changed or became shared during preparation.');
+                $body=file_get_contents($source);
+                if (!is_string($body) || hash('sha256',$body)!==$expected[3]) throw new \RuntimeException('Source resource changed while copying.');
+                upgrade_write($run['dir'].'/'.$path,$body); $run['cursor']++;
+            }
+            $run['progress']='Independent resource copies: '.$run['cursor'].' / '.count($paths);
+            if ($run['cursor']===count($paths)) { $run['stage']='snapshot'; upgrade_finding($run,'file-copies','ok','All selected resources were copied into independent regular files.'); }
+            break;
+        case 'snapshot':
+            if (hash_file('sha256',$run['root'].'/wp-config.php')!==$run['source_config_hash'] || upgrade_source_resources($run['root'])!==$run['resources']) throw new \RuntimeException('Source configuration or resources changed; start a new isolated copy.');
+            $pdo=upgrade_source_pdo($run['source']); $start=microtime(true); $total=0; $bytes=0; $snapshots=[];
+            $pdo->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+            $pdo->exec('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+            try {
+                if (upgrade_source_tables($pdo,$run['source']['prefix'])!==$run['tables']) throw new \RuntimeException('Source schema changed before snapshot.');
+                foreach ($run['tables'] as $table=>$sql) {
+                    $rows=$pdo->query('SELECT * FROM `'.$table.'` LIMIT 20001')->fetchAll(PDO::FETCH_ASSOC);
+                    $total+=count($rows);
+                    if ($total>20000 || microtime(true)-$start>10) throw new \RuntimeException('Consistent snapshot limit exceeded; use an offline isolated database clone.');
+                    $encoded=[];
+                    foreach ($rows as $row) {
+                        $values=[];
+                        foreach ($row as $key=>$value) {
+                            if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D',$key)) throw new \RuntimeException('Unsupported source column identifier.');
+                            $values[$key]=$value===null ? null : base64_encode((string)$value);
+                        }
+                        $encoded[]=$values;
+                    }
+                    $json=json_encode($encoded,JSON_THROW_ON_ERROR); $bytes+=strlen($json);
+                    if ($bytes>33554432) throw new \RuntimeException('Consistent snapshot byte limit exceeded; use an offline isolated clone.');
+                    upgrade_write($run['work'].'/'.$table.'.json',$json);
+                    $snapshots[$table]=['hash'=>hash('sha256',$json),'rows'=>count($rows)];
+                }
+                [$origin,$active]=upgrade_options($pdo,$run['source']['prefix']);
+                if ($origin!==$run['origin']) throw new \RuntimeException('Source URL changed before snapshot.');
+                foreach ($active as $plugin) if (!isset($run['plugins'][$plugin])) throw new \RuntimeException('Source activation changed to an uncopied plugin.');
+                $run['active']=$active;
+            } finally { $pdo->exec('ROLLBACK'); }
+            $run['snapshots']=$snapshots; $run['table_cursor']=0; $run['row_cursor']=0;
+            $target=upgrade_target_database($run['source'],$run['target']);
+            $name=$run['source']['prefix'].'cms_upgrade_owner';
+            $target->exec('CREATE TABLE `'.$name.'` (owner varchar(64) NOT NULL) ENGINE=InnoDB');
+            $target->prepare('INSERT INTO `'.$name.'` (owner) VALUES (?)')->execute([$run['owner']]);
+            $run['stage']='database'; $run['progress']='Consistent read-only snapshot captured; source transaction closed.';
+            upgrade_finding($run,'consistent-snapshot','ok','Bounded InnoDB consistent snapshot captured without changing source data.');
+            break;
+        case 'database':
+            $target=upgrade_target_owned($run); $tables=array_keys($run['tables']); $table=$tables[$run['table_cursor']];
+            if ($run['row_cursor']===0) $target->exec($run['tables'][$table]);
+            $path=$run['work'].'/'.$table.'.json';
+            if (is_link($path) || (@lstat($path)['nlink'] ?? 0)!==1 || hash_file('sha256',$path)!==$run['snapshots'][$table]['hash']) throw new \RuntimeException('Private database snapshot changed.');
+            $rows=json_decode(file_get_contents($path),true,512,JSON_THROW_ON_ERROR);
+            foreach (array_slice($rows,$run['row_cursor'],100) as $row) {
+                $columns=array_keys($row); $values=array_map(function ($v) { return $v===null ? null : base64_decode($v,true); },array_values($row));
+                $target->prepare('INSERT INTO `'.$table.'` (`'.implode('`,`',$columns).'`) VALUES ('.implode(',',array_fill(0,count($values),'?')).')')->execute($values); $run['row_cursor']++;
+            }
+            if ($run['row_cursor']===count($rows)) { $run['table_cursor']++; $run['row_cursor']=0; }
+            $run['progress']='Isolated database tables: '.$run['table_cursor'].' / '.count($tables);
+            if ($run['table_cursor']===count($tables)) { upgrade_configuration($run,$target); $run['stage']='core-upgrade'; }
+            break;
+        case 'core-upgrade':
+            $target=upgrade_target_owned($run);
+            upgrade_activate($target,$run,[]);
+            try {
+                $response=upgrade_sandbox_http($run,$run['url'].'/cms-upgrade-probe.php?mode=upgrade');
+                $data=json_decode($response['body'],true);
+                if ($response['status']!==200 || !is_array($data) || ($data['probe_ok'] ?? false)!==true || ($data['version'] ?? '')!==$run['release']['version']
+                    || empty($data['db_version']) || $data['db_version']!==($data['expected_db_version'] ?? null)) throw new \RuntimeException('Core database upgrade failed or could not be verified.');
+                upgrade_finding($run,'core-database-upgrade','ok','Mandatory core database upgrade completed in the isolated schema.');
+                $ini=$data['ini'] ?? []; $memory=upgrade_ini_bytes($ini['memory_limit'] ?? '');
+                $phpOk=is_string($data['php'] ?? null) && version_compare($data['php'],$run['release']['php'],'>=') && is_string($data['mysql'] ?? null) && version_compare($data['mysql'],$run['release']['mysql'],'>=')
+                    && ($data['mysqli'] ?? false)===true && ($memory===-1 || $memory>=134217728) && isset($ini['max_execution_time']) && ((int)$ini['max_execution_time']===0 || (int)$ini['max_execution_time']>=20)
+                    && upgrade_ini_bytes($ini['upload_max_filesize'] ?? '')>0 && upgrade_ini_bytes($ini['post_max_size'] ?? '')>=upgrade_ini_bytes($ini['upload_max_filesize'] ?? '')
+                    && ($ini['auto_prepend_file'] ?? null)==='' && ($ini['auto_append_file'] ?? null)==='';
+                upgrade_finding($run,'effective-php',$phpOk?'ok':'failed',$phpOk?'Effective sandbox PHP/core database requirements passed.':'Review actual sandbox PHP version, mysqli, memory (128 MiB), execution time, upload/post limits and prepend/append directives.');
+                $contained=($data['mail_blocked'] ?? false)===true && ($data['cron_disabled'] ?? false)===true && ($data['indexing'] ?? null)===0;
+                upgrade_finding($run,'containment',$contained?'ok':'failed',$contained?'Mail, cron, indexing and WordPress HTTP controls are installed.':'Sandbox containment could not be verified; do not browse or migrate it.');
+                // Keep legacy probes compatible; accept only standard REST forms at the owned URL.
+                // Never send the sandbox token to an arbitrary WordPress-advertised address.
+                $rest=array_key_exists('rest_url',$data)?$data['rest_url']:$run['url'].'/wp-json/';
+                $allowedRest=array_map(fn($suffix)=>$run['url'].$suffix,['/wp-json/','/index.php/wp-json/','/?rest_route=/','/?rest_route=%2F','/index.php?rest_route=/','/index.php?rest_route=%2F']);
+                $run['rest_url']=is_string($rest) && in_array($rest,$allowedRest,true)?$rest:'';
+                $run['permalink']=$data['permalink'] ?? ''; $run['effective_php']=$data['php'];
+            } finally { upgrade_activate($target,$run,$run['active']); }
+            $run['plugin_cursor']=0; $run['stage']='plugins'; $run['progress']='Core database upgrade and effective PHP checks completed.';
+            break;
+        case 'plugins':
+            $target=upgrade_target_owned($run); $paths=array_keys($run['plugins']);
+            if ($run['plugin_cursor']<count($paths)) {
+                $plugin=$paths[$run['plugin_cursor']]; $header=$run['plugins'][$plugin]; $set=[$plugin]; $id='plugin:'.$plugin;
+            } else { $plugin=null; $header=[]; $set=$run['active']; $id='original-active-set'; }
+            try {
+                upgrade_activate($target,$run,$set);
+                $response=upgrade_sandbox_http($run,$run['url'].'/cms-upgrade-probe.php?mode=load'); $data=json_decode($response['body'],true);
+                $requirements=(!isset($header['php']) || version_compare($run['effective_php'],$header['php'],'>=')) && (!isset($header['wp']) || version_compare($run['release']['version'],$header['wp'],'>='));
+                if ($response['status']!==200 || ($data['probe_ok'] ?? false)!==true || ($data['active'] ?? null)!==$set || !$requirements) throw new \RuntimeException('Plugin load or declared requirements failed.');
+                upgrade_finding($run,$id,'ok','Isolated load and declared version requirements passed. This is a smoke test, not comprehensive compatibility.');
+            } catch (Throwable $e) { upgrade_finding($run,$id,'failed','Check sandbox PHP/error logs, declared PHP/WordPress requirements, dependencies and blocked external integrations. Update or replace this plugin before manual migration.');
+            } finally { upgrade_activate($target,$run,$run['active']); }
+            $run['plugin_cursor']++;
+            $run['progress']='Plugin load probes: '.min($run['plugin_cursor'],count($paths)).' / '.count($paths).' plus original active set.';
+            if ($plugin===null) { $run['stage']='http'; $run['http_cursor']=0; $run['http_checks']=['home'=>$run['url'].'/','admin'=>$run['url'].'/wp-admin/','rest'=>$run['rest_url'] ?? '','permalink'=>$run['permalink']]; }
+            break;
+        case 'http':
+            upgrade_target_owned($run);
+            $keys=array_keys($run['http_checks']); $id=$keys[$run['http_cursor']]; $url=$run['http_checks'][$id];
+            try {
+                if (!is_string($url) || $url==='') throw new \RuntimeException('Required HTTP target unavailable.');
+                $response=upgrade_sandbox_http($run,$url);
+                if ($response['status']!==200) throw new \RuntimeException('HTTP did not return 200.');
+                if ($id==='rest' && !is_array(json_decode($response['body'],true))) throw new \RuntimeException('REST response is not JSON.');
+                if ($id==='home') $run['assets']=upgrade_asset_urls($run,$response['body']);
+                upgrade_finding($run,'http-'.$id,'ok','HTTPS response passed sandbox identity and status checks.');
+            } catch (Throwable $e) { upgrade_finding($run,'http-'.$id,'failed','Check sandbox routing, .htaccess, PHP fatals, TLS, canonical URLs and redirects. Status 0, 4xx/5xx and redirects outside the sandbox are not success.'); }
+            $run['http_cursor']++;
+            if ($run['http_cursor']===count($keys)) {
+                $run['stage']='assets'; $run['asset_cursor']=0;
+                if (!isset($run['assets'])) { $run['assets']=[]; upgrade_finding($run,'asset-discovery','unavailable','Homepage asset discovery failed; asset coverage is unavailable.'); }
+            }
+            $run['progress']='HTTP smoke checks: '.$run['http_cursor'].' / '.count($keys);
+            break;
+        case 'assets':
+            if ($run['asset_cursor']<count($run['assets'])) {
+                $url=$run['assets'][$run['asset_cursor']];
+                try {
+                    $basePath=parse_url($run['url'],PHP_URL_PATH); $urlPath=parse_url($url,PHP_URL_PATH);
+                    $relative=rawurldecode(substr($urlPath,strlen($basePath)+1));
+                    $path=$run['dir'].'/'.$relative; $real=realpath($path);
+                    if (!$real || !str_starts_with($real,$run['dir'].'/') || !is_file($real) || filesize($real)>2097152) throw new \RuntimeException('Asset file absent or exceeds HTTP verification limit.');
+                    $response=upgrade_sandbox_http($run,$url);
+                    if ($response['status']!==200 || hash('sha256',$response['body'])!==hash_file('sha256',$real)) throw new \RuntimeException('HTTP asset does not match the sandbox filesystem.');
+                    upgrade_finding($run,'asset-'.$run['asset_cursor'],'ok','Referenced asset matches its isolated filesystem copy over HTTPS.');
+                } catch (Throwable $e) { upgrade_finding($run,'asset-'.$run['asset_cursor'],'failed','Restore the missing asset, fix sandbox URLs/routing, or verify large assets manually. External/live-site assets and unavailable checks block readiness.'); }
+                $run['asset_cursor']++;
+            }
+            $run['progress']='Referenced assets checked: '.$run['asset_cursor'].' / '.count($run['assets']);
+            if ($run['asset_cursor']===count($run['assets'])) {
+                upgrade_activate(upgrade_target_owned($run),$run,$run['active']);
+                if (hash_file('sha256',$run['root'].'/wp-config.php')!==$run['source_config_hash'] || upgrade_source_resources($run['root'])!==$run['resources']) throw new \RuntimeException('Source configuration or resources changed; start a new isolated copy.');
+                $run['stage']='done'; $run['progress']='Preparation and required isolated smoke checks finished. Review every finding.';
+            }
+            break;
+        default: throw new \RuntimeException('Run is not in a resumable stage.');
+    }
+    // Only our preparation stages can establish a new trusted file baseline.
+    // Runtime code/HTTP must not silently legitimize arbitrary plugin mutations.
+    if (in_array($stage,['core-upgrade','plugins','http','assets'],true)) upgrade_owned($run);
+    else $run['manifest']=upgrade_files($run['dir']);
+    $run['updated']=time();
+}
+
+function upgrade_ini_bytes($value) {
+    if ($value==='-1') return -1;
+    if (!is_string($value) || !preg_match('/^([0-9]+)\s*([KMG]?)$/iD',$value,$m)) return 0;
+    return (int)$m[1] * (1024 ** ([''=>0,'K'=>1,'M'=>2,'G'=>3][strtoupper($m[2])]));
+}
+
+function upgrade_asset_urls(array &$run, $html) {
+    preg_match_all('/(?:src|href)\s*=\s*[\'\"]([^\'\"]+)[\'\"]/i',$html,$matches);
+    $urls=[];
+    foreach ($matches[1] as $value) {
+        $value=html_entity_decode($value,ENT_QUOTES,'UTF-8');
+        if (!preg_match('/\.(?:css|js|png|jpe?g|gif|webp|svg|ico|woff2?|ttf)(?:[?#]|$)/i',$value)) continue;
+        if (str_starts_with($value,'//')) $value='https:'.$value;
+        elseif (str_starts_with($value,'/')) { $u=parse_url($run['url']); $value='https://'.$u['host'].(isset($u['port'])?':'.$u['port']:'').$value; }
+        elseif (!str_contains($value,'://')) $value=$run['url'].'/'.$value;
+        $urls[explode('#',$value,2)[0]]=true;
+        if (count($urls)>100) { upgrade_finding($run,'asset-discovery','unavailable','Referenced asset count exceeded 100; full HTTP asset coverage is unavailable.'); break; }
+    }
+    // Zero references is meaningful for a plain page; filesystem copies were checked separately.
+    return array_slice(array_keys($urls),0,100);
+}
+
+// Provision these literals on the separate host, never through this web form.
+// They record the operator's infrastructure verification, not an OS proof by PHP.
+function upgrade_staging_context($config) {
+    $error='Separate staging configuration is required. Follow the staging preparation guide before running upgrade tests.';
+    if (is_link($config) || !is_file($config) || (@lstat($config)['nlink'] ?? 0)!==1) throw new \RuntimeException($error);
+    $text=@file_get_contents($config,false,null,0,65537);
+    if (!is_string($text) || strlen($text)>65536) throw new \RuntimeException($error);
+    $tokens=array_values(array_filter(token_get_all($text),function ($t) { return !is_array($t) || !in_array($t[0],[T_WHITESPACE,T_COMMENT,T_DOC_COMMENT],true); }));
+    $wanted=['WP_ENVIRONMENT_TYPE'=>'staging','CMS_TOOLS_PRODUCTION_URL'=>null,'CMS_TOOLS_STAGING_URL'=>null,'CMS_TOOLS_ISOLATION_VERIFIED'=>null];
+    $found=[]; $depth=0; $included=false;
+    $literal=function ($t) {
+        if (!is_array($t) || $t[0]!==T_CONSTANT_ENCAPSED_STRING) return null;
+        $s=substr($t[1],1,-1);
+        return strpbrk($s,"\\\r\n$")===false ? $s : null;
+    };
+    foreach ($tokens as $i=>$token) {
+        if ($token==='{') $depth++;
+        if ($token==='}') $depth--;
+        if (is_array($token) && in_array($token[0],[T_REQUIRE,T_REQUIRE_ONCE,T_INCLUDE,T_INCLUDE_ONCE],true)) $included=true;
+        if (!is_array($token) || !in_array($token[0],[T_STRING,T_NAME_FULLY_QUALIFIED],true) || !in_array(strtolower($token[1]),['define','\\define'],true)) continue;
+        $name=$literal($tokens[$i+2] ?? null);
+        if (!array_key_exists($name ?? '',$wanted)) continue;
+        $previous=$tokens[$i-1] ?? null;
+        $valid=!$depth && !$included && ($previous===';' || (is_array($previous) && $previous[0]===T_OPEN_TAG))
+            && ($tokens[$i+1] ?? '')==='(' && ($tokens[$i+3] ?? '')===',' && ($tokens[$i+5] ?? '')===')' && ($tokens[$i+6] ?? '')===';';
+        $found[$name][]=$valid ? $literal($tokens[$i+4] ?? null) : null;
+    }
+    foreach ($wanted as $key=>$expected) if (count($found[$key] ?? [])!==1 || !is_string($found[$key][0]) || ($expected!==null && $found[$key][0]!==$expected)) throw new \RuntimeException($error);
+    $marker=$found['CMS_TOOLS_ISOLATION_VERIFIED'][0];
+    if (!in_array($marker,['separate-host','docker-network-none'],true)) throw new \RuntimeException($error);
+    $docker=$marker==='docker-network-none';
+    if ($docker && (upgrade_offline_cache()===null || $found['CMS_TOOLS_STAGING_URL'][0]!=='https://staging.invalid:8443')) throw new \RuntimeException($error);
+    if (!$docker && getenv('CMS_UPGRADE_OFFLINE_DIR')) throw new \RuntimeException($error);
+    $production=rtrim($found['CMS_TOOLS_PRODUCTION_URL'][0],'/'); $staging=rtrim($found['CMS_TOOLS_STAGING_URL'][0],'/');
+    foreach ([$production,$staging] as $url) {
+        $u=parse_url($url);
+        if (!$u || ($u['scheme'] ?? '')!=='https' || !preg_match('/^[A-Za-z0-9.-]+$/D',$u['host'] ?? '') || isset($u['user']) || isset($u['pass']) || isset($u['query']) || isset($u['fragment']) || !preg_match('#^/[A-Za-z0-9_/-]*$#D',$u['path'] ?? '/')) throw new \RuntimeException($error);
+    }
+    $p=parse_url($production); $s=parse_url($staging);
+    if (strcasecmp(rtrim($p['host'],'.'),rtrim($s['host'],'.'))===0) throw new \RuntimeException('Production and staging must have distinct HTTPS hostnames on separately provisioned infrastructure.');
+    $host=strtolower($s['host']).(isset($s['port']) ? ':'.$s['port'] : '');
+    $path=rtrim(str_replace('\\','/',dirname($_SERVER['SCRIPT_NAME'] ?? '/cms_tools.php')),'/.');
+    if (strtolower($_SERVER['HTTP_HOST'] ?? '')!==$host || rtrim($s['path'] ?? '','/')!==$path || (strtolower((string)($_SERVER['HTTPS'] ?? ''))!=='on' && ($_SERVER['SERVER_PORT'] ?? '')!=='443')) throw new \RuntimeException('Open the tool at its configured HTTPS staging URL. Forwarded headers do not establish trusted staging identity.');
+    return ['production_url'=>$production,'staging_url'=>$staging,'proof'=>$docker ? 'runner-attested-docker-network-none' : 'operator-verified-separate-host'];
+}
+
+function upgrade_begin($root, $config, array $source, array $input) {
+    upgrade_source_inventory($root,$config);
+    $resources=upgrade_source_resources(rtrim($root,'/'),$rulesOmitted);
+    $environment=upgrade_staging_context($config);
+    $source=upgrade_source_identity($config,$source);
+    $pdo=upgrade_source_pdo($source); $tables=upgrade_source_tables($pdo,$source['prefix']);
+    [$origin,$active]=upgrade_options($pdo,$source['prefix']);
+    if ($origin!==$environment['staging_url']) throw new \RuntimeException('The baseline siteurl must match the configured staging URL, not production. Correct the restored staging database before testing.');
+    upgrade_target_database($source,$input);
+    $release=upgrade_stable_release();
+    $plugins=[];
+    foreach ($resources as $path=>$stat) {
+        if (!str_starts_with($path,'wp-content/plugins/') || !str_ends_with($path,'.php')) continue;
+        $rel=substr($path,19);
+        if (substr_count($rel,'/')>1) continue;
+        $text=file_get_contents(rtrim($root,'/').'/'.$path,false,null,0,8192);
+        if (!preg_match('/^[ \t\/*#@]*Plugin Name\s*:\s*.+$/mi',$text)) continue;
+        if (count($plugins)>=200) throw new \RuntimeException('Plugin inventory exceeded its limit.');
+        $requirements=[];
+        foreach (['Requires PHP'=>'php','Requires at least'=>'wp'] as $header=>$key) if (preg_match('/^[ \t\/*#@]*'.preg_quote($header,'/').'\s*:\s*([0-9.]+)/mi',$text,$m)) $requirements[$key]=$m[1];
+        $plugins[$rel]=$requirements;
+    }
+    foreach ($active as $plugin) if (!isset($plugins[$plugin])) throw new \RuntimeException('An active plugin is absent from the supported plugin inventory.');
+    $id=bin2hex(random_bytes(12)); $root=rtrim($root,'/'); $temp=realpath(sys_get_temp_dir());
+    $documentRoot=realpath($_SERVER['DOCUMENT_ROOT'] ?? $root) ?: $root;
+    if (!$temp || $temp===$documentRoot || str_starts_with($temp,$documentRoot.'/')) throw new \RuntimeException('A private temporary directory outside the public document root is required.');
+    $run=['id'=>$id,'root'=>$root,'dir'=>$root.'/cms-upgrade-'.$id,'work'=>$temp.'/cms-upgrade-private-'.$id,'url'=>$origin.'/cms-upgrade-'.$id,'origin'=>$origin,
+        'root_rules'=>upgrade_root_rules($root),'environment'=>$environment,'source'=>$source,'target'=>array_intersect_key($input,array_flip(['target_host','target_name','target_user','target_password'])),'release'=>$release,'tables'=>$tables,'resources'=>$resources,
+        'active'=>$active,'plugins'=>$plugins,'source_config_hash'=>hash_file('sha256',$config),'owner'=>bin2hex(random_bytes(32)),'token'=>bin2hex(random_bytes(32)),'stage'=>'download','progress'=>'Isolation access rules verified. Ready to download the official package.','created'=>time(),'updated'=>time(),'findings'=>[]];
+    if (!@mkdir($run['dir'],0700)) throw new \RuntimeException('Could not exclusively create a new upgrade directory.');
+    if (!@mkdir($run['work'],0700)) throw new \RuntimeException('Could not exclusively create private upgrade storage.');
+    foreach (['dir','work'] as $key) { $s=lstat($run[$key]); $run[$key.'_inode']=[$s['dev'],$s['ino']]; }
+    $base=rtrim(parse_url($run['url'],PHP_URL_PATH),'/').'/';
+    $rules="RewriteEngine On\nRewriteCond %{HTTP:X-CMS-Upgrade} !^".$run['token']."$\nRewriteRule ^ - [F,L]\n<FilesMatch \"^(wp-config\\.php|\\.cms-owned\\.php|\\.user\\.ini|php\\.ini|wp-cron\\.php)$\">\nRequire all denied\n</FilesMatch>\nHeader always set X-CMS-Upgrade-Identity \"".$id."\"\nRewriteBase ".$base."\nRewriteRule ^index\\.php$ - [L]\nRewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\nRewriteRule . ".$base."index.php [L]\n";
+    upgrade_write($run['dir'].'/.htaccess',$rules);
+    upgrade_write($run['dir'].'/.cms-owned.php',"<?php http_response_code(404); exit; // ".$id."\n");
+    upgrade_write($run['dir'].'/identity.txt',$id);
+    upgrade_write($run['dir'].'/wp-config.php','ACCESS-CONTROL-CANARY');
+    $run['manifest']=upgrade_files($run['dir']);
+    $anonymous=upgrade_sandbox_http($run,$run['url'].'/identity.txt',1024,false);
+    $authorized=upgrade_sandbox_http($run,$run['url'].'/identity.txt',1024);
+    $protected=upgrade_sandbox_http($run,$run['url'].'/wp-config.php',1024);
+    if ($anonymous['status']!==403 || $authorized['status']!==200 || $authorized['body']!==$id || $protected['status']!==403) throw new \RuntimeException('Hosting access rules could not be proven. No site content or credentials were copied; require working per-directory access control and response headers.');
+    if ($rulesOmitted) upgrade_finding($run,'source-rules-omitted','warning','Authenticated official Akismet server rules were intentionally omitted: '.implode(', ',$rulesOmitted).'. Source files are unchanged; vendor routing compatibility is not tested.');
+    upgrade_finding($run,'hosting-access-rules','ok','Anonymous content access and direct configuration access are denied; authenticated static identity proves hosting rules are effective.');
+    upgrade_finding($run,'execution-environment','warning','Separate staging infrastructure and outbound restrictions were verified by the operator, not proven by PHP. WordPress filters do not contain arbitrary sockets or embedded production credentials. Smoke checks cannot certify all plugin workflows or external integrations.');
+    return $run;
+}
+
 if ($authenticated && isset($_GET['action'])) {
     $action = $_GET['action'];
+
+    if (in_array($action, ['upgrade_prepare','upgrade_step'], true)) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        $fail = function ($status, $error) { http_response_code($status); echo json_encode(['ok'=>false, 'ready'=>false, 'error'=>$error]); exit; };
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') { header('Allow: POST'); $fail(405, 'Explicit POST required.'); }
+        if (!is_string($_POST['csrf'] ?? null) || !isset($_SESSION['upgrade_csrf']) || !hash_equals($_SESSION['upgrade_csrf'], $_POST['csrf'])) {
+            $fail(403, 'Invalid upgrade session.');
+        }
+        if (($_POST['platform'] ?? '')==='docker') $fail(400,'Docker runs only from the local CLI: bash docker/wordpress-upgrade/run.sh --help. No Docker execution is available through web PHP.');
+        if (array_intersect(['path','folder','sandbox_url','prefix','sql'],array_keys($_POST))) $fail(400,'Choose new or verified reuse; arbitrary paths are not accepted.');
+        $reuse=$action==='upgrade_prepare' && ($_POST['mode'] ?? '')==='reuse';
+        if ($action==='upgrade_prepare') {
+            if (($_POST['backup'] ?? '')!=='yes') $fail(400,'Confirm a restorable files and full database backup first.');
+            if (!in_array($_POST['mode'] ?? '',['new','reuse'],true) || (!$reuse && isset($_POST['run_id']))) $fail(400,'Choose new or verified reuse; arbitrary paths are not accepted.');
+            if (($_POST['separate_host'] ?? '')!=='yes') $fail(400,'Confirm that this is the separately provisioned staging host, without production credentials or access.');
+        }
+        if ($action==='upgrade_step' || $reuse) {
+            $run=$_SESSION['upgrade_run'] ?? null;
+            if (!$run || !is_string($_POST['run_id'] ?? null) || !hash_equals($run['id'],$_POST['run_id']) || time()-$run['updated']>5400) $fail(409,'No verified upgrade-owned run in this session.');
+            try {
+                upgrade_owned($run);
+                if ($reuse) {
+                    if ($run['stage']!=='done') throw new \RuntimeException('Only a completed, verified upgrade-owned sandbox can be reused.');
+                    upgrade_target_owned($run);
+                    $latest=upgrade_stable_release();
+                    if ($latest['version']!==$run['release']['version']) throw new \RuntimeException('A newer stable release requires a new isolated copy.');
+                    $run['findings']=array_filter($run['findings'],function ($f) { return in_array($f['check'],['hosting-access-rules','execution-environment','core-integrity','file-copies','consistent-snapshot','source-rules-omitted'],true); });
+                    $run['stage']='core-upgrade'; $run['progress']='Verified owned sandbox selected; mandatory upgrade and all smoke checks will run again.';
+                    unset($run['assets']);
+                } else upgrade_step($run);
+                $_SESSION['upgrade_run']=$run;
+                echo json_encode(upgrade_public($run));
+            } catch (Throwable $e) {
+                $message=$e instanceof \RuntimeException ? $e->getMessage() : 'Isolated upgrade stage failed. Check private host logs; production was not changed.';
+                upgrade_finding($run,'stage-failure','failed',$message.' Start a new isolated run after correcting the cause; no automatic destructive repair was attempted.');
+                $run['stage']='failed'; $_SESSION['upgrade_run']=$run;
+                http_response_code(409); echo json_encode(['ok'=>false,'ready'=>false,'error'=>$message,'run'=>upgrade_public($run)]);
+            }
+            exit;
+        }
+        if ($detected_cms!=='wordpress' || !$wp_config_path || !is_readable($wp_config_path)) $fail(409,'A readable WordPress source is required.');
+        try {
+            $run=upgrade_begin($abspath,$wp_config_path,$db,$_POST);
+            $_SESSION['upgrade_run']=$run;
+            echo json_encode(upgrade_public($run));
+        } catch (\InvalidArgumentException $e) { $fail(400,$e->getMessage());
+        } catch (\RuntimeException $e) { $fail(409,$e->getMessage());
+        } catch (Throwable $e) { $fail(409,'Upgrade prerequisites failed. No source data was changed.'); }
+        exit;
+    }
 
     if ($action === 'site_report_github') {
         header('Content-Type: application/json; charset=utf-8');
@@ -8001,8 +9001,54 @@ foreach ($php_cfg_rows as $r):
 <!-- TEST ENVIRONMENT (sandbox) -->
 <div class="card" style="border-color:#1e3a5f">
 <h2>🧪 <?= h(t('Test Environment (sandbox)')) ?></h2>
+<?php $_SESSION['upgrade_csrf'] ??= bin2hex(random_bytes(32)); ?>
+<section style="border:1px solid var(--border);padding:12px;margin-bottom:14px" id="upgrade_admission">
+<h3><?= h(t('WordPress upgrade on separate staging')) ?></h3>
+<p><strong><?= h(t('Run this only on another hosting account or staging machine with its own files, database and credentials. Never enable it on production.')) ?></strong></p>
+<details><summary><?= h(t('Prepare the separate hosting first')) ?></summary>
+<p><?= h(t('Restore verified files and database backups there, replace production database credentials, and set the baseline siteurl and home to the HTTPS staging URL before loading WordPress.')) ?></p>
+<p><?= h(t('Have the host verify filesystem/database separation, block production integrations and outbound side effects, and inspect inherited PHP/Apache rules. PHP cannot prove this infrastructure boundary.')) ?></p>
+<p><?= h(t('Add these literal declarations to the staging wp-config.php before its WordPress bootstrap, replacing both example URLs. The isolation declaration records your host verification, not an automatic security certification.')) ?></p>
+<pre style="white-space:pre-wrap">define('WP_ENVIRONMENT_TYPE', 'staging');
+define('CMS_TOOLS_PRODUCTION_URL', 'https://production.example');
+define('CMS_TOOLS_STAGING_URL', 'https://staging.example');
+define('CMS_TOOLS_ISOLATION_VERIFIED', 'separate-host');</pre>
+<p><?= h(t('Use a separate empty schema and restricted account for the upgraded copy. Configuration snapshots are not full backups. Unsupported layouts or unavailable checks block a recommendation.')) ?></p>
+<p><?= h(t('The baseline wp-config.php must use a direct SELECT-only account scoped only to its staging schema. Write privileges, roles, global grants and unresolved PHP configuration are refused before official downloads.')) ?></p>
+<p><?= h(t('Only literal constant definitions and table_prefix are supported, followed optionally by the standard ABSPATH and wp-settings.php bootstrap. Do not include executable setup, environment lookups or custom includes. Upgrade preparation never executes this config.')) ?> <a href="docs/staging-upgrade.md"><?= h(t('Separate staging setup guide')) ?></a></p>
+<p><?= h(t('Run ownership stays in this authenticated session; upgrade preparation does not save a last-run setting or change authentication settings.')) ?></p>
+</details>
+<p><strong><?= h(t('Before any preparation or testing, keep a verified files backup and a full database backup. Configuration snapshots and file-only exports are not a restorable site backup.')) ?></strong></p>
+<?php $upgrade_previous=$_SESSION['upgrade_run'] ?? []; $upgrade_reusable=($upgrade_previous['stage'] ?? '')==='done' && preg_match('/^[a-f0-9]{24}$/D',$upgrade_previous['id'] ?? ''); ?>
+<details><summary><?= h(t('Optional Docker testing from an offline backup')) ?></summary>
+<p><?= h(t('Docker is optional and runs only from your local terminal. Web PHP never starts Docker or receives its socket. Reports, API and separate hosting do not require Docker.')) ?></p>
+<pre>bash docker/wordpress-upgrade/run.sh --help</pre>
+<p><?= h(t('Read docker/wordpress-upgrade/README.md in the repository. Supply an explicit offline backup directory and plain single-database SQL, a trusted locally built image, the production origin and table prefix. Never point the CLI at live production.')) ?></p>
+<p><?= h(t('The CLI prefetches only official WordPress core, then tests independent copies offline with no published ports or host mounts. Results describe container settings only. Real Docker runtime validation remains required; synthetic tests are not runtime proof.')) ?></p>
+</details>
+<form id="upgrade_form" novalidate data-verified-run="<?= $upgrade_reusable?'yes':'no' ?>" onsubmit="upgradeAdmission(event)">
+<label><?= h(t('Upgrade testing platform')) ?> <select name="platform" onchange="upgradeModeChanged()"><option value="separate-host"><?= h(t('Separate hosting or staging machine')) ?></option><option value="docker"><?= h(t('Docker: show local CLI instructions only')) ?></option></select></label>
+<input type="hidden" name="upgrade_csrf" value="<?= h($_SESSION['upgrade_csrf']) ?>">
+<input type="hidden" name="run_id" value="<?= $upgrade_reusable?h($upgrade_previous['id']):'' ?>">
+<p><label><input type="checkbox" name="backup" value="yes" required> <?= h(t('I have a restorable files and full database backup')) ?></label></p>
+<p><label><input type="checkbox" name="separate_host" value="yes" required> <?= h(t('I verified this is separate staging, without production credentials or access')) ?></label></p>
+<select name="mode" onchange="upgradeModeChanged()"><option value="new"><?= h(t('New independently copied staging run')) ?></option><option value="reuse" <?= $upgrade_reusable?'':'disabled' ?>><?= h(t('Retest completed upgrade-owned run from this session')) ?></option></select>
+<div class="row">
+<div class="field"><label><?= h(t('Separate sandbox database host')) ?></label><input name="target_host" required autocomplete="off" placeholder="localhost"></div>
+<div class="field"><label><?= h(t('Separate empty sandbox schema')) ?></label><input name="target_name" required autocomplete="off"></div>
+</div>
+<div class="row">
+<div class="field"><label><?= h(t('Restricted sandbox database user')) ?></label><input name="target_user" required autocomplete="off"></div>
+<div class="field"><label><?= h(t('Sandbox database password (retained in session and owned configuration)')) ?></label><input name="target_password" type="password" required autocomplete="off"></div>
+</div>
+<button type="submit" id="upgrade_button" class="btn btn-warning"><?= h(t('Run staging upgrade and checks')) ?></button>
+</form>
+<pre id="upgrade_result" role="status" aria-live="polite" style="white-space:pre-wrap"></pre>
+<p><?= h(t('After a complete isolated test, take another full backup and plan a manual migration and rollback with your host. This tool will not promote, replace or restore production.')) ?></p>
+</section>
+<p style="color:#fbbf24"><strong><?= h(t('Legacy sandbox below shares files and production credentials. Do not use it for core upgrades.')) ?></strong></p>
 <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
-    <?= h(t('Builds an isolated WordPress sandbox in a subfolder: it replicates the database tables under a test prefix and links the core, plugins, themes and uploads (symlink, falling back to copy). Then it can smoke-test each plugin one by one against the sandbox, vet new plugins from wordpress.org before installing them live, and produce a report — all without risking the live site. Uses the DB connection from the DB Tools card above.')) ?>
+    <?= h(t('Legacy sandbox copies tables under another prefix but shares files through symlinks and uses the source database account. It is not an isolated upgrade environment and can affect the source site. Use the separate-host upgrade workflow above only after provisioning and verifying staging.')) ?>
 </p>
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:13px">
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -8449,6 +9495,83 @@ const T_AR = {
     missingFiles: <?= json_encode(t('missing file(s)')) ?>, copied: <?= json_encode(t('Copied')) ?>,
 };
 document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('ar_auto_status')) autoRecoverStatus(); });
+
+// --- Separate-host upgrade runner; never calls the legacy sandbox actions. ---
+async function upgradeAdmission(event) {
+    event.preventDefault();
+    const form=document.getElementById('upgrade_form');
+    const button=document.getElementById('upgrade_button');
+    const output=document.getElementById('upgrade_result');
+    if (button.disabled) return;
+    if (form.elements.platform?.value==='docker') { output.textContent=T_UPGRADE.docker; return; }
+    if (!form.reportValidity()) return;
+    button.disabled=true;
+    output.textContent=T_UPGRADE.checking;
+    const data=new FormData(form);
+    const csrf=data.get('upgrade_csrf');
+    data.set('csrf',csrf); data.delete('upgrade_csrf');
+    if (data.get('mode')!=='reuse') data.delete('run_id');
+    else data.delete('target_password');
+    let latest=null;
+    const valid=run=>run && run.ok===true && /^[a-f0-9]{24}$/.test(run.run_id || '')
+        && ['download','extract','copy','snapshot','database','core-upgrade','plugins','http','assets','done','failed'].includes(run.stage)
+        && typeof run.progress==='string' && Array.isArray(run.findings);
+    const render=run=>{
+        latest=run; form.elements.run_id.value=run.run_id;
+        if (form.dataset) form.dataset.verifiedRun=run.stage==='done'?'yes':'no';
+        const passed=run.stage==='done' && run.ready===true && run.findings.every(f=>f && ['ok','warning'].includes(f.severity));
+        const title=passed?T_UPGRADE.passed:['done','failed'].includes(run.stage)?T_UPGRADE.notReady:T_UPGRADE.checking;
+        output.textContent=[title,run.progress,(T_UPGRADE.runLabel || 'Run')+': '+run.run_id,T_UPGRADE.scope,
+            ...run.findings.filter(f=>f && typeof f.tip==='string').map(f=>String(f.severity)+': '+f.tip),
+            typeof run.recommendation==='string'?run.recommendation:''].join('\n');
+    };
+    try {
+        let body=data;
+        for (let step=0;step<2000;step++) {
+            const response=await fetch(step===0?'?action=upgrade_prepare':'?action=upgrade_step',{method:'POST',body,credentials:'same-origin'});
+            const result=await response.json();
+            data.delete('target_password'); form.elements.target_password.value='';
+            if (!response.ok || !result || result.ok!==true) {
+                if (valid(result?.run)) render(result.run);
+                else output.textContent=T_UPGRADE.notReady+'\n'+(latest?latest.run_id+'\n':'')+T_UPGRADE.uncertain;
+                if (typeof result?.error==='string') output.textContent+='\n'+result.error;
+                return;
+            }
+            if (!valid(result)) throw new Error('Invalid upgrade response');
+            render(result);
+            if (result.stage==='done' || result.stage==='failed') return;
+            body=new FormData(); body.set('csrf',csrf); body.set('run_id',result.run_id);
+        }
+        throw new Error('Upgrade request limit reached');
+    } catch (error) {
+        // A lost response does not prove the server made no staging changes.
+        output.textContent=T_UPGRADE.uncertain+(latest?'\n'+latest.run_id+'\n'+latest.progress:'');
+    } finally {
+        data.delete('target_password'); form.elements.target_password.value='';
+        button.disabled=false; upgradeModeChanged();
+    }
+}
+function upgradeModeChanged() {
+    const form=document.getElementById('upgrade_form');
+    const docker=form.elements.platform?.value==='docker';
+    const reuse=form.elements.mode.value==='reuse';
+    if (docker) document.getElementById('upgrade_result').textContent=T_UPGRADE.docker;
+    for (const name of ['target_host','target_name','target_user','target_password']) {
+        form.elements[name].disabled=reuse || docker; form.elements[name].required=!reuse && !docker;
+        if (docker && name==='target_password') form.elements[name].value='';
+    }
+    const option=form.elements.mode.querySelector?.('option[value="reuse"]');
+    if (option) option.disabled=form.dataset?.verifiedRun!=='yes';
+}
+const T_UPGRADE = {
+    docker: <?= json_encode(t('Run locally: bash docker/wordpress-upgrade/run.sh --help. Read docker/wordpress-upgrade/README.md. Use an explicit offline backup and plain SQL, never live production. No request was sent and no plugins were executed.')) ?>,
+    checking: <?= json_encode(t('Preparing or checking the separate staging installation.')) ?>,
+    notReady: <?= json_encode(t('Not ready for a migration recommendation. Review every failed or unavailable check.')) ?>,
+    passed: <?= json_encode(t('Required staging smoke checks passed; manual review remains.')) ?>,
+    uncertain: <?= json_encode(t('The request could not be confirmed. Staging files or tables may already exist. Inspect the owned run before retrying; no automatic retry was made.')) ?>,
+    scope: <?= json_encode(t('These are bounded smoke checks, not comprehensive compatibility or proof of infrastructure isolation. No automatic production replacement is performed.')) ?>,
+    runLabel: <?= json_encode(t('Run')) ?>,
+};
 
 // --- Test Environment (sandbox) ---
 let TE_ABORT = false;
