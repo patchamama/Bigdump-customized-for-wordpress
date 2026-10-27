@@ -3,7 +3,8 @@
 **The Install CMS tab prepares a draft, not an installation.** Log in, explicitly
 choose WordPress/Joomla/Drupal/MediaWiki and the app directory or a new isolated
 sandbox, then prepare or resume the session draft. No directory is created.
-Database validation is visibly unavailable until its backend adapter is added.
+After prepare/resume, enter an explicit loopback endpoint and transient credentials
+for read-only database evidence. Installation and copying remain unavailable.
 Existing report, database tools and legacy CMS detection are unchanged.
 
 ## Query the current application directory
@@ -57,7 +58,7 @@ and MediaWiki. All profiles say `version-validation-pending`: exact target relea
 minimum versions, drivers and engine support must be validated before offering an
 installation. These candidates are not a runtime compatibility matrix.
 
-Unavailable here: credential entry/validation, prefix checks, data copying,
+Unavailable here: selected-release compatibility, data copying,
 configuration persistence, downloads, fresh installation, plugins/themes, sandbox
 creation, migration/replacement, backups/recovery, and paid-product integration.
 No config-only case is automatically reused or overwritten. Those require later
@@ -65,7 +66,7 @@ explicit authenticated workflows and independent validation.
 
 ## Session-only draft API
 
-All three fixed actions require the existing authenticated session. Machine-report
+All fixed actions require the existing authenticated session. Machine-report
 precedence still applies: query tokens/Bearer cannot authorize these routes. These
 exact actions also bypass legacy config-content parsing before authentication.
 Responses are no-store JSON with nosniff; no secrets or absolute paths are returned.
@@ -75,6 +76,7 @@ Responses are no-store JSON with nosniff; no secrets or absolute paths are retur
 | `cms_install_prepare` | POST: independent installer `csrf`, scalar `cms`, `destination` (`app-directory` or `sandbox`) | 201 draft |
 | `cms_install_state` | GET | 200 draft or `draft: null` for this app/session |
 | `cms_install_step` | POST: installer `csrf`, `run_id`, `stage` | 503 `database_adapter_unavailable` for an owned current draft; no advancement |
+| `cms_install_database` | POST: installer `csrf`, `run_id`, `engine`, `host`, optional `port`, `database`, `user`, `password`, optional `namespace` | Transient evidence; draft unchanged |
 
 The tab provides the independent installer CSRF token. Prepare returns a random
 `run_id`, chosen CMS/destination, `stage: awaiting_database_validation`, and Unix
@@ -91,11 +93,54 @@ it does not resume backend installation. Nonempty-root replacement requires a la
 separately protected workflow. Config-only/no-CMS/parent-CMS cases can select a draft,
 but neither configuration reuse nor destination emptiness is inferred.
 
+## Local read-only database evidence
+
+1. Prepare or resume the owned draft in **Install CMS**.
+2. Explicitly enter `localhost`, `127.0.0.1`, or `::1`, database and credentials.
+   `localhost` becomes `127.0.0.1`; arbitrary remote hosts/socket paths are rejected.
+3. Leave namespace blank for a generated ASCII proposal, or enter a custom ASCII
+   identifier. The conservative input policy is not a vendor/release length guarantee.
+4. Check local DB. User/password fields clear immediately; errors never echo input.
+
+WordPress native PostgreSQL is rejected before connection. Joomla, Drupal and
+MediaWiki can probe PostgreSQL. Driver availability, attempted endpoint, authenticated
+service and observed engine/version are separate evidence. Unknown vendor/version
+stays unverified. MariaDB's `5.5.5-` compatibility prefix is not its observed version.
+There are no inherited minimum-version gates or selected-release compatibility claims.
+
+The action performs at most two fixed SELECTs: bounded version metadata and up to
+257 namespace rows. More than 256 rows means **unknown**, not collision-free.
+MySQL/MariaDB tables **and views** are inspected in the connected database; Drupal
+PostgreSQL uses relation prefixes in the connection-default schema. MediaWiki
+PostgreSQL uses schema names (`wgDBmwschema`), not table prefixes. Other PostgreSQL
+relations (including views) participate. Matching is conservatively case-insensitive;
+actual engine case semantics remain unverified. A collision means preserve data:
+fresh reuse/copy is not implemented. Absence means only **not observed in visible
+metadata**, never globally unused, permissions sufficient, or ready to install.
+
+mysqli must accept connect timeout (2 seconds), command-result/read timeout
+(2 seconds), and LOCAL INFILE disabled **before** connection. Missing/rejected
+options never fall back to an unprotected connection. Read protection is not
+universal server-side cancellation or a hard end-to-end deadline. PostgreSQL uses
+fixed libpq `connect_timeout=2` and startup `statement_timeout=1000` plus
+`default_transaction_read_only=on`; it does not use runtime SET or PDO timeout as
+statement protection. Requested limits are not claimed as independently observed.
+Partial/failing metadata is unknown. Results/connections are released on all paths.
+
+Credentials are used only for the attempt, never saved in session/config/browser
+storage or reflected in errors. No connection inputs, DSNs, object lists or raw
+exceptions are persisted. Evidence itself is transient and does not advance the
+30-minute draft or enable installation. Config files are not read for credentials.
+Verification here uses public HTTP with isolated namespaced mysqli/PDO doubles:
+**synthetic evidence only**, not real driver/database acceptance.
+
 ## Resumen en español
 
 La pestaña **Instalar CMS** permite elegir CMS y destino y preparar/retomar un
-borrador de sesión de 30 minutos. **No instala CMS ni pide contraseñas de BD.**
-La validación de base de datos está bloqueada hasta añadir el adaptador real.
+borrador de sesión de 30 minutos. **No instala CMS.** Tras preparar/retomar,
+podés comprobar una BD de loopback con credenciales transitorias, que no se guardan.
+La evidencia de colisiones se limita a metadatos visibles; no prueba permisos,
+compatibilidad de versiones ni disponibilidad global. Copiar/reutilizar sigue bloqueado.
 Configuraciones, marcadores y controladores no prueban instalación ni conexión.
 No se crean directorios ni se reutilizan/sobrescriben configuraciones o datos.
 Los motores y prefijos requieren validación posterior; plugins, temas, paquetes,

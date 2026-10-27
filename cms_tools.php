@@ -84,7 +84,7 @@ $cms_defs = [
 foreach ([__DIR__, dirname(__DIR__)] as $base) {
     // Metadata discovery must not read legacy configuration contents before auth.
     // All existing commands retain their original CMS discovery behavior.
-    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step'], true)) break;
+    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database'], true)) break;
     if ($detected_cms) break;
     foreach ($cms_defs as $cms => $def) {
         $path = $base . '/' . $def['file'];
@@ -146,7 +146,22 @@ $GLOBALS['__I18N'] = [
         'Nonempty-root replacement requires a later separately protected workflow. Config/core markers do not prove installation or an empty destination.' => 'Reemplazar una carpeta no vacía requiere un flujo posterior protegido por separado. Los indicadores de configuración/core no prueban instalación ni destino vacío.',
         'Prepare draft' => 'Preparar borrador',
         'Resume draft' => 'Retomar borrador',
-        'Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.' => 'Validación de base de datos no disponible: falta el adaptador. No se piden credenciales; compatibilidad de motores, prefijos, instalación y reutilización de configuración siguen sin verificar.',
+        'Local evidence only: no installation, copying or config reuse. Release compatibility remains unverified.' => 'Solo evidencia local: sin instalación, copias ni reutilización de configuración. Compatibilidad de versiones sin verificar.',
+        'Read-only local database evidence' => 'Evidencia de base de datos local de solo lectura',
+        'Driver available; endpoint attempted; service/authentication observed.' => 'Controlador disponible; conexión intentada; servicio/autenticación observados.',
+        'Driver available; service/authentication unverified.' => 'Controlador disponible; servicio/autenticación sin verificar.',
+        'Engine to probe (not release compatibility)' => 'Motor a comprobar (no compatibilidad de versiones)',
+        'Explicit loopback host' => 'Host de loopback explícito',
+        'Port (blank uses engine default)' => 'Puerto (vacío usa el predeterminado del motor)',
+        'Database user' => 'Usuario de base de datos',
+        'Database password (transient)' => 'Contraseña de base de datos (transitoria)',
+        'Namespace (blank proposes one; MediaWiki PostgreSQL uses schema)' => 'Espacio de nombres (vacío propone uno; MediaWiki PostgreSQL usa esquema)',
+        'Check local DB' => 'Comprobar BD local',
+        'Local evidence unavailable. Draft unchanged.' => 'Evidencia local no disponible. Borrador sin cambios.',
+        'Unknown: validation or metadata incomplete.' => 'Desconocido: validación o metadatos incompletos.',
+        'Visible collision. Preserve data: reuse/copy remains unavailable.' => 'Colisión visible. Conservá los datos: reutilizar/copiar sigue no disponible.',
+        'No collision observed in bounded visible metadata only.' => 'Sin colisión observada solo en metadatos visibles acotados.',
+        'Visibility is not global availability, privilege or installation proof. Views/relations are included; case rules remain unverified. Truncated metadata is unknown. MySQL/MariaDB read timeout does not guarantee server cancellation or a total deadline.' => 'La visibilidad no prueba disponibilidad global, permisos ni instalación. Incluye vistas/relaciones; reglas de mayúsculas sin verificar. Metadatos truncados: desconocido. El timeout de lectura de MySQL/MariaDB no garantiza cancelación del servidor ni plazo total.',
         'Draft awaiting database validation' => 'Borrador pendiente de validación de base de datos',
         'No draft in this app/session' => 'No hay borrador en esta app/sesión',
         'Draft request failed. Existing draft is unchanged; resume to check state.' => 'Falló la solicitud. El borrador existente no cambia; retomá para consultar su estado.',
@@ -1184,6 +1199,99 @@ function cms_install_discovery() {
     ];
 }
 
+// Transient local evidence only: no draft mutation, credentials/config reads or SQL writes.
+function cms_install_database($draft) {
+    $input = [];
+    foreach (['host','database','user','password','engine','namespace'] as $key) {
+        $input[$key] = $_POST[$key] ?? ($key === 'namespace' ? '' : null);
+        if (!is_string($input[$key]) || strlen($input[$key]) > 256 || str_contains($input[$key], "\0"))
+            site_report_api_reply(400, ['error'=>'Invalid local database input.']);
+    }
+    extract($input, EXTR_SKIP);
+    if (!in_array($engine, ['mysql','mariadb','postgresql'], true) || ($draft['cms'] === 'wordpress' && $engine === 'postgresql'))
+        site_report_api_reply(400, ['error'=>'Unsupported database engine.']);
+    $port = $_POST['port'] ?? ($engine === 'postgresql' ? '5432' : '3306');
+    if (!in_array($host, ['localhost','127.0.0.1','::1'], true)
+        || !preg_match('/\A[A-Za-z0-9_][A-Za-z0-9_-]{0,62}\z/', $database)
+        || $user === '' || !is_string($port) || !preg_match('/\A[0-9]{1,5}\z/', $port) || (int)$port < 1 || (int)$port > 65535
+        || ($namespace !== '' && !preg_match('/\A[A-Za-z_][A-Za-z0-9_]{0,39}\z/', $namespace)))
+        site_report_api_reply(400, ['error'=>'Invalid local database input.']);
+    $pg = $engine === 'postgresql';
+    if (!extension_loaded($pg ? 'pdo_pgsql' : 'mysqli') || (!$pg && (!defined('MYSQLI_OPT_CONNECT_TIMEOUT')
+        || !defined('MYSQLI_OPT_READ_TIMEOUT') || !defined('MYSQLI_OPT_LOCAL_INFILE'))))
+        site_report_api_reply(503, ['error'=>'Database driver unavailable.']);
+    // ASCII proposal is a local policy, not a selected-release identifier-length guarantee.
+    $candidate = $namespace !== '' ? $namespace : 'cms_'.substr(hash('sha256', $draft['run_id']), 0, 10).'_';
+    $schema = $pg && $draft['cms'] === 'mediawiki';
+    $e = ['driver'=>'available', 'endpoint_attempted'=>false, 'service'=>'unverified', 'authentication'=>'unverified',
+        'observed_engine'=>null, 'observed_version'=>null, 'namespace'=>$candidate,
+        'namespace_kind'=>$schema ? 'schema' : 'table-prefix', 'namespace_status'=>'unknown',
+        'collision_scope'=>'visible-metadata-only', 'case_semantics'=>'unverified',
+        'metadata_scope'=>$schema ? 'database-schemas' : ($pg ? 'connection-default-schema-relations' : 'database-tables-and-views'),
+        'limits_requested'=>$pg ? 'connect-2s-startup-statement-1000ms' : 'connect-2s-command-result-read-2s',
+        'limits_observed'=>'unverified', 'server_cancellation'=>$pg ? 'startup-requested-unverified' : 'not-guaranteed',
+        'release_compatibility'=>'unverified', 'installation_status'=>'unverified', 'next_stage'=>'unavailable'];
+    $connection = null; $result = null;
+    try {
+        $host = $host === 'localhost' ? '127.0.0.1' : $host;
+        if ($pg) {
+            // Only validated host/DB/port enter this fixed DSN; credentials are separate arguments.
+            $dsn = 'pgsql:host='.$host.';port='.(int)$port.';dbname='.$database
+                .';connect_timeout=2;options=\'-c statement_timeout=1000 -c default_transaction_read_only=on\'';
+            $e['endpoint_attempted'] = true;
+            $connection = new PDO($dsn, $user, $password, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+        } else {
+            $connection = new mysqli();
+            if (!@$connection->options(MYSQLI_OPT_CONNECT_TIMEOUT, 2)
+                || !@$connection->options(MYSQLI_OPT_READ_TIMEOUT, 2)
+                || !@$connection->options(MYSQLI_OPT_LOCAL_INFILE, false)) throw new Exception('Options unavailable');
+            $e['endpoint_attempted'] = true;
+            if (!@$connection->real_connect($host, $user, $password, $database, (int)$port)) throw new Exception('Connection unavailable');
+        }
+        $e['service'] = 'observed';
+        $e['authentication'] = 'authenticated';
+        $result = @$connection->query($pg ? 'SELECT left(version(), 256)' : 'SELECT LEFT(VERSION(), 256), LEFT(@@version_comment, 256)');
+        if (!$result) throw new Exception('Metadata unavailable');
+        $row = $pg ? $result->fetch(PDO::FETCH_NUM) : $result->fetch_row();
+        if ($pg) $result->closeCursor(); else $result->free();
+        $result = null;
+        $version = $row[0] ?? ''; $vendor = $row[1] ?? '';
+        if (strlen($version) <= 256 && strlen($vendor) <= 256) {
+            if ($pg && preg_match('/\APostgreSQL ([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?: |$)/', $version, $m)) {
+                $e['observed_engine'] = 'postgresql'; $e['observed_version'] = $m[1];
+            } elseif (!$pg && preg_match('/\A(?:5\.5\.5-)?([0-9]+\.[0-9]+\.[0-9]+)-MariaDB(?:[- ].*)?\z/i', $version, $m)) {
+                $e['observed_engine'] = 'mariadb'; $e['observed_version'] = $m[1];
+            } elseif (!$pg && preg_match('/\AMySQL (?:Community|Enterprise|Server)(?: |$)/', $vendor) && preg_match('/\A([0-9]+\.[0-9]+\.[0-9]+)(?:[- ].*)?\z/', $version, $m)) {
+                $e['observed_engine'] = 'mysql'; $e['observed_version'] = $m[1];
+            }
+        }
+        if ($e['observed_engine'] !== null) {
+            // Two queries maximum; 257th row makes completeness unknown. No identifiers interpolated.
+            $sql = !$pg ? 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() LIMIT 257'
+                : ($schema ? 'SELECT nspname FROM pg_catalog.pg_namespace LIMIT 257'
+                    : 'SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() LIMIT 257');
+            $result = @$connection->query($sql);
+            if (!$result) throw new Exception('Metadata unavailable');
+            $count = 0; $collision = false;
+            while ($row = ($pg ? $result->fetch(PDO::FETCH_NUM) : $result->fetch_row())) {
+                if (++$count > 256) break;
+                if (!isset($row[0]) || !is_string($row[0]) || strlen($row[0]) > 256) throw new Exception('Metadata unavailable');
+                $name = strtolower($row[0]); $prefix = strtolower($candidate);
+                if ($schema ? $name === $prefix : str_starts_with($name, $prefix)) $collision = true;
+            }
+            if ($count <= 256) $e['namespace_status'] = $collision ? 'collision' : 'not-observed';
+        }
+    } catch (Throwable $ignored) {
+        // Never return/log raw exceptions, DSNs, connection input or object lists.
+        $e['namespace_status'] = 'unknown';
+    } finally {
+        try { if ($result) { if ($pg) $result->closeCursor(); else $result->free(); } } catch (Throwable $ignored) { $e['namespace_status'] = 'unknown'; }
+        try { if ($connection && !$pg) $connection->close(); } catch (Throwable $ignored) { $e['namespace_status'] = 'unknown'; }
+        $result = null; $connection = null;
+    }
+    site_report_api_reply(200, ['evidence'=>$e]);
+}
+
 session_start();
 // Read-only installer metadata uses existing session authority, never report tokens.
 // Keep this ahead of password/bootstrap writes and behind machine-report dispatch.
@@ -1198,7 +1306,7 @@ if (($_GET['action'] ?? null) === 'cms_install_discover') {
 }
 // Fixed draft routes: session authority only; future adapters must extend explicit branches.
 $installer_action = $_GET['action'] ?? null;
-if (in_array($installer_action, ['cms_install_prepare', 'cms_install_state', 'cms_install_step'], true)) {
+if (in_array($installer_action, ['cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database'], true)) {
     if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
     $method = $installer_action === 'cms_install_state' ? 'GET' : 'POST';
     if ($_SERVER['REQUEST_METHOD'] !== $method) {
@@ -1228,6 +1336,12 @@ if (in_array($installer_action, ['cms_install_prepare', 'cms_install_state', 'cm
         site_report_api_reply(404, ['error'=>'Draft not found.']);
     }
     if ($draft['expires_at'] <= time()) site_report_api_reply(410, ['error'=>'Draft expired. Start a new authenticated session.']);
+    if ($installer_action === 'cms_install_database') {
+        $id = $_POST['run_id'] ?? null;
+        if (!is_string($id)) site_report_api_reply(400, ['error'=>'Invalid draft input.']);
+        if (!hash_equals($draft['run_id'], $id)) site_report_api_reply(404, ['error'=>'Draft not found.']);
+        cms_install_database($draft);
+    }
     if ($installer_action === 'cms_install_step') {
         $id = $_POST['run_id'] ?? null;
         $stage = $_POST['stage'] ?? null;
@@ -8309,6 +8423,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 // Session-only draft controller: fixed routes, no credentials and no browser persistence.
 let cmsInstallBusy = false;
 let cmsInstallOwned = false;
+let cmsInstallRun = null;
 async function cmsInstallDraft(operation) {
     if (cmsInstallBusy || !['prepare', 'state'].includes(operation)) return;
     cmsInstallBusy = true;
@@ -8328,14 +8443,17 @@ async function cmsInstallDraft(operation) {
             || !['wordpress','joomla','drupal','mediawiki'].includes(draft.cms)
             || !['app-directory','sandbox'].includes(draft.destination))) throw new Error('invalid draft');
         cmsInstallOwned = draft !== null;
+        cmsInstallRun = draft ? draft.run_id : null;
         if (draft) {
             el('cms').value = draft.cms;
             el('destination').value = draft.destination;
         }
         el('status').textContent = el('status').dataset[draft ? 'ready' : 'empty'];
     } catch (_) {
+        cmsInstallRun = null;
         el('status').textContent = el('status').dataset.error;
     } finally {
+        if (typeof cmsDatabaseSync === 'function') cmsDatabaseSync();
         cmsInstallBusy = false;
         controls.forEach(id => { el(id).disabled = cmsInstallOwned && id !== 'resume'; });
     }
@@ -8355,10 +8473,59 @@ async function cmsInstallDraft(operation) {
 <button type="button" id="install_prepare" onclick="cmsInstallDraft('prepare')"><?= h(t('Prepare draft')) ?></button>
 <button type="button" id="install_resume" onclick="cmsInstallDraft('state')"><?= h(t('Resume draft')) ?></button>
 <p id="install_status" role="status" data-ready="<?= h(t('Draft awaiting database validation')) ?>" data-empty="<?= h(t('No draft in this app/session')) ?>" data-error="<?= h(t('Draft request failed. Existing draft is unchanged; resume to check state.')) ?>"></p>
-<p><?= h(t('Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.')) ?></p>
+<p><?= h(t('Local evidence only: no installation, copying or config reuse. Release compatibility remains unverified.')) ?></p>
+<fieldset autocomplete="off">
+<legend><?= h(t('Read-only local database evidence')) ?></legend>
+<label for="db_engine"><?= h(t('Engine to probe (not release compatibility)')) ?></label>
+<select id="db_engine"><option value="mysql">MySQL</option><option value="mariadb">MariaDB</option><option value="postgresql">PostgreSQL (not WordPress)</option></select>
+<label for="db_host"><?= h(t('Explicit loopback host')) ?></label><input id="db_host" autocomplete="off" placeholder="localhost / 127.0.0.1 / ::1">
+<label for="db_port"><?= h(t('Port (blank uses engine default)')) ?></label><input id="db_port" inputmode="numeric" autocomplete="off">
+<label for="db_database"><?= h(t('Database')) ?></label><input id="db_database" autocomplete="off">
+<label for="db_user"><?= h(t('Database user')) ?></label><input id="db_user" autocomplete="off">
+<label for="db_password"><?= h(t('Database password (transient)')) ?></label><input id="db_password" type="password" autocomplete="off">
+<label for="db_namespace"><?= h(t('Namespace (blank proposes one; MediaWiki PostgreSQL uses schema)')) ?></label><input id="db_namespace" autocomplete="off">
+<button id="db_check" type="button" disabled onclick="cmsInstallDatabase()"><?= h(t('Check local DB')) ?></button>
+<p id="db_status" role="status" data-observed="<?= h(t('Driver available; endpoint attempted; service/authentication observed.')) ?>" data-unverified="<?= h(t('Driver available; service/authentication unverified.')) ?>" data-error="<?= h(t('Local evidence unavailable. Draft unchanged.')) ?>" data-unknown="<?= h(t('Unknown: validation or metadata incomplete.')) ?>" data-collision="<?= h(t('Visible collision. Preserve data: reuse/copy remains unavailable.')) ?>" data-absent="<?= h(t('No collision observed in bounded visible metadata only.')) ?>"></p>
+</fieldset>
+<p><?= h(t('Visibility is not global availability, privilege or installation proof. Views/relations are included; case rules remain unverified. Truncated metadata is unknown. MySQL/MariaDB read timeout does not guarantee server cancellation or a total deadline.')) ?></p>
 <button type="button" disabled><?= h(t('Draft awaiting database validation')) ?></button>
 </div>
 </div>
+<script>
+let cmsDatabaseBusy = false;
+function cmsDatabaseSync() {
+    document.getElementById('db_check').disabled = !cmsInstallRun || cmsDatabaseBusy;
+}
+async function cmsInstallDatabase() {
+    if (!cmsInstallRun || cmsDatabaseBusy) return;
+    cmsDatabaseBusy = true;
+    cmsDatabaseSync();
+    const el = id => document.getElementById('db_' + id);
+    const body = new URLSearchParams({csrf: document.getElementById('install_csrf').value, run_id: cmsInstallRun});
+    for (const key of ['engine','host','database','user','password','namespace']) body.set(key, el(key).value);
+    if (el('port').value !== '') body.set('port', el('port').value);
+    el('password').value = '';
+    el('user').value = '';
+    try {
+        const response = await fetch('?action=cms_install_database', {method:'POST',body,cache:'no-store',credentials:'same-origin'});
+        const data = await response.json();
+        if (!response.ok || !data.evidence) throw new Error('unavailable');
+        const e = data.evidence;
+        if (/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(e.namespace)) el('namespace').value = e.namespace;
+        const status = e.namespace_status === 'collision' ? 'collision' : e.namespace_status === 'not-observed' ? 'absent' : 'unknown';
+        const observed = ['mysql','mariadb','postgresql'].includes(e.observed_engine) && /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(e.observed_version)
+            ? e.observed_engine + ' ' + e.observed_version + ' — ' : '';
+        const authority = e.authentication === 'authenticated' ? 'observed' : 'unverified';
+        el('status').textContent = el('status').dataset[authority] + ' ' + observed + el('status').dataset[status];
+    } catch (_) {
+        el('status').textContent = el('status').dataset.error;
+    } finally {
+        body.delete('password'); body.delete('user');
+        cmsDatabaseBusy = false;
+        cmsDatabaseSync();
+    }
+}
+</script>
 
 <div id="tab-report" class="section">
 <div class="card">
@@ -8517,7 +8684,7 @@ function downloadSiteReport() {
 <div class="instructions" style="margin-top:16px">
 <h4><?= h(t('Install CMS')) ?></h4>
 <p><?= h(t('Draft only: choose a CMS and destination. No files or databases are changed.')) ?></p>
-<p><?= h(t('Database validation unavailable: backend adapter pending. No credentials collected; engine compatibility, prefix checks, package installation and config reuse remain unverified.')) ?></p>
+<p><?= h(t('Local evidence only: no installation, copying or config reuse. Release compatibility remains unverified.')) ?></p>
 </div>
 
 <div class="instructions" style="margin-top:16px">
