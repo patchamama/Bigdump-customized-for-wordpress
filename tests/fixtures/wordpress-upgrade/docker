@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Deterministic fake engine; does not import/connect to any Docker client/socket."""
+import json, os, pathlib, sys, tarfile
+p=pathlib.Path(os.environ['FAKE_STATE']); a=sys.argv[1:]
+s=json.loads(p.read_text()) if p.exists() else {'calls':[], 'volumes':{}, 'container':None}
+s['calls'].append(a)
+scenario=os.environ.get('FAKE_SCENARIO','safe')
+out=''
+label='org.cms-tools.upgrade'
+if a[:2]==['context','inspect']:
+    out=json.dumps([{'Endpoints':{'docker':{'Host':'tcp://remote:2375' if scenario=='remote' else 'unix:///synthetic/docker.sock','SkipTLSVerify':False}}}])
+elif a[:2]==['image','inspect']: out=json.dumps([{'Id':a[2]}])
+elif a[:2]==['volume','create']:
+    name=a[-1]; owner=a[a.index('--label')+1].split('=',1)[1]; s['volumes'][name]={'Labels':{label:owner}}; out=name
+elif a[:2]==['volume','inspect']: out=json.dumps([s['volumes'][a[2]]])
+elif a[0]=='run':
+    assert '--entrypoint' in a and a[-1]=='/opt/upgrade/prefetch.php'
+    assert not any('/data' in x for x in a), 'prefetch cannot mount backup data'
+    assert a[a.index('--network')+1]=='bridge'
+elif a[0]=='create':
+    owner=a[a.index('--label')+1].split('=',1)[1]
+    volumes=[]
+    for i,x in enumerate(a):
+        if x=='--mount':
+            fields=dict(z.split('=',1) for z in a[i+1].split(',') if '=' in z)
+            volumes.append({'Type':'volume','Destination':fields['dst'],'Name':fields['src'],'RW':'readonly' not in a[i+1]})
+    s['container']={'Image':a[-1],'State':{'Running':False},'Config':{'Labels':{label:owner}},'Mounts':volumes,
+        'HostConfig':{'ExtraHosts':['staging.invalid:127.0.0.1'],'NetworkMode':'bridge' if scenario=='unsafe-inspect' else 'none','IpcMode':'private','CapDrop':['ALL'],
+        'CapAdd':['CHOWN','SETUID','SETGID','KILL','DAC_OVERRIDE'],'ReadonlyRootfs':True,'Tmpfs':{'/run':'rw','/tmp':'rw'},'Memory':1073741824,'NanoCpus':2000000000,'PidsLimit':256,'SecurityOpt':['no-new-privileges']},'NetworkSettings':{'Networks':{'none':{'IPAddress':''}}}}
+elif a[0]=='ps': out='\n'.join(['cms-upgrade-'+s['container']['Config']['Labels'][label]+'-executor'] if s['container'] else [])
+elif a[:2]==['volume','ls']: out='\n'.join(s['volumes'])
+elif a[0]=='stop': s['container']['State']['Running']=False
+elif a[:2]==['container','rm']: s['container']=None
+elif a[:2]==['volume','rm']: del s['volumes'][a[-1]]
+elif a[0]=='inspect':
+    if scenario=='bind-mount': s['container']['Mounts'].append({'Type':'bind','Destination':'/host'})
+    if scenario=='published-port': s['container']['HostConfig']['PortBindings']={'8443/tcp':[{'HostPort':'8443'}]}
+    if scenario=='host-pid': s['container']['HostConfig']['PidMode']='host'
+    if scenario=='privileged': s['container']['HostConfig']['Privileged']=True
+    if scenario=='rootfs-write': s['container']['HostConfig']['ReadonlyRootfs']=False
+    if scenario=='extra-network': s['container']['NetworkSettings']['Networks']['bridge']={'IPAddress':'172.0.0.2'}
+    if scenario=='wrong-label': s['container']['Config']['Labels'][label]='not-owned'
+    out='x'*131073 if scenario=='huge-inspect' else json.dumps([s['container']])
+elif a[0]=='cp':
+    with tarfile.open(a[1]) as t:
+        assert all(not x.name.endswith(('wp-config.php','.migrate_config')) and x.isfile() for x in t)
+        assert b'PRODUCTION_SECRET' not in b''.join(t.extractfile(x).read() for x in t)
+elif a[0]=='start': s['container']['State']['Running']=True
+elif a[0]=='exec':
+    assert s['container']['HostConfig']['NetworkMode']=='none'
+    out=json.dumps({'ok':True,'ready':False,'runtime_verified':False,'findings':{'unavailable':1},'logs':'PRODUCTION_SECRET'})
+else: raise AssertionError(a)
+p.write_text(json.dumps(s)); print(out)
