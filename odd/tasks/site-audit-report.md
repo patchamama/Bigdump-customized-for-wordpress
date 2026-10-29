@@ -1,6 +1,6 @@
 # Site audit report
 Objective: WordPress audit JSON, private GitHub export, token API and sandbox upgrade workflow. Branch: feat/site-audit-report.
-Delivery: feature-branch work units; explicit current-state publication to origin/main requested. Runner: PHP isolated HTTP tests and php -l.
+Delivery: verified current-state feature work units published to origin/main; remaining scope stays open. Runner: PHP isolated HTTP tests and php -l.
 
 ## Specs
 S1: "agrega posibilidad de hacer un reporte de todo el estado del sitio si uno desea y para ello agregar un tab de Reporte que permita guardar todo el estado completo para audit del sitio, con características de wordpress, php, del sitio web, seguridad, versiones, errores encontrados clasificados por niveles de riesgo (crítico, warning, ok), version de php usada y de mysql, todo lo que se pueda"
@@ -38,7 +38,7 @@ S19: "has commit + push origin main"
 - T8 | S7,S9 with S1-S3,S6,S8 interactions | parent integration + high-risk independent verification | done | Owner approved coherent1910/936/372-line review units; updater independently accepted/committed2bc0dde/6280a19/a171676; merged DB unit13mainchecksPASS, final seam mvqzq5ah-z-qwp0 PASS; DB commit726cc2f without losing discovery/draft/report/API behavior; assess actual per-unit diff, verify API security/upgrade isolation, run seam and structural checks, record reviewable commits. Risk: items 1, 2, 5 (data, auth and upgrade environment). Commits: 2bc0dde; 6280a19; a171676; 726cc2f (bounded DB composition).
 
 - T9 | S10-S13 | inline final bilingual reconciliation for both supported execution platforms; prior documentation delivered | pending | Final README.md reconciliation, detailed README.es.md and evidence-based TODO.md; link implemented options, prerequisites, scope and limitations without claiming pending features complete. Commit: 56631f4.
-- T10 | S15,S19 | parent verified work-unit commits and normal fast-forward delivery to origin/main | in_progress | Latest S19 explicitly requests publishing the current verified state; unfinished bilingual documentation and full installer remain open. Check fresh ancestry, commit notes, normal push and remote hash; no force or unrelated changes. Risk: item 5 (delivery). Commit: pending.
+- T10 | S15,S19 | parent verified work-unit commits and normal fast-forward delivery to origin/main | done | Latest S19 explicitly requests publishing the current verified state; unfinished bilingual documentation and full installer remain open. Check fresh ancestry, commit notes, normal push and remote hash; no force or unrelated changes. Risk: item 5 (delivery). Commit: 7e24ca0 (normal push and exact remote hash verified).
 
 ## Log
 L1: Original request:
@@ -153,3 +153,5 @@ L92: Job34 COMPLETED0/8s all13combinedmainchecksPASS/stderr0, no realDB/Docker. 
 L93: Finaltargetedcompositionmvqzq5ah-z-qwp0 PASS: acceptedBdelta/reciprocalAunchanged, exacthelper/auth/controller/assetsbinding, sourceSHA109b40ff9c28dc35cafef894df1c51b16797459a6d8f0c664fd42f058c7d1955, 3authorizedpublicseams+cachedcheck0/stderr0. Parentcommitted726cc2f3dbff852893759860d80126670ec002ba (5files431add10delete). CurrentboundedT8checkpointdone with4localcommits, NOTinstallerwholeacceptance. T9documentationreconciliationinprogress (README.es/TODOstale), T10publicationpending, no push/production.
 
 L94: Latest owner request verbatim: "has commit + push origin main". This authorizes publishing current verified scope now, not claiming pending T9/installer completion. Only2taskdocsmodified, sourceHEAD726cc2f unchanged; verified4localunits already committed. Freshoriginfetchjob35running beforeancestry/notescommit/normalpush; no force or productionoperation.
+
+L95: Actualpublicationverified: job35fetch0, origin/mainadcc8a2ancestorofverifiedfeature. Notescommit7e24ca0, localmainnormalfast-forward, job36 gitpushoriginmain0/3s adcc8a2->7e24ca007fc2fc0bf2f3b668f668f53c13ce7791. Freshls-remoteexactSHAequal, treeclean, sourceSHA109b40ff...unchanged. T10 current-statepublicationDONE; T9bilingualdocs/fullinstallerremainOPEN. Thisfollowuprecordsobserveddeliveryonly, noforce/production/nativeDBexecution.
