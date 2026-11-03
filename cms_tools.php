@@ -84,7 +84,7 @@ $cms_defs = [
 foreach ([__DIR__, dirname(__DIR__)] as $base) {
     // Metadata discovery must not read legacy configuration contents before auth.
     // All existing commands retain their original CMS discovery behavior.
-    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database'], true)) break;
+    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database', 'wp_restore_discover', 'wp_restore_prepare', 'wp_restore_state', 'wp_restore_step'], true)) break;
     if ($detected_cms) break;
     foreach ($cms_defs as $cms => $def) {
         $path = $base . '/' . $def['file'];
@@ -221,6 +221,16 @@ $GLOBALS['__I18N'] = [
         'CLI available'                       => 'CLI disponible',
         // How to use / info tab
         'Hosting exports omit .zip, .tar, .tar.gz and .gz files outside wp-content; archives inside wp-content and its subfolders remain eligible, subject to existing exclusions.' => 'La exportación del hosting omite archivos .zip, .tar, .tar.gz y .gz fuera de wp-content; los archivos comprimidos de wp-content y sus subcarpetas se incluyen, salvo las exclusiones existentes.',
+        'Restore WordPress backup?' => '¿Restaurar el backup de WordPress?',
+        'Backup-only hosting detected. Preparation does not replace any files or tables. A verified backup and another explicit confirmation are required before replacement.' => 'Se detectó un hosting con backups. Preparar no reemplaza archivos ni tablas. El reemplazo exige un respaldo verificado y otra confirmación explícita.',
+        'Without isolated execution tests, restored plugins remain disabled, backup .htaccess stays aside, and site functionality is unverified.' => 'Sin pruebas de ejecución aisladas, los plugins restaurados quedan desactivados y el .htaccess del backup apartado; el funcionamiento del sitio no está verificado.',
+        'Hosting archive' => 'Archivo del hosting',
+        'Database archive' => 'Archivo de la base de datos',
+        'Confirm destination URL' => 'Confirmar URL del destino',
+        'Prepare restoration' => 'Preparar restauración',
+        'Preparation recorded. No files or tables have been replaced. Execution adapters are not available yet.' => 'Preparación registrada. No se reemplazaron archivos ni tablas. Los adaptadores de ejecución aún no están disponibles.',
+        'Set a custom tool password before preparing a restore.' => 'Definí una contraseña propia para la herramienta antes de preparar una restauración.',
+        'Restore request failed. No automatic retry was made.' => 'Falló la solicitud de restauración. No se reintentó automáticamente.',
         'How to migrate'                      => 'Cómo migrar',
         'Migration step by step'              => 'Migración paso a paso',
         'On the <strong>origin</strong>: open the <strong>Export</strong> tab, set the source and target URLs, and export the database (optionally split into size-limited <code>.zip</code> parts for hosts with upload limits). Use <strong>Export Hosting</strong> for the full site zip.'
@@ -1294,6 +1304,188 @@ function cms_install_database($draft) {
 }
 
 session_start();
+// Guarded WordPress restoration: session authority, never report/API tokens.
+function wp_restore_app() {
+    return hash('sha256', __FILE__ . ':' . hash_file('sha256', __FILE__));
+}
+function wp_restore_file($path, $max = PHP_INT_MAX) {
+    clearstatcache(true, $path);
+    $s = @lstat($path);
+    if (!$s || ($s['mode'] & 0170000) !== 0100000 || $s['nlink'] !== 1 || $s['size'] > $max) {
+        throw new \RuntimeException('A required restore file is missing, linked or unsupported.');
+    }
+    return array_intersect_key($s, array_flip(['dev','ino','mode','nlink','size','mtime','ctime']));
+}
+function wp_restore_configuration() {
+    $path = __DIR__ . '/wp-config.php';
+    wp_restore_file($path, 65536);
+    $before = hash_file('sha256', $path);
+    $tokens = array_values(array_filter(token_get_all(file_get_contents($path)), static function ($t) {
+        return !is_array($t) || !in_array($t[0], [T_WHITESPACE,T_COMMENT,T_DOC_COMMENT], true);
+    }));
+    $detected = [];
+    $keys = ['DB_HOST'=>'host','DB_NAME'=>'name','DB_USER'=>'user','DB_PASSWORD'=>'pass'];
+    foreach ($tokens as $i=>$t) {
+        if (is_array($t) && $t[0] === T_CONSTANT_ENCAPSED_STRING && isset($keys[substr($t[1],1,-1)])) {
+            $value = $tokens[$i+2] ?? null;
+            if (is_array($value) && $value[0] === T_CONSTANT_ENCAPSED_STRING) $detected[$keys[substr($t[1],1,-1)]] = substr($value[1],1,-1);
+        }
+        if (is_array($t) && $t[0] === T_VARIABLE && $t[1] === '$table_prefix') {
+            $value = $tokens[$i+2] ?? null;
+            if (is_array($value) && $value[0] === T_CONSTANT_ENCAPSED_STRING) $detected['prefix'] = substr($value[1],1,-1);
+        }
+    }
+    // Reuse the unchanged bounded token grammar, not legacy regex credentials.
+    $identity = upgrade_source_identity($path, $detected);
+    if (!hash_equals($before, hash_file('sha256', $path))) throw new \RuntimeException('Destination configuration changed.');
+    return $identity;
+}
+function wp_restore_discovery() {
+    $result = ['eligible'=>false,'archives'=>[],'databases'=>[],'reason'=>'Backup-only hosting required.'];
+    $known = [basename(__FILE__), 'wp-config.php', '.migrate_config'];
+    $unknown = false; $count = 0;
+    foreach (new \DirectoryIterator(__DIR__) as $entry) {
+        if ($entry->isDot()) continue;
+        if (++$count > 256) { $result['reason'] = 'Directory inventory limit exceeded.'; return $result; }
+        $name = $entry->getFilename();
+        $role = preg_match('/^hosting_[A-Za-z0-9_.-]+\.zip$/iD', $name) ? 'archives'
+            : (preg_match('/^db_[A-Za-z0-9_.-]+\.sql\.gz$/iD', $name) ? 'databases' : null);
+        if ($role !== null) {
+            try { wp_restore_file($entry->getPathname()); $result[$role][] = $name; }
+            catch (\RuntimeException $e) { $unknown = true; }
+        } elseif (!in_array($name, $known, true)) $unknown = true;
+    }
+    sort($result['archives']); sort($result['databases']);
+    try { wp_restore_configuration(); }
+    catch (\Throwable $e) { $result['reason'] = 'A supported literal destination wp-config.php is required.'; return $result; }
+    $result['eligible'] = !$unknown && count($result['archives']) > 0 && count($result['databases']) > 0;
+    $result['reason'] = $result['eligible'] ? 'Backups detected. Preparation does not replace files or tables.' : $result['reason'];
+    return $result;
+}
+function wp_restore_target_url($input) {
+    if (!is_string($input) || strlen($input) > 2048 || !filter_var($input, FILTER_VALIDATE_URL)) throw new \RuntimeException('Invalid target URL.');
+    $p = parse_url($input);
+    if (!$p || !in_array($p['scheme'] ?? '', ['http','https'], true) || isset($p['user']) || isset($p['pass']) || isset($p['query']) || isset($p['fragment'])
+        || !preg_match('/^[A-Za-z0-9.-]+$/D', $p['host'] ?? '') || !preg_match('#^/[A-Za-z0-9/_~.-]*$#D', $p['path'] ?? '/')
+        || preg_match('#(?:^|/)\.{1,2}(?:/|$)#D', $p['path'] ?? '')) throw new \RuntimeException('Invalid target URL.');
+    return rtrim($input, '/');
+}
+function wp_restore_private_root() {
+    $tmp = realpath(sys_get_temp_dir()); $web = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
+    if (!$tmp || !$web || $tmp === $web || strpos($tmp, $web . DIRECTORY_SEPARATOR) === 0) throw new \RuntimeException('Private storage outside the document root is required.');
+    return $tmp;
+}
+function wp_restore_save(array $run) {
+    $next = $run['work'] . '/state.next';
+    $f = @fopen($next, 'xb');
+    if (!$f) throw new \RuntimeException('Cannot checkpoint restore state safely.');
+    @chmod($next, 0600);
+    $json = json_encode($run, JSON_THROW_ON_ERROR);
+    $ok = fwrite($f, $json) === strlen($json) && fflush($f);
+    if ($ok && function_exists('fsync')) $ok = fsync($f);
+    fclose($f);
+    if (!$ok || !rename($next, $run['work'] . '/state.json')) throw new \RuntimeException('Cannot checkpoint restore state safely.');
+    $_SESSION['wp_restore_state_hash'] = hash('sha256', $json);
+}
+function wp_restore_load() {
+    global $stored_hash;
+    $pointer = $_SESSION['wp_restore_run'] ?? null;
+    if ($pointer === null) return null;
+    if (($pointer['app'] ?? null) !== wp_restore_app() || !is_string($stored_hash) || $stored_hash === ''
+        || !hash_equals($pointer['gate'] ?? '', hash('sha256', $stored_hash))) throw new \RuntimeException('Restore application or authority changed.');
+    $work = $pointer['work'];
+    $s = @lstat($work);
+    if (!$s || ($s['mode'] & 0170000) !== 0040000 || ($s['mode'] & 0077) !== 0 || dirname($work) !== wp_restore_private_root()) throw new \RuntimeException('Private restore ownership changed.');
+    wp_restore_file($work . '/owner.json', 1024);
+    $owner = json_decode(file_get_contents($work . '/owner.json'), true, 16, JSON_THROW_ON_ERROR);
+    if ($owner !== ['run_id'=>$pointer['run_id'],'app'=>$pointer['app']]) throw new \RuntimeException('Private restore ownership changed.');
+    wp_restore_file($work . '/state.json', 8388608);
+    $state = file_get_contents($work . '/state.json');
+    if (!isset($_SESSION['wp_restore_state_hash']) || !hash_equals($_SESSION['wp_restore_state_hash'], hash('sha256', $state))) throw new \RuntimeException('Restore checkpoint integrity changed.');
+    $run = json_decode($state, true, 64, JSON_THROW_ON_ERROR);
+    if ($run['run_id'] !== $pointer['run_id'] || $run['app'] !== $pointer['app'] || $run['work'] !== $work || $run['root'] !== __DIR__) throw new \RuntimeException('Restore state changed.');
+    foreach (['archive','database','config'] as $role) {
+        $file = $run[$role];
+        if (wp_restore_file(__DIR__ . '/' . $file['name']) !== $file['identity']) throw new \RuntimeException('Restore input changed.');
+    }
+    if (!hash_equals($run['config']['sha256'], hash_file('sha256', __DIR__ . '/wp-config.php'))) throw new \RuntimeException('Destination configuration changed.');
+    return $run;
+}
+function wp_restore_public(array $run) {
+    $preflight = [];
+    foreach (['files','sql'] as $part) {
+        $p = $run[$part] ?? [];
+        $preflight[$part] = ['ready'=>($p['ready'] ?? false) === true,
+            'processed'=>max(0, (int)($p['processed'] ?? 0)), 'total'=>max(0, (int)($p['total'] ?? 0))];
+    }
+    return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
+        'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
+        'backup_verified'=>false,'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
+}
+// Future independent preflight adapters live here; no backup code is executed.
+// WP_RESTORE_FILES_ADAPTER
+// WP_RESTORE_SQL_ADAPTER
+
+$restore_action = $_GET['action'] ?? null;
+if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'], true)) {
+    if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
+    $method = in_array($restore_action, ['wp_restore_discover','wp_restore_state'], true) ? 'GET' : 'POST';
+    if ($_SERVER['REQUEST_METHOD'] !== $method) { header('Allow: '.$method); site_report_api_reply(405, ['error'=>$method.' required.']); }
+    if ($method === 'POST' && (!is_string($_POST['csrf'] ?? null) || !isset($_SESSION['wp_restore_csrf']) || !hash_equals($_SESSION['wp_restore_csrf'], $_POST['csrf']))) site_report_api_reply(403, ['error'=>'Invalid restore session.']);
+    if ($restore_action === 'wp_restore_discover') {
+        $_SESSION['wp_restore_csrf'] ??= bin2hex(random_bytes(32));
+        site_report_api_reply(200, wp_restore_discovery() + ['csrf'=>$_SESSION['wp_restore_csrf'],'can_prepare'=>is_string($stored_hash ?? null) && $stored_hash !== '',
+            'adapters'=>['files'=>function_exists(__NAMESPACE__ . '\\wp_restore_files_step'),'sql'=>function_exists(__NAMESPACE__ . '\\wp_restore_sql_step')]]);
+    }
+    try { $run = wp_restore_load(); }
+    catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Restore inputs, application or private state changed. No step was executed.']); }
+    if ($run !== null && $run['expires_at'] <= time()) site_report_api_reply(410, ['error'=>'Restore run expired. Retain its backup and resolve it before starting another run.']);
+    if ($restore_action === 'wp_restore_prepare') {
+        if ($run !== null) site_report_api_reply(409, ['error'=>'A restore run already exists.']);
+        if (!is_string($stored_hash ?? null) || $stored_hash === '') site_report_api_reply(403, ['error'=>'Set a custom tool password before preparing a restore.']);
+        $discovery = wp_restore_discovery();
+        if (!$discovery['eligible']) site_report_api_reply(409, ['error'=>$discovery['reason']]);
+        foreach (['archive'=>'archives','database'=>'databases'] as $key=>$choices) {
+            if (!is_string($_POST[$key] ?? null) || !in_array($_POST[$key], $discovery[$choices], true)) site_report_api_reply(400, ['error'=>'Select local backup files.']);
+        }
+        try {
+            $target = wp_restore_target_url($_POST['target_url'] ?? null);
+            $work = wp_restore_private_root() . '/cms-wp-restore-' . bin2hex(random_bytes(16));
+            $run = ['run_id'=>bin2hex(random_bytes(32)),'app'=>wp_restore_app(),'root'=>__DIR__,'work'=>$work,'stage'=>'preflight','revision'=>0,
+                'created_at'=>time(),'expires_at'=>time()+86400,'target_url'=>$target];
+            foreach (['archive'=>$_POST['archive'],'database'=>$_POST['database'],'config'=>'wp-config.php'] as $role=>$name) $run[$role] = ['name'=>$name,'identity'=>wp_restore_file(__DIR__ . '/' . $name)];
+            $run['config']['sha256'] = hash_file('sha256', __DIR__ . '/wp-config.php');
+            if (!mkdir($work,0700)) throw new \RuntimeException('Private storage unavailable.');
+            $owner = fopen($work . '/owner.json', 'xb');
+            if (!$owner) throw new \RuntimeException('Private storage unavailable.');
+            chmod($work . '/owner.json',0600); $data = json_encode(['run_id'=>$run['run_id'],'app'=>$run['app']], JSON_THROW_ON_ERROR);
+            $written = fwrite($owner,$data); fclose($owner);
+            if ($written !== strlen($data)) throw new \RuntimeException('Private storage unavailable.');
+            wp_restore_save($run);
+            $_SESSION['wp_restore_run'] = ['run_id'=>$run['run_id'],'app'=>$run['app'],'work'=>$work,'gate'=>hash('sha256',$stored_hash)];
+        } catch (\Throwable $e) { site_report_api_reply(400, ['error'=>'Invalid restore input or private storage unavailable. No database operation was performed.']); }
+        site_report_api_reply(201, ['run'=>wp_restore_public($run)]);
+    }
+    if ($restore_action === 'wp_restore_state') site_report_api_reply(200, ['run'=>$run === null ? null : wp_restore_public($run)]);
+    if (!is_string($_POST['run_id'] ?? null) || !is_string($_POST['stage'] ?? null)) site_report_api_reply(400, ['error'=>'Invalid restore step.']);
+    if ($run === null || !hash_equals($run['run_id'], $_POST['run_id'])) site_report_api_reply(404, ['error'=>'Restore run not found.']);
+    if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
+    $operation = $_POST['operation'] ?? null;
+    $revision = $_POST['revision'] ?? null;
+    if (!in_array($operation, ['files','sql'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
+    $handler = __NAMESPACE__ . ($operation === 'files' ? '\\wp_restore_files_step' : '\\wp_restore_sql_step');
+    if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
+    try {
+        $handler($run);
+        $run['revision']++;
+        wp_restore_save($run);
+    } catch (\Throwable $e) {
+        site_report_api_reply(400, ['error'=>'Backup preflight failed. No database operation was performed.','code'=>'backup_preflight_failed']);
+    }
+    site_report_api_reply(200, ['run'=>wp_restore_public($run)]);
+}
+
 // Read-only installer metadata uses existing session authority, never report tokens.
 // Keep this ahead of password/bootstrap writes and behind machine-report dispatch.
 if (($_GET['action'] ?? null) === 'cms_install_discover') {
@@ -8308,6 +8500,59 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
 
 <!-- ===== EXPORT TAB ===== -->
 <div id="tab-export" class="section active">
+<section id="wp-restore-offer" class="instructions" hidden>
+    <h3><?= h(t('Restore WordPress backup?')) ?></h3>
+    <p><?= h(t('Backup-only hosting detected. Preparation does not replace any files or tables. A verified backup and another explicit confirmation are required before replacement.')) ?></p>
+    <p><?= h(t('Without isolated execution tests, restored plugins remain disabled, backup .htaccess stays aside, and site functionality is unverified.')) ?></p>
+    <label><?= h(t('Hosting archive')) ?> <select id="wp-restore-archive"></select></label>
+    <label><?= h(t('Database archive')) ?> <select id="wp-restore-database"></select></label>
+    <label><?= h(t('Confirm destination URL')) ?> <input id="wp-restore-target" type="url"></label>
+    <button id="wp-restore-prepare" type="button" class="btn btn-warning"><?= h(t('Prepare restoration')) ?></button>
+    <p id="wp-restore-status" role="status"></p>
+</section>
+<script>
+(() => {
+    const box = document.getElementById('wp-restore-offer');
+    const button = document.getElementById('wp-restore-prepare');
+    const status = document.getElementById('wp-restore-status');
+    const prepared = <?= json_encode(t('Preparation recorded. No files or tables have been replaced. Execution adapters are not available yet.')) ?>;
+    const customPassword = <?= json_encode(t('Set a custom tool password before preparing a restore.')) ?>;
+    const failure = <?= json_encode(t('Restore request failed. No automatic retry was made.')) ?>;
+    let discovery;
+    async function jsonRequest(action, body) {
+        const response = await fetch('?action=' + action, body === undefined
+            ? {credentials: 'same-origin'}
+            : {method: 'POST', credentials: 'same-origin', body});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || failure);
+        return data;
+    }
+    async function discover() {
+        discovery = await jsonRequest('wp_restore_discover');
+        if (!discovery.eligible) return;
+        for (const [id, names] of [['wp-restore-archive', discovery.archives], ['wp-restore-database', discovery.databases]]) {
+            const select = document.getElementById(id);
+            for (const name of names) select.add(new Option(name, name));
+        }
+        document.getElementById('wp-restore-target').value = new URL('.', window.location.href).href.replace(/\/$/, '');
+        box.hidden = false;
+        const current = await jsonRequest('wp_restore_state');
+        button.disabled = !discovery.can_prepare || current.run !== null;
+        status.textContent = current.run !== null ? prepared : (discovery.can_prepare ? '' : customPassword);
+    }
+    button.addEventListener('click', async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        const body = new URLSearchParams({csrf: discovery.csrf,
+            archive: document.getElementById('wp-restore-archive').value,
+            database: document.getElementById('wp-restore-database').value,
+            target_url: document.getElementById('wp-restore-target').value});
+        try { await jsonRequest('wp_restore_prepare', body); status.textContent = prepared; }
+        catch (error) { status.textContent = error.message || failure; button.disabled = !discovery.can_prepare; }
+    });
+    discover().catch(() => { status.textContent = failure; });
+})();
+</script>
 
 <div class="card">
 <h2>🗄️ <?= h(t('Database Export')) ?></h2>

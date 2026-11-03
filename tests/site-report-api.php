@@ -85,7 +85,8 @@ try {
     denied('cms_tools.php?action=site_report_github', [], ['Authorization: Bearer '.$token]);
     [$code,$body,$headers]=req('cms_tool.php?action=site_report_api&token='.$token.'&lang=es');
     check($code===200 && !preg_grep('/^Set-Cookie:/i',$headers),'machine language parameter cannot write cookies');
-    foreach (['get_wpconfig','site_report_github','diag_maintenance','bigdump','site_report','test_db'] as $action) denied('cms_tool.php?action='.$action.'&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
+    foreach (['get_wpconfig','site_report_github','diag_maintenance','bigdump','site_report','test_db','wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'] as $action) denied('cms_tool.php?action='.$action.'&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
+    foreach (['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'] as $action) denied('cms_tools.php?action='.$action, ['csrf'=>'invalid','run_id'=>'invalid','stage'=>'preflight'], array_merge($auth,['Authorization: Bearer '.$token]));
     denied('cms_tools.php?action=site_report_api&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
     $beforeOptions=file_get_contents($site.'/.migrate_config');
     [$code,$body,$headers]=req('cms_tool.php?action=site_report_api',null,[],'OPTIONS');
