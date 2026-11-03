@@ -220,6 +220,7 @@ $GLOBALS['__I18N'] = [
         'DB Tools'                            => 'Herramientas DB',
         'CLI available'                       => 'CLI disponible',
         // How to use / info tab
+        'Hosting exports omit .zip, .tar, .tar.gz and .gz files outside wp-content; archives inside wp-content and its subfolders remain eligible, subject to existing exclusions.' => 'La exportación del hosting omite archivos .zip, .tar, .tar.gz y .gz fuera de wp-content; los archivos comprimidos de wp-content y sus subcarpetas se incluyen, salvo las exclusiones existentes.',
         'How to migrate'                      => 'Cómo migrar',
         'Migration step by step'              => 'Migración paso a paso',
         'On the <strong>origin</strong>: open the <strong>Export</strong> tab, set the source and target URLs, and export the database (optionally split into size-limited <code>.zip</code> parts for hosts with upload limits). Use <strong>Export Hosting</strong> for the full site zip.'
@@ -3502,6 +3503,38 @@ if ($authenticated && isset($_GET['action'])) {
             realpath($root . '/wp-content/ai1wm-backups'),
         ];
 
+        // Match archive-relative paths, not similarly named or nested wp-content folders.
+        $outside_archives = [];
+        $outside_archive_links = [];
+        $is_backup_archive = static function ($path) {
+            return preg_match('/\.(?:zip|tar|gz)$/i', $path) === 1;
+        };
+        $archive_pattern = static function ($path) {
+            return strtr($path, ['\\' => '\\\\', '*' => '\\*', '?' => '\\?', '[' => '\\[', ']' => '\\]']);
+        };
+        $inventory = new RecursiveIteratorIterator(
+            new \RecursiveCallbackFilterIterator(
+                new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+                static function ($entry) use ($root) {
+                    return $entry->getPathname() !== $root . DIRECTORY_SEPARATOR . 'wp-content';
+                }
+            ),
+            RecursiveIteratorIterator::SELF_FIRST,
+            RecursiveIteratorIterator::CATCH_GET_CHILD
+        );
+        foreach ($inventory as $entry) {
+            $relative = str_replace(DIRECTORY_SEPARATOR, '/', substr($entry->getPathname(), strlen($root) + 1));
+            if (strpos($relative, 'wp-content/') === 0 || $relative === 'wp-content') continue;
+            if ($entry->isLink() && $entry->isDir()) {
+                // zip -r follows directory links; its patterns match stored names including '/'.
+                foreach (['[zZ][iI][pP]', '[tT][aA][rR]', '[gG][zZ]'] as $extension) {
+                    $outside_archive_links[] = $archive_pattern($relative) . '/*.' . $extension;
+                }
+            } elseif ($entry->isFile() && $is_backup_archive($relative)) {
+                $outside_archives[] = $relative;
+            }
+        }
+
         $zipped   = false;
         $method   = '';
 
@@ -3511,6 +3544,9 @@ if ($authenticated && isset($_GET['action'])) {
             $excludes_str = '';
             foreach (array_filter($excludes) as $ex) {
                 $excludes_str .= ' --exclude=' . escapeshellarg($ex . '/*');
+            }
+            foreach (array_merge(array_map($archive_pattern, $outside_archives), $outside_archive_links) as $pattern) {
+                $excludes_str .= ' --exclude=' . escapeshellarg($pattern);
             }
             $cmd = sprintf(
                 'cd %s && %s -r %s . %s 2>&1',
@@ -3537,6 +3573,8 @@ if ($authenticated && isset($_GET['action'])) {
                 );
                 foreach ($files as $file) {
                     if (!$file->isFile()) continue;
+                    $relative_path = str_replace(DIRECTORY_SEPARATOR, '/', substr($file->getPathname(), strlen($root) + 1));
+                    if (strpos($relative_path, 'wp-content/') !== 0 && $is_backup_archive($relative_path)) continue;
                     $real = $file->getRealPath();
                     // Exclude paths
                     $skip = false;
@@ -3562,11 +3600,14 @@ if ($authenticated && isset($_GET['action'])) {
             foreach (array_filter($excludes) as $ex) {
                 $exc_str .= ' --exclude=' . escapeshellarg(str_replace($root . '/', '', $ex));
             }
-            $cmd = sprintf('cd %s && tar -czf %s . %s 2>&1', escapeshellarg($root), escapeshellarg($tar_path), $exc_str);
+            foreach ($outside_archives as $relative) {
+                $exc_str .= ' --exclude=' . escapeshellarg('./' . $archive_pattern($relative));
+            }
+            $cmd = sprintf('cd %s && tar -czf %s %s . 2>&1', escapeshellarg($root), escapeshellarg($tar_path), $exc_str);
             exec($cmd, $out_exec, $ret);
             if ($ret === 0 && file_exists($tar_path) && filesize($tar_path) > 1000) {
                 $zip_path = $tar_path;
-                $zip_name = 'hosting_' . $dl_token . '.tar.gz';
+                $zip_name = basename($tar_path);
                 $zipped   = true;
                 $method   = 'tar.gz CLI';
             }
@@ -8346,6 +8387,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <button class="btn btn-primary" onclick="exportDB()">🗄️ Export DB (.sql.gz)</button>
     <button class="btn btn-warning" onclick="exportZip()">📁 Export Hosting (.zip)</button>
 </div>
+<p class="small"><?= h(t('Hosting exports omit .zip, .tar, .tar.gz and .gz files outside wp-content; archives inside wp-content and its subfolders remain eligible, subject to existing exclusions.')) ?></p>
 <div id="exp_progress" style="display:none" class="progress"><div class="progress-bar" id="exp_progress_bar" style="width:0%"></div></div>
 <div id="exp_log" class="log" style="display:none"></div>
 <div id="exp_parts" style="display:none;margin-top:12px"></div>

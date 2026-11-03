@@ -205,6 +205,10 @@ No es una API de reportes ni una estrategia de actualización/rollback de WordPr
 - HTTPS, permisos de escritura donde corresponda y restricciones de acceso en el servidor.
 - Copia separada de **todos los archivos y de la base de datos**, fuera del directorio público,
   con restauración probada. El ZIP de hosting no genera un dump de DB.
+  **Export Hosting (.zip)** omite los archivos `.zip`, `.tar`, `.tar.gz` y `.gz` fuera
+  de `wp-content/` en la raíz del sitio, sin distinguir mayúsculas en las extensiones.
+  Conserva esos archivos dentro de `wp-content/` y sus subcarpetas, salvo las
+  exclusiones existentes de cachés/backups.
 - Un snapshot de configuración solo cubre archivos seleccionados y la lista de plugins;
   no incluye todo el contenido, core, temas, plugins, uploads ni una DB completa.
 - El JSON y el historial del reporte en GitHub **no permiten restaurar el sitio**.

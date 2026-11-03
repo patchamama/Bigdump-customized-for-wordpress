@@ -331,7 +331,11 @@ new updater nor report/API features provide a production promotion operation.
   and write them to `.htaccess` and/or `.user.ini`.
 - **Cache clear** — purge `wp-content/cache` and Divi `et-cache`.
 - **Hosting export** — package the site files into a `.zip` (or `.tar.gz`) for download,
-  excluding selected caches/backups. This action does **not generate a database dump**.
+  excluding selected caches/backups and all `.zip`, `.tar`, `.tar.gz` and `.gz` files
+  outside the site's root `wp-content/` directory (case-insensitive extensions).
+  These archives inside `wp-content/` and its subdirectories remain eligible,
+  subject to the existing exclusions.
+  This action does **not generate a database dump**.
   Archives can contain private configuration/content; keep them private.
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.
