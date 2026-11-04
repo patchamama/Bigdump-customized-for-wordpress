@@ -1411,6 +1411,203 @@ function wp_restore_load() {
     if (!hash_equals($run['config']['sha256'], hash_file('sha256', __DIR__ . '/wp-config.php'))) throw new \RuntimeException('Destination configuration changed.');
     return $run;
 }
+// Private ZIP staging. Never use extractTo(), include backup PHP or write archive paths into the web root.
+function wp_restore_zip_path($name) {
+    if (!is_string($name) || strlen($name) > 4096 || !preg_match('//u', $name)
+        || preg_match('/[\\x00-\\x1f\\x7f\\\\:]/', $name) || str_starts_with($name, '/')) throw new \RuntimeException('Unsupported archive path.');
+    while (str_starts_with($name, './')) $name = substr($name, 2);
+    $name = rtrim($name, '/');
+    if ($name === '') return '';
+    foreach (explode('/', $name) as $part) if ($part === '' || $part === '.' || $part === '..') throw new \RuntimeException('Unsafe archive path.');
+    return $name;
+}
+function wp_restore_zip_list($path, $native) {
+    $entries = [];
+    if ($native) {
+        $zip = new \ZipArchive();
+        if ($zip->open($path) !== true) throw new \RuntimeException('Cannot read ZIP.');
+        try {
+            if ($zip->numFiles > 20000) throw new \RuntimeException('ZIP member limit exceeded.');
+            for ($i=0; $i<$zip->numFiles; $i++) {
+                $s = $zip->statIndex($i);
+                if (!$s || !$zip->getExternalAttributesIndex($i, $system, $attributes) || ($s['encryption_method'] ?? 0) !== 0) throw new \RuntimeException('Unsupported ZIP metadata.');
+                $entries[] = ['name'=>$s['name'],'size'=>$s['size'],'compressed'=>$s['comp_size'],'method'=>$s['comp_method'],
+                    'crc'=>sprintf('%08x', $s['crc'] & 0xffffffff),'mode'=>($attributes >> 16) & 0170000];
+            }
+        } finally { $zip->close(); }
+    } else {
+        $f = fopen($path, 'rb');
+        try {
+            $size = filesize($path); $tailSize = min($size, 65557);
+            fseek($f, $size-$tailSize); $tail = fread($f, $tailSize); $end = strrpos($tail, "PK\x05\x06");
+            if ($end === false || strlen($tail)-$end < 22) throw new \RuntimeException('ZIP directory missing.');
+            $h = unpack('vdisk/vcdDisk/vdiskCount/vcount/Vlength/Voffset/vcomment', substr($tail,$end+4,18));
+            if ($end+22+$h['comment'] !== strlen($tail) || $h['disk'] || $h['cdDisk'] || $h['diskCount'] !== $h['count']
+                || $h['count'] > 20000 || $h['offset'] === 0xffffffff || $h['length'] === 0xffffffff
+                || $h['offset']+$h['length'] !== $size-$tailSize+$end) throw new \RuntimeException('Unsupported ZIP/ZIP64 directory.');
+            fseek($f, $h['offset']); $limit = $h['offset']+$h['length'];
+            for ($i=0; $i<$h['count']; $i++) {
+                $raw = fread($f,46);
+                if (strlen($raw)!==46 || substr($raw,0,4)!=="PK\x01\x02") throw new \RuntimeException('Invalid ZIP member.');
+                $s = unpack('vmade/vversion/vflags/vmethod/vtime/vdate/Vcrc/Vcompressed/Vsize/vname/vextra/vcomment/vdisk/vinternal/Vexternal/Voffset',substr($raw,4));
+                $name = fread($f,$s['name']); $extra = $s['extra'] ? fread($f,$s['extra']) : ''; fseek($f,$s['comment'],SEEK_CUR);
+                if (strlen($name)!==$s['name'] || strlen($extra)!==$s['extra'] || $s['disk'] || ($s['flags'] & 0x2041)
+                    || $s['size']===0xffffffff || $s['compressed']===0xffffffff || $s['offset']===0xffffffff || ftell($f)>$limit) throw new \RuntimeException('Encrypted, split or unsupported ZIP.');
+                // Info-ZIP commonly carries Unicode in 0x7075 while leaving the UTF-8 flag unset.
+                $unicode=null;
+                for ($j=0;$j<strlen($extra);) {
+                    if (strlen($extra)-$j<4) throw new \RuntimeException('Truncated ZIP extra field.');
+                    $x=unpack('vid/vlength',substr($extra,$j,4));$j+=4;
+                    if ($x['length']>strlen($extra)-$j) throw new \RuntimeException('Truncated ZIP extra payload.');
+                    $value=substr($extra,$j,$x['length']);$j+=$x['length'];
+                    if ($x['id']===0x7075 && strlen($value)>=5 && ord($value[0])===1
+                        && unpack('V',substr($value,1,4))[1]===(crc32($name)&0xffffffff)) {
+                        if ($unicode!==null) throw new \RuntimeException('Ambiguous Unicode ZIP name.');
+                        $unicode=substr($value,5);
+                    }
+                }
+                if (($s['flags']&2048) && $unicode!==null && $unicode!==$name) throw new \RuntimeException('Conflicting Unicode ZIP names.');
+                $decoded=$unicode??$name;
+                if (!($s['flags']&2048) && $unicode===null && preg_match('/[^\x00-\x7f]/',$name)) throw new \RuntimeException('Legacy ZIP encoding needs native ZipArchive.');
+                $entries[]=['name'=>$decoded,'raw_name'=>base64_encode($name),'size'=>$s['size'],'compressed'=>$s['compressed'],'method'=>$s['method'],
+                    'crc'=>sprintf('%08x',$s['crc']),'mode'=>($s['external']>>16)&0170000,'offset'=>$s['offset'],'flags'=>$s['flags'],'directory_offset'=>$h['offset']];
+            }
+            if (ftell($f)!==$limit) throw new \RuntimeException('Invalid ZIP directory length.');
+        } finally { fclose($f); }
+    }
+    $seen=[]; $parents=[]; $total=0; $pathBytes=0; $result=[];
+    foreach ($entries as $entry) {
+        $path = wp_restore_zip_path($entry['name']);
+        $dir = str_ends_with($entry['name'],'/');
+        if ($path==='') { if (!$dir || $entry['size']!==0) throw new \RuntimeException('Invalid root entry.'); continue; }
+        if (!in_array($entry['mode'],[0,0100000,0040000],true) || ($entry['mode']===0040000 && !$dir)
+            || !in_array($entry['method'],[0,8],true) || ($dir && $entry['size']!==0) || $entry['size']>1073741824) throw new \RuntimeException('Unsupported ZIP member type or size.');
+        $key = function_exists('mb_strtolower') ? mb_strtolower($path,'UTF-8') : strtolower($path);
+        if (isset($seen[$key])) throw new \RuntimeException('Duplicate ZIP path.');
+        $seen[$key] = $dir;
+        $parts = explode('/',$key); array_pop($parts); $parent='';
+        foreach ($parts as $part) { $parent = $parent===''?$part:$parent.'/'.$part; $parents[$parent]=true; }
+        $total += $entry['size']; $pathBytes += strlen($path);
+        if ($total>21474836480 || $pathBytes>2097152) throw new \RuntimeException('ZIP staging quota exceeded.');
+        if (!$dir) $result[]=$entry+['path'=>$path];
+    }
+    foreach ($parents as $parent=>$_) if (isset($seen[$parent]) && !$seen[$parent]) throw new \RuntimeException('ZIP file/directory collision.');
+    $paths=array_column($result,'path');
+    foreach (['index.php','wp-load.php','wp-settings.php','wp-includes/version.php'] as $required) if (!in_array($required,$paths,true)) throw new \RuntimeException('A root-level WordPress backup is required.');
+    return $result;
+}
+function wp_restore_zip_stream($archive, array $entry, $native) {
+    if ($native) {
+        $zip=new \ZipArchive();
+        if ($zip->open($archive)!==true) throw new \RuntimeException('Cannot reopen ZIP.');
+        $f=$zip->getStream($entry['name']);
+        if (!$f) { $zip->close(); throw new \RuntimeException('Cannot stream ZIP entry.'); }
+        try { while (!feof($f)) { $bytes=fread($f,65536); if ($bytes===false || ($bytes===''&&!feof($f))) throw new \RuntimeException('ZIP read failed.'); if ($bytes!=='') yield $bytes; } }
+        finally { fclose($f); $zip->close(); }
+    } else {
+        $f=fopen($archive,'rb');
+        try {
+            fseek($f,$entry['offset']);$raw=fread($f,30);
+            if(strlen($raw)!==30 || substr($raw,0,4)!=="PK\x03\x04") throw new \RuntimeException('ZIP local header missing.');
+            $h=unpack('vversion/vflags/vmethod/vtime/vdate/Vcrc/Vcompressed/Vsize/vname/vextra',substr($raw,4));
+            $rawName=base64_decode($entry['raw_name'],true);
+            if ($h['method']!==$entry['method'] || $h['flags']!==$entry['flags'] || $h['name']!==strlen($rawName)
+                || fread($f,$h['name'])!==$rawName) throw new \RuntimeException('ZIP headers disagree.');
+            if (!($h['flags']&8) && ($h['compressed']!==$entry['compressed'] || $h['size']!==$entry['size'] || sprintf('%08x',$h['crc'])!==$entry['crc'])) throw new \RuntimeException('ZIP sizes disagree.');
+            fseek($f,$h['extra'],SEEK_CUR);
+            if (ftell($f)+$entry['compressed']>$entry['directory_offset']) throw new \RuntimeException('ZIP payload crosses directory.');
+            $left=$entry['compressed']; $inflate=$entry['method']===8?inflate_init(ZLIB_ENCODING_RAW):null;
+            if ($entry['method']===8 && !$inflate) throw new \RuntimeException('Deflate unavailable.');
+            while ($left>0) {
+                $bytes=fread($f,min($left,$entry['method']===8?1024:65536));
+                if ($bytes===false || $bytes==='') throw new \RuntimeException('Truncated ZIP payload.');
+                $left-=strlen($bytes); $out=$inflate?inflate_add($inflate,$bytes,$left===0?ZLIB_FINISH:ZLIB_SYNC_FLUSH):$bytes;
+                if ($out===false) throw new \RuntimeException('Invalid deflate payload.');
+                if ($out!=='') yield $out;
+            }
+            if ($inflate && (inflate_get_status($inflate)!==ZLIB_STREAM_END || inflate_get_read_len($inflate)!==$entry['compressed'])) throw new \RuntimeException('Incomplete or trailing deflate payload.');
+        } finally { fclose($f); }
+    }
+}
+function wp_restore_file_disposition($path) {
+    $p=strtolower($path);$name=basename($p);
+    if ($p===strtolower(basename(__FILE__)) || in_array($p,['wp-config.php','.migrate_config','cms_tools.php','cms_tool.php','bigdump.php'],true)
+        || preg_match('/^(?:hosting_.+\.zip|db_.+\.sql\.gz)$/D',$p)) return 'skip';
+    if (preg_match('#(?:^|/)\.[^/]+#',$p) || in_array($name,['.htaccess','.htpasswd','.user.ini','php.ini','web.config','.env'],true) || $p==='.maintenance'
+        || preg_match('#(?:^|/)(?:\.git|\.svn|\.hg)(?:/|$)#',$p) || str_starts_with($p,'wp-content/cache/') || str_starts_with($p,'wp-content/mu-plugins/')
+        || in_array($p,['wp-content/advanced-cache.php','wp-content/object-cache.php','wp-content/db.php','wp-content/sunrise.php','wp-content/maintenance.php','wp-content/fatal-error-handler.php'],true)) return 'hold';
+    return 'deploy';
+}
+function wp_restore_files_manifest(array $run) {
+    $path=$run['work'].'/files-manifest.json';wp_restore_file($path,16777216);
+    if (!hash_equals($run['files']['manifest_sha256'],hash_file('sha256',$path))) throw new \RuntimeException('File manifest changed.');
+    return json_decode(file_get_contents($path),true,32,JSON_THROW_ON_ERROR);
+}
+function wp_restore_files_manifest_save(array &$run, array $manifest) {
+    $next=$run['work'].'/files-manifest.next';$f=@fopen($next,'xb');
+    if (!$f) throw new \RuntimeException('Cannot save file manifest.');
+    chmod($next,0600);$json=json_encode($manifest,JSON_THROW_ON_ERROR);
+    $ok=fwrite($f,$json)===strlen($json)&&fflush($f);if($ok&&function_exists('fsync'))$ok=fsync($f);fclose($f);
+    if (!$ok||!rename($next,$run['work'].'/files-manifest.json')) throw new \RuntimeException('Cannot save file manifest.');
+    $run['files']['manifest_sha256']=hash('sha256',$json);
+}
+function wp_restore_files_step(array &$run) {
+    if (PHP_INT_SIZE<8 || !function_exists('inflate_init')) throw new \RuntimeException('64-bit PHP with zlib is required.');
+    $p=$run['files']??['ready'=>false,'phase'=>'copy','copied'=>0,'processed'=>0,'total'=>0,'offset'=>0];
+    if ($p['ready']) return;
+    $archive=$run['work'].'/files-input.zip'; $input=$run['root'].'/'.$run['archive']['name'];
+    if ($p['phase']==='copy') {
+        $size=$run['archive']['identity']['size'];if($size<22||$size>4294967295)throw new \RuntimeException('Unsupported ZIP size.');
+        if ($p['copied']===0 && !file_exists($archive)) { $f=fopen($archive,'xb');chmod($archive,0600);fclose($f); }
+        $s=wp_restore_file($archive);if($s['size']<$p['copied']||($s['mode']&0077))throw new \RuntimeException('Private archive changed.');
+        $out=fopen($archive,'r+b');$in=fopen($input,'rb');
+        try {
+            if (!ftruncate($out,$p['copied'])||fseek($out,$p['copied'])!==0||fseek($in,$p['copied'])!==0)throw new \RuntimeException('Cannot resume private copy.');
+            $count=stream_copy_to_stream($in,$out,min(8388608,$size-$p['copied']));
+            if($count===false||$count!==min(8388608,$size-$p['copied'])||!fflush($out))throw new \RuntimeException('Incomplete ZIP copy.');
+            $p['copied']+=$count;
+        } finally {fclose($in);fclose($out);}
+        if($p['copied']===$size){$p['sha256']=hash_file('sha256',$archive);if(!hash_equals($p['sha256'],hash_file('sha256',$input)))throw new \RuntimeException('ZIP changed during copy.');$p['phase']='manifest';$p['identity']=wp_restore_file($archive);}
+        $run['files']=$p;return;
+    }
+    if(wp_restore_file($archive)!==$p['identity'])throw new \RuntimeException('Private ZIP identity changed.');
+    if($p['phase']==='manifest'){
+        $p['native']=class_exists('ZipArchive');$entries=wp_restore_zip_list($archive,$p['native']);$bytes=array_sum(array_column($entries,'size'));
+        if(disk_free_space($run['work'])<$bytes+16777216)throw new \RuntimeException('Insufficient private staging space.');
+        $p['total']=count($entries);$p['phase']='extract';$run['files']=$p;wp_restore_files_manifest_save($run,$entries);return;
+    }
+    $run['files']=$p;$manifest=wp_restore_files_manifest($run);$entry=$manifest[$p['processed']];$kind=wp_restore_file_disposition($entry['path']);
+    $dir=$run['work'].'/files';if(!is_dir($dir)&&!mkdir($dir,0700))throw new \RuntimeException('Cannot create private file area.');
+    $ds=lstat($dir);if(($ds['mode']&0170000)!==0040000||($ds['mode']&0077))throw new \RuntimeException('Private file area changed.');
+    $file=$dir.'/'.hash('sha256',$entry['path']).'.data';$part=$file.'.part';$out=null;
+    if($kind!=='skip'){
+        if(!file_exists($part)){if($p['offset']!==0)throw new \RuntimeException('Partial entry missing.');$out=fopen($part,'xb');chmod($part,0600);}
+        else{$s=wp_restore_file($part);if($s['size']<$p['offset']||($s['mode']&0077))throw new \RuntimeException('Partial entry changed.');$out=fopen($part,'r+b');}
+        if(!ftruncate($out,$p['offset'])||fseek($out,$p['offset'])!==0){fclose($out);throw new \RuntimeException('Cannot resume entry.');}
+    }
+    $sourceHash=hash_init('sha256');$crc=hash_init('crc32b');$position=0;$written=0;$complete=true;
+    try{
+        foreach(wp_restore_zip_stream($archive,$entry,$p['native'])as$bytes){
+            $start=$position;$position+=strlen($bytes);if($position>$entry['size'])throw new \RuntimeException('ZIP inflated beyond its declaration.');
+            hash_update($sourceHash,$bytes);hash_update($crc,$bytes);
+            $piece=substr($bytes,max(0,$p['offset']-$start));
+            if($position<=$p['offset'])$piece='';
+            $piece=substr($piece,0,8388608-$written);if($out&&$piece!==''&&fwrite($out,$piece)!==strlen($piece))throw new \RuntimeException('Private entry write failed.');
+            $written+=strlen($piece);
+            if($written===8388608&&$p['offset']+$written<$entry['size']){$complete=false;break;}
+        }
+        if($out&&!fflush($out))throw new \RuntimeException('Private entry flush failed.');
+    }finally{if($out)fclose($out);}
+    $p['offset']+=$written;
+    if($complete){
+        if($position!==$entry['size']||$p['offset']!==$entry['size']||hash_final($crc)!==$entry['crc'])throw new \RuntimeException('ZIP length or CRC mismatch.');
+        $sha=hash_final($sourceHash);
+        if($kind!=='skip'&&(!hash_equals($sha,hash_file('sha256',$part))||file_exists($file)||!rename($part,$file)))throw new \RuntimeException('Staged bytes do not match source.');
+        $manifest[$p['processed']]['sha256']=$sha;$manifest[$p['processed']]['disposition']=$kind;$p['processed']++;$p['offset']=0;
+        $p['ready']=$p['processed']===$p['total'];$run['files']=$p;wp_restore_files_manifest_save($run,$manifest);
+    }else $run['files']=$p;
+}
+
 function wp_restore_public(array $run) {
     $preflight = [];
     foreach (['files','sql'] as $part) {
@@ -1466,7 +1663,17 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
         } catch (\Throwable $e) { site_report_api_reply(400, ['error'=>'Invalid restore input or private storage unavailable. No database operation was performed.']); }
         site_report_api_reply(201, ['run'=>wp_restore_public($run)]);
     }
-    if ($restore_action === 'wp_restore_state') site_report_api_reply(200, ['run'=>$run === null ? null : wp_restore_public($run)]);
+    if ($restore_action === 'wp_restore_state') {
+        $public = $run === null ? null : wp_restore_public($run);
+        if ($run && ($_GET['manifest'] ?? null) === '1' && isset($run['files']['manifest_sha256'])) {
+            try {
+                $public['manifest'] = array_map(static function ($entry) {
+                    return array_intersect_key($entry, array_flip(['path','size','sha256','disposition']));
+                }, wp_restore_files_manifest($run));
+            } catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Private file manifest changed.']); }
+        }
+        site_report_api_reply(200, ['run'=>$public]);
+    }
     if (!is_string($_POST['run_id'] ?? null) || !is_string($_POST['stage'] ?? null)) site_report_api_reply(400, ['error'=>'Invalid restore step.']);
     if ($run === null || !hash_equals($run['run_id'], $_POST['run_id'])) site_report_api_reply(404, ['error'=>'Restore run not found.']);
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);

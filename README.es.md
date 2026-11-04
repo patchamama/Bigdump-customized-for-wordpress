@@ -171,7 +171,8 @@ Estas son herramientas existentes; no todas fueron recertificadas por las prueba
 | Backups/snapshots | Exportar archivos, exportar DB y guardar snapshots de configuración son operaciones distintas. |
 
 La nueva detección de backups ofrece **preparar** una restauración autenticada en un
-hosting sin core instalado; todavía no habilita restaurar ni borrar tablas.
+hosting sin core instalado y validar/descomprimir el ZIP en almacenamiento privado;
+todavía no habilita reemplazar tablas ni publicar los archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
 | Instaladores | WordPress y phpMyAdmin. El instalador histórico no es un actualizador completo de una instalación existente. |

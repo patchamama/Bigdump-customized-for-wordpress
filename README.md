@@ -338,7 +338,8 @@ new updater nor report/API features provide a production promotion operation.
   This action does **not generate a database dump**.
   Archives can contain private configuration/content; keep them private.
 - **Backup restoration preparation** — authenticated detection of backup-only hosting
-  and private preflight drafts. No restore execution is enabled yet; see
+  and private ZIP staging. Database replacement and public placement are not enabled
+  yet; see
   [scope and safeguards](docs/wordpress-restore.md).
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.
