@@ -1,6 +1,6 @@
 # WordPress backup restoration
 
-**Current scope: detection, preparation and private ZIP preflight/staging only.** The browser offers preparation
+**Current scope: detection, preparation, private ZIP staging and restricted SQL preflight only.** The browser offers preparation
 when the application directory contains the tool, a literal `wp-config.php`,
 `hosting_*.zip` and `db_*.sql.gz` backups, but no installed core or unrelated files.
 The tool's own `.migrate_config` is allowed. Multiple backups require explicit
@@ -11,8 +11,9 @@ and choose **Prepare restoration**. This creates a private, server-owned preflig
 run. It does **not** extract backup code, connect to the database, back up or drop
 tables, import SQL, activate plugins, change configuration or replace the site.
 Database replacement/import and public file placement remain unavailable. The
-private file-preflight adapter is available through the session protocol below;
-this is not a complete restoration wizard.
+private file/SQL preflight adapters are available through the session protocol below;
+this is not a complete restoration wizard. SQL readiness means a privately parsed
+plan, not database compatibility, an old-data backup, recovery or permission to import.
 
 ## Safety and limits
 
@@ -72,6 +73,67 @@ dispositions, sizes and verified SHA-256 values—not member contents or private
   Ordinary plugin files are not executed; later database preparation must disable
   their activation before any public placement.
 
+## Private SQL preflight — no database execution
+
+Use the same authenticated `POST ?action=wp_restore_step` fields and current server
+revision, with `operation=sql`. It privately copies `db_*.sql.gz`, checks one complete
+gzip member and its CRC/length, and verifies decoded-source/private SHA-256 equality.
+Trailing bytes, multiple members, corrupt/truncated streams and oversized declarations
+are rejected. Original dump/config/tool files are not rewritten. No PDO connection,
+SQL execution, public file placement or library download occurs.
+
+The normalizer accepts a deliberately restricted single-site dump profile:
+
+- Complete InnoDB `CREATE TABLE` definitions with explicit UTF-8 charset/collation,
+  scalar/default metadata, ordinary primary/unique/index keys and supported column
+  types; complete literal `INSERT ... VALUES` rows, including extended inserts and
+  explicit reordered lists containing every column. Strings, binary/hex values,
+  NULL and numeric literal spelling remain typed; quotes/escapes and semicolons
+  inside strings are not global SQL search-and-replace targets.
+- One unambiguous prefix and `siteurl`/`home`, the twelve standard core table names,
+  and no foreign-prefix tables. Split URL layouts, multisite/ambiguous inventories,
+  database-qualified names, views/triggers/routines/events, generated columns,
+  foreign keys, expressions, arbitrary SET operations and unsupported DDL fail
+  admission. WordPress runtime validity and target-server collation/type support
+  are **not** certified by this grammar check.
+- Recognized mysqldump SET/lock/key-control metadata is interpreted, never sent to
+  MySQL. Database selection/creation, file I/O and privileged operations are not
+  imported. Session settings become typed private frames. Auto-increment cells
+  require captured integer IDs; literal zero requires explicit
+  `NO_AUTO_VALUE_ON_ZERO` beforehand. TIMESTAMP requires an explicit UTC dump,
+  including UTC before timestamp INSERTs. Unknown escaping modes are rejected.
+  Conditional metadata is limited to guards up to MySQL 50699/MariaDB 100600;
+  only the exact MariaDB 999999 client-sandbox directive is separately ignored.
+- Current quotas: 512 MiB compressed/expanded SQL, 16 MiB per statement/frame,
+  8 MiB per decoded string token, 1,000 tables, 20,000 columns (1,000 per table),
+  256 indexes/table, 64 parts/index, 16 MiB private catalog and 1 GiB private plan.
+  Copy/expansion writes at most 8 MiB per request; expansion rereads the compressed
+  prefix. Parsing stops between statements after 64 statements or 1 MiB scanned;
+  one extended INSERT is indivisible and may generate more private plan bytes.
+  These limits do not promise a universal memory/CPU/HTTP deadline or hosting capacity.
+- Frames use private `.data`/`.ndjson` storage, not executable backup filenames.
+  SHA-256 chunk receipts cover the generated source-derived plan; all chunks and
+  boundaries are checked before readiness, rather than blessing a changed file at
+  EOF. A changed catalog/checkpoint stops progression. A future execution adapter
+  must check the final recorded plan fingerprint again before consuming it.
+
+`GET ?action=wp_restore_state&manifest=sql` returns only table/column names, target
+name mapping, row counts, canonical source URL and fingerprints—never row payloads,
+column-default contents or private paths. `schema_sha256` hashes the canonical
+source CREATE frame; `data_sha256` hashes INSERT frames in source order. Frames are
+JSON with unescaped slashes and one trailing LF, with binary/string bytes encoded
+as base64. `plan_sha256` covers all frames, including recognized settings. These are
+private-parse receipts, not successful import or recovery reports. Existing
+`manifest=1` still inspects only ZIP metadata.
+
+**Español:** `operation=sql` valida el gzip completo y prepara un plan tipado privado;
+no conecta a la base ni ejecuta el dump. Acepta un perfil acotado de CREATE/INSERT
+InnoDB, con charset/collation explícitos, prefijo único y valores literales. Rechaza
+instrucciones peligrosas, expresiones, perfiles ambiguos y corrupción antes de
+cualquier importación. `manifest=sql` muestra metadatos y huellas, nunca filas ni
+rutas privadas. «Listo» no certifica compatibilidad, respaldo previo, recuperación ni
+WordPress funcionando; el reemplazo sigue deshabilitado.
+
 ## Selected shared-host fallback
 
 A directory on the same hosting account is not an execution sandbox. The selected
@@ -110,5 +172,20 @@ TMPDIR="$PWD/.atl/wordpress-restore-proof/tmp" \
 php tests/wordpress-restore-files.php portable valid
 ```
 
-The fixtures use synthetic configuration/archives and a database double that
+For SQL admission use `valid`, `extended`, `large`, `ddl-metadata`, `zero`, `literals`,
+`database`, `qualified`, `expression`, `global`, `out-file`, `trigger`,
+`ddl-expression`, `foreign`, `reserved`, `truncated`, `conditional`, `future-conditional`, `gzip-crc`,
+`gzip-trailing`, `timestamp-ambiguous`, `mode-zero` and `plan-tamper`:
+
+```sh
+TMPDIR="$PWD/.atl/wordpress-restore-proof/tmp" \
+php tests/wordpress-restore-sql.php valid
+```
+
+The SQL tamper case modifies only its own synthetic run in an exclusive inherited
+TMPDIR, then checks rejection and unchanged public checkpoint/counters. It never
+searches or modifies another run. Schema tests distinguish quoted keyword defaults
+from unexecuted timestamp-function metadata.
+
+The fixtures use synthetic configuration/archives/dumps and a database double that
 refuses connections. It does not execute WordPress or access a real database.

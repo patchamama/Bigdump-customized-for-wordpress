@@ -1621,7 +1621,340 @@ function wp_restore_public(array $run) {
 }
 // Future independent preflight adapters live here; no backup code is executed.
 // WP_RESTORE_FILES_ADAPTER
-// WP_RESTORE_SQL_ADAPTER
+// Restricted dump grammar. Nothing below connects to a database or executes SQL.
+class WordPressRestoreSqlLexer {
+    private string $text; private int $offset=0; private ?array $look=null;
+    public function __construct(string $text){$this->text=$text;}
+    public function peek():array{return $this->look??= $this->scan();}
+    public function take():array{$token=$this->peek();$this->look=null;return $token;}
+    public function eat(string $value):bool{$token=$this->peek();if(!in_array($token['type'],['word','symbol'],true)||strtoupper($token['value'])!==$value)return false;$this->take();return true;}
+    public function need(string $value):void{if(!$this->eat($value))throw new \RuntimeException('Unsupported SQL grammar.');}
+    public function end():void{if($this->take()['type']!=='end')throw new \RuntimeException('Unexpected SQL tail.');}
+    public function identifier():string{
+        $t=$this->take();if(!in_array($t['type'],['word','identifier'],true)||!preg_match('/^[A-Za-z0-9_]{1,64}$/D',$t['value']))throw new \RuntimeException('Unsupported SQL identifier.');return $t['value'];
+    }
+    public function literal():array{
+        $t=$this->take();
+        if($t['type']==='string')return ['type'=>'bytes','base64'=>base64_encode($t['value'])];
+        if($t['type']==='number')return ['type'=>'number','value'=>$t['value']];
+        if($t['type']==='hex')return ['type'=>'hex','value'=>strtoupper($t['value'])];
+        if($t['type']==='word'&&strtoupper($t['value'])==='NULL')return ['type'=>'null'];
+        if($t['type']==='word'&&strtoupper($t['value'])==='_BINARY'){
+            $s=$this->take();if($s['type']!=='string')throw new \RuntimeException('Unsupported binary literal.');return ['type'=>'binary','base64'=>base64_encode($s['value'])];
+        }
+        throw new \RuntimeException('Only complete scalar SQL literals are supported.');
+    }
+    private function scan():array{
+        $n=strlen($this->text);while($this->offset<$n&&str_contains(" \t\r\n\v\f",$this->text[$this->offset]))$this->offset++;
+        if($this->offset===$n)return ['type'=>'end','value'=>''];$c=$this->text[$this->offset++];
+        if(in_array($c,["'",'"','`'],true)){
+            $value='';$closed=false;
+            while($this->offset<$n){
+                $length=strcspn($this->text,$c.($c==='`'?'':"\\"),$this->offset);$value.=substr($this->text,$this->offset,$length);$this->offset+=$length;
+                if($this->offset===$n)break;$next=$this->text[$this->offset++];
+                if($next===$c){if(($this->text[$this->offset]??null)===$c){$this->offset++;$value.=$c;continue;}$closed=true;break;}
+                if($this->offset===$n)break;$escape=$this->text[$this->offset++];
+                $map=['0'=>"\0",'b'=>"\x08",'n'=>"\n",'r'=>"\r",'t'=>"\t",'Z'=>"\x1a",'%'=>'\\%','_'=>'\\_'];$value.=$map[$escape]??$escape;
+            }
+            if(!$closed||strlen($value)>8388608)throw new \RuntimeException('Unterminated or oversized SQL quoted token.');return ['type'=>$c==='`'?'identifier':'string','value'=>$value];
+        }
+        $this->offset--;
+        if(preg_match('/\G0x([0-9a-f]+)(?![a-z0-9_])/i',$this->text,$m,0,$this->offset)){$this->offset+=strlen($m[0]);if(strlen($m[1])%2)throw new \RuntimeException('Odd hex literals are unsupported.');return ['type'=>'hex','value'=>$m[1]];}
+        if(preg_match('/\G[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/',$this->text,$m,0,$this->offset)){$this->offset+=strlen($m[0]);if(strlen($m[0])>128)throw new \RuntimeException('SQL number too long.');return ['type'=>'number','value'=>$m[0]];}
+        if(preg_match('/\G[A-Za-z_][A-Za-z0-9_]*/',$this->text,$m,0,$this->offset)){$this->offset+=strlen($m[0]);return ['type'=>'word','value'=>$m[0]];}
+        $this->offset++;if(!str_contains('(),.=@',$c))throw new \RuntimeException('Unsupported SQL token.');return ['type'=>'symbol','value'=>$c];
+    }
+}
+function wp_restore_sql_statement($stream):?string{
+    $statement='';$start=ftell($stream);$quote=null;
+    while(($c=fgetc($stream))!==false){
+        if(ftell($stream)-$start>16777216)throw new \RuntimeException('SQL statement exceeds 16 MiB.');
+        if($quote!==null){
+            $statement.=$c;
+            if($c==='\\'&&$quote!=='`'){$next=fgetc($stream);if($next===false)throw new \RuntimeException('Incomplete SQL escape.');$statement.=$next;}
+            elseif($c===$quote){$next=fgetc($stream);if($next===$quote)$statement.=$next;else{if($next!==false)fseek($stream,-1,SEEK_CUR);$quote=null;}}
+            continue;
+        }
+        if($c===';')return $statement;
+        if(in_array($c,["'",'"','`'],true)){$quote=$c;$statement.=$c;continue;}
+        $comment=false;
+        if($c==='#')$comment=true;
+        elseif($c==='-'){
+            $next=fgetc($stream);$after=$next==='-'?fgetc($stream):false;
+            if($next==='-'&&($after===false||ord($after)<=32))$comment=true;
+            else{if($after!==false)fseek($stream,-1,SEEK_CUR);if($next!==false)fseek($stream,-1,SEEK_CUR);}
+        }
+        if($comment){while(($next=fgetc($stream))!==false&&$next!=="\n")if(ftell($stream)-$start>16777216)throw new \RuntimeException('SQL comment too large.');$statement.="\n";continue;}
+        if($c==='/'){
+            $next=fgetc($stream);
+            if($next==='*'){
+                $body='';$previous='';$closed=false;
+                while(($byte=fgetc($stream))!==false){$body.=$byte;if($previous==='*'&&$byte==='/'){$closed=true;break;}$previous=$byte;if(strlen($body)>1048576)throw new \RuntimeException('SQL block comment too large.');}
+                if(!$closed)throw new \RuntimeException('Unterminated SQL comment.');$body=substr($body,0,-2);
+                if(preg_match('/^(!|M!)([0-9]{5,6})\s*(.*)$/sD',$body,$match)){
+                    $payload=trim($match[3]);$version=(int)$match[2];
+                    if($match[1]==='M!'&&$version===999999&&$payload==='\\- enable sandbox mode'&&trim($statement)==='')continue;
+                    if($version>($match[1]==='M!'?100600:50699))throw new \RuntimeException('Conditional metadata version is not supported.');
+                    if(trim($statement)!==''||!preg_match('/^(?:SET\s|ALTER\s+TABLE\s)/i',$payload))throw new \RuntimeException('Unsupported conditional SQL.');
+                    $statement.=$payload;
+                }elseif(str_starts_with($body,'!')||str_starts_with($body,'M!'))throw new \RuntimeException('Unsupported conditional comment.');
+                else $statement.=' ';
+                continue;
+            }
+            if($next!==false)fseek($stream,-1,SEEK_CUR);
+        }
+        $statement.=$c;
+    }
+    if($quote!==null||trim($statement)!=='')throw new \RuntimeException('SQL statement is not terminated.');return null;
+}
+function wp_restore_sql_charset(string $value):string{
+    $value=strtolower($value);if(!in_array($value,['utf8','utf8mb3','utf8mb4'],true))throw new \RuntimeException('Only explicit UTF-8 dump charsets are supported.');return $value;
+}
+function wp_restore_sql_collation(string $value):string{
+    $value=strtolower($value);if(!preg_match('/^utf8(?:mb[34])?_[a-z0-9_]{1,48}$/D',$value))throw new \RuntimeException('Unsupported SQL collation.');return $value;
+}
+function wp_restore_sql_integer(WordPressRestoreSqlLexer $lex,int $max=65535):int{
+    $t=$lex->take();if($t['type']!=='number'||!preg_match('/^[0-9]{1,10}$/D',$t['value'])||(float)$t['value']>$max)throw new \RuntimeException('Unsupported SQL size.');return (int)$t['value'];
+}
+function wp_restore_sql_create(WordPressRestoreSqlLexer $lex):array{
+    $lex->need('TABLE');$name=$lex->identifier();$lex->need('(');$columns=[];$keys=[];
+    do{
+        $first=$lex->peek();$word=strtoupper($first['value']);
+        if($first['type']==='word'&&in_array($word,['PRIMARY','UNIQUE','KEY','INDEX'],true)){
+            $lex->take();$kind=$word==='PRIMARY'?'primary':($word==='UNIQUE'?'unique':'index');$key=['kind'=>$kind,'name'=>null,'columns'=>[]];
+            if($kind==='primary')$lex->need('KEY');elseif($kind==='unique'){$lex->eat('KEY')||$lex->eat('INDEX');}
+            if($kind!=='primary')$key['name']=$lex->identifier();$lex->need('(');
+            do{$part=['name'=>$lex->identifier()];if($lex->eat('(')){$part['length']=wp_restore_sql_integer($lex,3072);if(!$part['length'])throw new \RuntimeException('Empty index prefix.');$lex->need(')');}
+                if($lex->eat('ASC'))$part['order']='ASC';elseif($lex->eat('DESC'))$part['order']='DESC';$key['columns'][]=$part;if(count($key['columns'])>64)throw new \RuntimeException('Too many index parts.');
+            }while($lex->eat(','));$lex->need(')');$keys[]=$key;if(count($keys)>256)throw new \RuntimeException('Too many SQL indexes.');
+        }else{
+            $column=['name'=>$lex->identifier(),'type'=>strtoupper($lex->identifier()),'args'=>[],'attributes'=>[]];$type=$column['type'];
+            if(!in_array($type,['TINYINT','SMALLINT','MEDIUMINT','INT','INTEGER','BIGINT','DECIMAL','NUMERIC','FLOAT','DOUBLE','REAL','BIT','CHAR','VARCHAR','BINARY','VARBINARY','TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT','TINYBLOB','BLOB','MEDIUMBLOB','LONGBLOB','DATE','TIME','DATETIME','TIMESTAMP','YEAR','ENUM','SET'],true))throw new \RuntimeException('Unsupported column type.');
+            if($lex->eat('(')){
+                do{$column['args'][]=in_array($type,['ENUM','SET'],true)?$lex->literal():wp_restore_sql_integer($lex);if(count($column['args'])>256)throw new \RuntimeException('Too many type arguments.');}while($lex->eat(','));$lex->need(')');
+                if(in_array($type,['ENUM','SET'],true)){foreach($column['args']as$arg)if($arg['type']!=='bytes')throw new \RuntimeException('Enum arguments must be strings.');}
+                elseif(count($column['args'])>2)throw new \RuntimeException('Too many numeric type arguments.');
+            }
+            while(!in_array($lex->peek()['value'],[',',')'],true)){
+                $attribute=strtoupper($lex->identifier());$value=true;
+                if($attribute==='NOT'){$lex->need('NULL');$attribute='not_null';}
+                elseif($attribute==='NULL'){$attribute='not_null';$value=false;}
+                elseif($attribute==='CHARACTER'){$lex->need('SET');$attribute='charset';$value=wp_restore_sql_charset($lex->identifier());}
+                elseif($attribute==='COLLATE'){$attribute='collation';$value=wp_restore_sql_collation($lex->identifier());}
+                elseif($attribute==='DEFAULT'||$attribute==='COMMENT'){
+                    $attribute=strtolower($attribute);
+                    if($lex->eat('CURRENT_TIMESTAMP')){$value=['type'=>'current_timestamp'];if($lex->eat('(')){if($lex->peek()['value']!==')')$value['precision']=wp_restore_sql_integer($lex,6);$lex->need(')');}}
+                    else $value=$lex->literal();
+                    if($attribute==='comment'&&$value['type']!=='bytes')throw new \RuntimeException('Column comment must be a string.');
+                }elseif($attribute==='ON'){
+                    $lex->need('UPDATE');$lex->need('CURRENT_TIMESTAMP');$attribute='on_update';$value=['type'=>'current_timestamp'];if($lex->eat('(')){if($lex->peek()['value']!==')')$value['precision']=wp_restore_sql_integer($lex,6);$lex->need(')');}
+                }elseif(in_array($attribute,['UNSIGNED','ZEROFILL','AUTO_INCREMENT'],true))$attribute=strtolower($attribute);
+                else throw new \RuntimeException('Unsupported column attribute.');
+                if(array_key_exists($attribute,$column['attributes']))throw new \RuntimeException('Repeated column attribute.');$column['attributes'][$attribute]=$value;
+            }
+            $fold=strtolower($column['name']);if(isset($columns[$fold]))throw new \RuntimeException('Duplicate column.');$columns[$fold]=$column;if(count($columns)>1000)throw new \RuntimeException('Too many columns.');
+        }
+    }while($lex->eat(','));$lex->need(')');$options=[];
+    while($lex->peek()['type']!=='end'){
+        $word=strtoupper($lex->identifier());if($word==='DEFAULT')$word=strtoupper($lex->identifier());if($word==='CHARACTER'){$lex->need('SET');$word='CHARSET';}$lex->eat('=');
+        if($word==='ENGINE'){$value=strtoupper($lex->identifier());if($value!=='INNODB')throw new \RuntimeException('Only InnoDB dumps are supported.');}
+        elseif($word==='CHARSET')$value=wp_restore_sql_charset($lex->identifier());
+        elseif($word==='COLLATE')$value=wp_restore_sql_collation($lex->identifier());
+        elseif($word==='AUTO_INCREMENT'){$value=$lex->take();if($value['type']!=='number'||!preg_match('/^[0-9]{1,20}$/D',$value['value']))throw new \RuntimeException('Invalid auto increment.');$value=$value['value'];}
+        elseif($word==='ROW_FORMAT'){$value=strtoupper($lex->identifier());if(!in_array($value,['DYNAMIC','COMPACT','REDUNDANT'],true))throw new \RuntimeException('Unsupported row format.');}
+        else throw new \RuntimeException('Unsupported table option.');
+        if(isset($options[$word]))throw new \RuntimeException('Repeated table option.');$options[$word]=$value;
+    }
+    if(!$columns||!isset($options['ENGINE'],$options['CHARSET'],$options['COLLATE']))throw new \RuntimeException('Explicit InnoDB engine, charset and collation are required.');
+    foreach($keys as$key)foreach($key['columns']as$part)if(!isset($columns[strtolower($part['name'])]))throw new \RuntimeException('Index references an unknown column.');
+    return ['kind'=>'create','table'=>$name,'columns'=>array_values($columns),'keys'=>$keys,'options'=>$options];
+}
+function wp_restore_sql_set(WordPressRestoreSqlLexer $lex,array &$meta):void{
+    if($lex->eat('NAMES')){
+        $t=$lex->take();if(!in_array($t['type'],['word','string'],true))throw new \RuntimeException('Invalid dump charset.');$meta['charset']=wp_restore_sql_charset($t['value']);
+        if($lex->eat('COLLATE'))wp_restore_sql_collation($lex->identifier());$lex->end();return;
+    }
+    $saved=['OLD_CHARACTER_SET_CLIENT'=>'CHARACTER_SET_CLIENT','OLD_CHARACTER_SET_RESULTS'=>'CHARACTER_SET_RESULTS','OLD_COLLATION_CONNECTION'=>'COLLATION_CONNECTION','SAVED_CS_CLIENT'=>'CHARACTER_SET_CLIENT','OLD_TIME_ZONE'=>'TIME_ZONE','OLD_UNIQUE_CHECKS'=>'UNIQUE_CHECKS','OLD_FOREIGN_KEY_CHECKS'=>'FOREIGN_KEY_CHECKS','OLD_SQL_MODE'=>'SQL_MODE','OLD_SQL_NOTES'=>'SQL_NOTES'];
+    $readVariable=static function()use($lex):array{
+        $kind='local';if($lex->eat('@'))$kind=$lex->eat('@')?'system':'saved';$name=strtoupper($lex->identifier());
+        if($lex->eat('.')){if($kind!=='system'||$name!=='SESSION')throw new \RuntimeException('Unsupported variable scope.');$name=strtoupper($lex->identifier());}return [$kind,$name];
+    };
+    do{
+        [$kind,$name]=$readVariable();$lex->need('=');
+        if($lex->peek()['value']==='@'){
+            [$rhsKind,$rhs]=$readVariable();
+            if($kind==='saved'){if($rhsKind!=='system'||($saved[$name]??null)!==$rhs)throw new \RuntimeException('Unsupported metadata capture.');}
+            elseif($rhsKind!=='saved'||($saved[$rhs]??null)!==$name)throw new \RuntimeException('Unsupported metadata restore.');
+            elseif(in_array($name,['SQL_MODE','TIME_ZONE'],true))$meta['footer']=true;
+            continue;
+        }
+        if($kind==='saved')throw new \RuntimeException('Arbitrary dump variables are unsupported.');
+        $t=$lex->take();$value=$t['value'];
+        if(in_array($name,['FOREIGN_KEY_CHECKS','UNIQUE_CHECKS','SQL_NOTES','AUTOCOMMIT'],true)){
+            if($t['type']!=='number'||!in_array($value,['0','1'],true))throw new \RuntimeException('Unsupported metadata switch.');
+        }elseif(in_array($name,['CHARACTER_SET_CLIENT','CHARACTER_SET_RESULTS'],true)){
+            if(!in_array($t['type'],['word','string'],true))throw new \RuntimeException('Unsupported charset metadata.');wp_restore_sql_charset($value);
+        }elseif($name==='COLLATION_CONNECTION')wp_restore_sql_collation($value);
+        elseif($name==='TIME_ZONE'){
+            if($t['type']!=='string'||$value!=='+00:00')throw new \RuntimeException('Only explicit UTC dump timestamps are supported.');$meta['utc']=true;
+        }elseif($name==='SQL_MODE'){
+            if($t['type']!=='string')throw new \RuntimeException('Unsupported SQL mode.');
+            $modes=$value===''?[]:explode(',',strtoupper($value));foreach($modes as$mode)if(!in_array($mode,['NO_AUTO_VALUE_ON_ZERO','NO_ENGINE_SUBSTITUTION','STRICT_TRANS_TABLES','STRICT_ALL_TABLES','NO_ZERO_DATE','NO_ZERO_IN_DATE','ERROR_FOR_DIVISION_BY_ZERO','NO_AUTO_CREATE_USER'],true))throw new \RuntimeException('SQL mode changes dump interpretation.');$meta['sql_mode']=$modes;
+        }else throw new \RuntimeException('Unsupported SET operation.');
+    }while($lex->eat(','));$lex->end();
+}
+function wp_restore_sql_parse(string $statement,array &$meta,$out,$hash):void{
+    if(trim($statement)==='')return;$lex=new WordPressRestoreSqlLexer($statement);$command=strtoupper($lex->identifier());
+    if($command==='SET'){wp_restore_sql_set($lex,$meta);wp_restore_sql_frame($out,['kind'=>'settings','sql_mode'=>$meta['sql_mode']??['NO_AUTO_VALUE_ON_ZERO'],'charset'=>$meta['charset']??'utf8mb4','time_zone'=>($meta['utc']??false)?'+00:00':null],$hash);return;}
+    if(($meta['footer']??false)&&!in_array($command,['UNLOCK'],true))throw new \RuntimeException('Data follows a dump footer.');
+    if($command==='UNLOCK'){$lex->need('TABLES');$lex->end();return;}
+    if($command==='DROP'){$lex->need('TABLE');$lex->need('IF');$lex->need('EXISTS');$name=$lex->identifier();$lex->end();$meta['drops'][$name]=true;return;}
+    if($command==='LOCK'){
+        $lex->need('TABLES');do{$name=$lex->identifier();if(!isset($meta['tables'][$name])||!($lex->eat('WRITE')||$lex->eat('READ')))throw new \RuntimeException('Unsupported dump lock.');}while($lex->eat(','));$lex->end();return;
+    }
+    if($command==='ALTER'){$lex->need('TABLE');$name=$lex->identifier();if(!isset($meta['tables'][$name])||!($lex->eat('ENABLE')||$lex->eat('DISABLE')))throw new \RuntimeException('Unsupported ALTER operation.');$lex->need('KEYS');$lex->end();return;}
+    if($command==='CREATE'){
+        $table=wp_restore_sql_create($lex);$lex->end();$name=$table['table'];
+        if(str_starts_with(strtolower($name),'__cms_restore_')||isset($meta['fold'][strtolower($name)])||count($meta['tables'])>=1000)throw new \RuntimeException('Duplicate, reserved or excessive SQL table inventory.');
+        $meta['column_count']=($meta['column_count']??0)+count($table['columns']);if($meta['column_count']>20000)throw new \RuntimeException('Too many SQL columns in the dump.');
+        $meta['fold'][strtolower($name)]=true;$meta['tables'][$name]=$table+['rows'=>0];
+        wp_restore_sql_frame($out,$table,$hash);return;
+    }
+    if($command!=='INSERT')throw new \RuntimeException('Unsupported dump statement.');$lex->need('INTO');$name=$lex->identifier();
+    if(!isset($meta['tables'][$name]))throw new \RuntimeException('INSERT must follow its CREATE TABLE.');$table=$meta['tables'][$name];$all=array_column($table['columns'],'name');$columns=$all;
+    if($lex->eat('(')){$columns=[];do{$columns[]=$lex->identifier();}while($lex->eat(','));$lex->need(')');$sorted=$columns;$expected=$all;sort($sorted);sort($expected);if($sorted!==$expected)throw new \RuntimeException('INSERT must include every column exactly once.');}
+    $lex->need('VALUES');
+    do{
+        $lex->need('(');$values=[];do{$values[]=$lex->literal();if(count($values)>count($columns))throw new \RuntimeException('Too many row values.');}while($lex->eat(','));$lex->need(')');
+        if(count($values)!==count($columns))throw new \RuntimeException('Incomplete SQL row.');
+        $mapped=array_combine($columns,$values);
+        foreach($table['columns']as$definition){
+            if($definition['type']==='TIMESTAMP'&&!($meta['utc']??false))throw new \RuntimeException('Timestamp rows require UTC before their INSERT.');
+            if(!($definition['attributes']['auto_increment']??false))continue;$cell=$mapped[$definition['name']];
+            $integer=$cell['type']==='number'?$cell['value']:($cell['type']==='bytes'?base64_decode($cell['base64'],true):null);
+            if(!is_string($integer)||!preg_match('/^[+-]?[0-9]{1,20}$/D',$integer))throw new \RuntimeException('Auto increment columns require captured literal integer IDs.');
+            if(preg_match('/^[+-]?0+$/D',$integer)&&!in_array('NO_AUTO_VALUE_ON_ZERO',$meta['sql_mode']??[],true))throw new \RuntimeException('Zero IDs require explicit NO_AUTO_VALUE_ON_ZERO before their INSERT.');
+        }
+        $frame=['kind'=>'insert','table'=>$name,'columns'=>$columns,'values'=>$values];wp_restore_sql_frame($out,$frame,$hash);$meta['tables'][$name]['rows']++;$meta['row_count']++;
+        if(str_ends_with($name,'options')){
+            $map=array_combine($columns,$values);$key=$map['option_name']??null;$value=$map['option_value']??null;
+            if(($key['type']??null)==='bytes'&&($value['type']??null)==='bytes'){
+                $key=base64_decode($key['base64'],true);
+                if(in_array($key,['siteurl','home'],true)){
+                    if(isset($meta['urls'][$name][$key]))throw new \RuntimeException('Duplicate WordPress URL option.');$meta['urls'][$name][$key]=wp_restore_target_url(base64_decode($value['base64'],true));
+                }
+            }
+        }
+    }while($lex->eat(','));$lex->end();
+}
+function wp_restore_sql_frame($stream,array $frame,$hash):void{
+    $json=json_encode($frame,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)."\n";
+    // Hash generated source-derived frames, not a possibly altered file readback.
+    hash_update($hash,$json);
+    if(strlen($json)>16777216||ftell($stream)+strlen($json)>1073741824||fwrite($stream,$json)!==strlen($json))throw new \RuntimeException('Private SQL frame too large or incomplete.');
+}
+function wp_restore_sql_metadata(array $run):array{
+    $path=$run['work'].'/sql-catalog.json';$s=wp_restore_file($path,16777216);
+    if(($s['mode']&0077)||!hash_equals($run['sql']['catalog_sha256'],hash_file('sha256',$path)))throw new \RuntimeException('Private SQL catalog changed.');return json_decode(file_get_contents($path),true,64,JSON_THROW_ON_ERROR);
+}
+function wp_restore_sql_metadata_save(array &$run,array $meta):void{
+    $path=$run['work'].'/sql-catalog.next';$f=@fopen($path,'xb');if(!$f)throw new \RuntimeException('Cannot create private SQL catalog.');chmod($path,0600);
+    $json=json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);$ok=strlen($json)<=16777216&&fwrite($f,$json)===strlen($json)&&fflush($f);if($ok&&function_exists('fsync'))$ok=fsync($f);fclose($f);
+    if(!$ok||!rename($path,$run['work'].'/sql-catalog.json'))throw new \RuntimeException('Cannot persist SQL catalog.');$run['sql']['catalog_sha256']=hash('sha256',$json);
+}
+function wp_restore_sql_summary(array $run,array $meta):array{
+    $tables=[];foreach($meta['tables']as$name=>$table){$schema=$table;unset($schema['rows']);$tables[]=['name'=>$name,'target'=>$meta['target_prefix'].substr($name,strlen($meta['source_prefix'])),'columns'=>array_column($table['columns'],'name'),'rows'=>$table['rows'],'schema_sha256'=>hash('sha256',json_encode($schema,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)."\n")];}
+    return ['tables'=>$tables,'source_prefix'=>$meta['source_prefix'],'target_prefix'=>$meta['target_prefix'],'source_url'=>$meta['source_url'],'row_count'=>$meta['row_count'],'data_sha256'=>$meta['data_sha256'],'plan_sha256'=>$run['sql']['plan_sha256']];
+}
+function wp_restore_sql_finish(array &$meta,string $plan,array $run):string{
+    $prefixes=[];
+    foreach($meta['tables']as$name=>$table)if(str_ends_with($name,'options')&&isset($meta['urls'][$name]['siteurl'],$meta['urls'][$name]['home']))$prefixes[]=substr($name,0,-7);
+    if(count($prefixes)!==1||!preg_match('/^[A-Za-z0-9_]{1,40}$/D',$prefixes[0]))throw new \RuntimeException('One unambiguous WordPress prefix and home/siteurl are required.');$prefix=$prefixes[0];
+    foreach(['commentmeta','comments','links','options','postmeta','posts','termmeta','terms','term_relationships','term_taxonomy','usermeta','users']as$suffix)if(!isset($meta['tables'][$prefix.$suffix]))throw new \RuntimeException('Incomplete WordPress core table inventory.');
+    foreach($meta['tables']as$name=>$table){
+        if(!str_starts_with($name,$prefix))throw new \RuntimeException('Foreign-prefix tables require offline migration.');
+        foreach($table['columns']as$column)if($column['type']==='TIMESTAMP'&&!($meta['utc']??false))throw new \RuntimeException('TIMESTAMP requires an explicit UTC dump.');
+    }
+    foreach($meta['drops']as$name=>$unused)if(!isset($meta['tables'][$name]))throw new \RuntimeException('DROP metadata has no complete matching table.');
+    if($meta['urls'][$prefix.'options']['siteurl']!==$meta['urls'][$prefix.'options']['home'])throw new \RuntimeException('Split WordPress URL layouts require offline migration.');
+    $meta['source_prefix']=$prefix;$meta['target_prefix']=wp_restore_configuration()['prefix'];$meta['source_url']=$meta['urls'][$prefix.'options']['siteurl'];
+    $ctx=hash_init('sha256');$whole=hash_init('sha256');$chunk=hash_init('sha256');$index=0;$f=fopen($plan,'rb');
+    try{
+        while(($line=fgets($f,16777218))!==false){
+            if(!str_ends_with($line,"\n"))throw new \RuntimeException('Incomplete SQL plan frame.');hash_update($whole,$line);hash_update($chunk,$line);
+            if(str_starts_with($line,'{"kind":"insert",'))hash_update($ctx,$line);
+            $expected=$meta['plan_chunks'][$index]??null;$offset=ftell($f);
+            if(!$expected||$offset>$expected['end'])throw new \RuntimeException('SQL plan chunk boundary changed.');
+            if($offset===$expected['end']){if(!hash_equals($expected['sha256'],hash_final($chunk)))throw new \RuntimeException('Source-derived SQL plan chunk changed.');$index++;$chunk=hash_init('sha256');}
+        }
+        if($index!==count($meta['plan_chunks']??[]))throw new \RuntimeException('SQL plan is truncated.');
+    }finally{fclose($f);}
+    $meta['data_sha256']=hash_final($ctx);return hash_final($whole);
+}
+function wp_restore_sql_step(array &$run):void{
+    if(PHP_INT_SIZE<8||!function_exists('inflate_init')||!function_exists('inflate_get_read_len')||!function_exists('inflate_get_status'))throw new \RuntimeException('64-bit PHP with zlib required.');
+    $p=$run['sql']??['ready'=>false,'phase'=>'copy','copied'=>0,'expanded'=>0,'processed'=>0,'total'=>0,'plan_bytes'=>0];if($p['ready'])return;
+    $gzip=$run['work'].'/sql-input.gz';$plain=$run['work'].'/sql-input.data';$plan=$run['work'].'/sql-plan.ndjson';
+    if($p['phase']==='copy'){
+        $size=$run['database']['identity']['size'];if($size<18||$size>536870912)throw new \RuntimeException('Unsupported gzip size.');
+        if($p['copied']===0&&!file_exists($gzip)){$f=fopen($gzip,'xb');chmod($gzip,0600);fclose($f);}
+        $s=wp_restore_file($gzip);if(($s['mode']&0077)||$s['size']<$p['copied'])throw new \RuntimeException('Private gzip changed.');$in=fopen($run['root'].'/'.$run['database']['name'],'rb');$out=fopen($gzip,'r+b');
+        try{
+            if(!ftruncate($out,$p['copied'])||fseek($out,$p['copied'])!==0||fseek($in,$p['copied'])!==0)throw new \RuntimeException('Cannot resume gzip copy.');$want=min(8388608,$size-$p['copied']);$got=stream_copy_to_stream($in,$out,$want);
+            if($got!==$want||!fflush($out))throw new \RuntimeException('Incomplete gzip copy.');$p['copied']+=$got;
+        }finally{fclose($in);fclose($out);}
+        if($p['copied']===$size){
+            $p['gzip_sha256']=hash_file('sha256',$gzip);if(!hash_equals($p['gzip_sha256'],hash_file('sha256',$run['root'].'/'.$run['database']['name'])))throw new \RuntimeException('Source gzip changed.');
+            $f=fopen($gzip,'rb');try{$header=fread($f,10);fseek($f,-8,SEEK_END);$footer=unpack('Vcrc/Vsize',fread($f,8));}finally{fclose($f);}
+            if(substr($header,0,3)!=="\x1f\x8b\x08"||(ord($header[3])&224)||!$footer['size']||$footer['size']>536870912)throw new \RuntimeException('Unsupported gzip header or expanded size.');
+            if(disk_free_space($run['work'])<$footer['size']*3+16777216)throw new \RuntimeException('Insufficient private SQL space.');$p['total']=$footer['size'];$p['crc']=sprintf('%08x',$footer['crc']);$p['gzip_identity']=wp_restore_file($gzip);$p['phase']='expand';
+        }
+        $run['sql']=$p;return;
+    }
+    if(wp_restore_file($gzip)!==$p['gzip_identity'])throw new \RuntimeException('Private gzip identity changed.');
+    if($p['phase']==='expand'){
+        if($p['expanded']===0&&!file_exists($plain)){$f=fopen($plain,'xb');chmod($plain,0600);fclose($f);}
+        $s=wp_restore_file($plain,536870912);if(($s['mode']&0077)||$s['size']<$p['expanded'])throw new \RuntimeException('Private SQL expansion changed.');$in=fopen($gzip,'rb');$out=fopen($plain,'r+b');$inflate=inflate_init(ZLIB_ENCODING_GZIP);$sourceHash=hash_init('sha256');
+        try{
+            if(!ftruncate($out,$p['expanded'])||fseek($out,$p['expanded'])!==0)throw new \RuntimeException('Cannot resume gzip expansion.');
+            $written=0;$position=0;$ended=false;
+            while(!feof($in)){
+                $compressed=fread($in,4096);if($compressed===false)throw new \RuntimeException('Cannot read private gzip.');$bytes=@inflate_add($inflate,$compressed,feof($in)?ZLIB_FINISH:ZLIB_SYNC_FLUSH);
+                if($bytes===false)throw new \RuntimeException('Invalid gzip stream or checksum.');$start=$position;$position+=strlen($bytes);hash_update($sourceHash,$bytes);
+                if($position>$p['total'])throw new \RuntimeException('Gzip expanded beyond its declaration.');
+                $piece=$position<=$p['expanded']?'':substr($bytes,max(0,$p['expanded']-$start));$piece=substr($piece,0,8388608-$written);
+                if($piece!==''&&fwrite($out,$piece)!==strlen($piece))throw new \RuntimeException('Incomplete private SQL write.');$written+=strlen($piece);
+                if(inflate_get_status($inflate)===ZLIB_STREAM_END){$ended=true;if(inflate_get_read_len($inflate)!==$p['copied']||$position!==$p['total'])throw new \RuntimeException('Trailing, multiple or incomplete gzip members.');break;}
+                if($written===8388608)break;
+            }
+            if(!$ended&&$written<8388608)throw new \RuntimeException('Truncated gzip stream.');
+            if(!fflush($out))throw new \RuntimeException('Cannot flush private SQL.');$p['expanded']+=$written;$done=$ended&&$p['expanded']===$p['total'];
+        }finally{fclose($in);fclose($out);}
+        if($done){
+            $decodedSha=hash_final($sourceHash);if($p['expanded']!==$p['total']||hash_file('crc32b',$plain)!==$p['crc']||!hash_equals($decodedSha,hash_file('sha256',$plain)))throw new \RuntimeException('Gzip CRC, length or decoded SHA mismatch.');$p['plain_sha256']=$decodedSha;$p['plain_identity']=wp_restore_file($plain);$p['phase']='parse';$run['sql']=$p;
+            wp_restore_sql_metadata_save($run,['tables'=>[],'fold'=>[],'drops'=>[],'urls'=>[],'row_count'=>0]);return;
+        }
+        $run['sql']=$p;return;
+    }
+    if(wp_restore_file($plain)!==$p['plain_identity'])throw new \RuntimeException('Private SQL identity changed.');$meta=wp_restore_sql_metadata($run);
+    if($p['plan_bytes']===0&&!file_exists($plan)){$f=fopen($plan,'xb');chmod($plan,0600);fclose($f);}
+    $s=wp_restore_file($plan,1073741824);if(($s['mode']&0077)||$s['size']<$p['plan_bytes'])throw new \RuntimeException('Private SQL plan changed.');$out=fopen($plan,'r+b');$in=fopen($plain,'rb');$hash=hash_init('sha256');$chunkStart=$p['plan_bytes'];
+    try{
+        if(!ftruncate($out,$p['plan_bytes'])||fseek($out,$p['plan_bytes'])!==0||fseek($in,$p['processed'])!==0)throw new \RuntimeException('Cannot resume SQL parser.');$start=$p['processed'];$done=false;
+        for($n=0;$n<64;$n++){
+            $statement=wp_restore_sql_statement($in);if($statement===null){$done=true;break;}wp_restore_sql_parse($statement,$meta,$out,$hash);if(ftell($in)-$start>=1048576)break;
+        }
+        if(!fflush($out))throw new \RuntimeException('Cannot flush SQL plan.');$p['processed']=ftell($in);$p['plan_bytes']=ftell($out);
+        if($p['plan_bytes']>1073741824)throw new \RuntimeException('SQL plan exceeds 1 GiB.');
+    }finally{fclose($in);fclose($out);}
+    if($p['plan_bytes']>$chunkStart)$meta['plan_chunks'][]=['end'=>$p['plan_bytes'],'sha256'=>hash_final($hash)];
+    if($done){
+        if(!hash_equals($p['plain_sha256'],hash_file('sha256',$plain))||!hash_equals($p['gzip_sha256'],hash_file('sha256',$gzip)))throw new \RuntimeException('SQL source changed while parsing.');
+        $p['plan_sha256']=wp_restore_sql_finish($meta,$plan,$run);$p['ready']=true;$p['phase']='ready';
+    }
+    $run['sql']=$p;wp_restore_sql_metadata_save($run,$meta);
+}
+
 
 $restore_action = $_GET['action'] ?? null;
 if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'], true)) {
@@ -1671,6 +2004,11 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
                     return array_intersect_key($entry, array_flip(['path','size','sha256','disposition']));
                 }, wp_restore_files_manifest($run));
             } catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Private file manifest changed.']); }
+        }
+        if ($run && ($_GET['manifest'] ?? null) === 'sql' && ($run['sql']['ready'] ?? false)) {
+            try {
+                $public['sql_manifest'] = wp_restore_sql_summary($run, wp_restore_sql_metadata($run));
+            } catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Private SQL catalog changed.']); }
         }
         site_report_api_reply(200, ['run'=>$public]);
     }
