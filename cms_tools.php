@@ -825,9 +825,10 @@ function current_url() {
 function check_cmd($cmd) {
     if (function_exists('exec')) {
         $out = []; $ret = 0;
-        exec('which ' . escapeshellarg($cmd) . ' 2>/dev/null', $out, $ret);
+        $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        exec('which ' . escapeshellarg($cmd) . ' 2>' . $null, $out, $ret);
         if ($ret === 0 && !empty($out[0])) return $out[0];
-        exec('where ' . escapeshellarg($cmd) . ' 2>NUL', $out, $ret); // Windows
+        exec('where ' . escapeshellarg($cmd) . ' 2>' . $null, $out, $ret); // Keep the existing fallback order.
         if ($ret === 0 && !empty($out[0])) return $out[0];
     }
     return false;

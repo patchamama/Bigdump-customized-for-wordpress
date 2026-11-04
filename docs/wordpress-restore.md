@@ -234,6 +234,27 @@ This database adapter/confirmation flow is not implemented yet.
 
 ## Local checks
 
+CLI availability probes preserve their `which` / `where` lookup order and use the
+platform's null device for stderr. On POSIX, a missing binary must not create a
+`NUL` file and invalidate the backup-only hosting inventory after login.
+
+```sh
+php tests/wordpress-restore-probes.php
+```
+
+The optional native admission fixture requires an explicit local Docker Unix
+endpoint and an existing immutable image containing PHP/PDO MySQL, ZIP/zlib and
+MariaDB client/server tools. It never pulls an image, publishes a port or mounts
+host data. It validates ownership before stopping/removing its disposable
+container and retains receipts under `.atl/wordpress-restore-native-proof/`.
+This checks admission/private preparation and unchanged synthetic old data, not
+backup recovery, database import, public placement or WordPress runtime.
+
+```sh
+python3 tests/wordpress-restore-native.py \
+  --endpoint "$RESTORE_TEST_DOCKER_ENDPOINT" --image "$RESTORE_TEST_IMAGE_ID"
+```
+
 ```sh
 # Use a project-owned TMPDIR when running the disposable HTTP fixtures.
 mkdir -p .atl/wordpress-restore-proof/tmp
