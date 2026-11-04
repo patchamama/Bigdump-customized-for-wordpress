@@ -1610,7 +1610,7 @@ function wp_restore_files_step(array &$run) {
 
 function wp_restore_public(array $run) {
     $preflight = [];
-    foreach (['files','sql'] as $part) {
+    foreach (isset($run['values']) ? ['files','sql','values'] : ['files','sql'] as $part) {
         $p = $run[$part] ?? [];
         $preflight[$part] = ['ready'=>($p['ready'] ?? false) === true,
             'processed'=>max(0, (int)($p['processed'] ?? 0)), 'total'=>max(0, (int)($p['total'] ?? 0))];
@@ -1956,6 +1956,253 @@ function wp_restore_sql_step(array &$run):void{
 }
 
 
+// Byte syntax only: never instantiate, unserialize or evaluate backup objects.
+class WordPressRestoreValues {
+    private string $source;
+    private string $target;
+    private int $nodes=0;
+    private int $bytes=0;
+    private int $emitted=0;
+    private array $references=[];
+    public function __construct(string $source,string $target){$this->source=$source;$this->target=$target;}
+    private function append(string &$out,string $piece):void{
+        $length=strlen($piece);
+        if($length>8388608-strlen($out)||$length>33554432-$this->emitted)throw new \RuntimeException('Prepared value or aggregate output limit.');
+        $this->emitted+=$length;
+        $out.=$piece;
+    }
+    public function urls(string $text):string{
+        foreach([[$this->source,$this->target],[str_replace('/','\\/',$this->source),str_replace('/','\\/',$this->target)]]as[$source,$target]){
+            $literal=preg_quote($source,'~');
+            // A closing HTML single quote is a delimiter only in a quoted URL.
+            $quoted='(?<=\\x27)'.$literal.'(?=\\x27)';
+            $ordinary='(?<![A-Za-z0-9_@:/\\x5c.-])'.$literal.'(?![A-Za-z0-9._%+!$&\\x27()*,;=:@\\x7e-])';
+            $pattern='~(?:'.$quoted.'|'.$ordinary.')~';$offset=0;$out='';
+            while(preg_match($pattern,$text,$match,PREG_OFFSET_CAPTURE,$offset)){
+                $at=$match[0][1];$this->append($out,substr($text,$offset,$at-$offset));$this->append($out,$target);$offset=$at+strlen($source);
+            }
+            $this->append($out,substr($text,$offset));$text=$out;
+        }
+        return $text;
+    }
+    public function text(string $text,int $depth=0):string{
+        $this->bytes+=strlen($text);if($depth>32||strlen($text)>8388608||$this->bytes>33554432)throw new \RuntimeException('Value recursion or aggregate byte limit.');
+        if(!preg_match('/^(?:[A-Za-z]:|N;)/',$text))return $this->urls($text);
+        $outerReferences=$this->references;$this->references=[];$offset=0;
+        try{
+            $out=$this->token($text,$offset,$depth);
+            if($offset!==strlen($text))throw new \RuntimeException('Trailing serialized bytes.');
+            return $out;
+        }finally{$this->references=$outerReferences;}
+    }
+    private function match(string $text,int &$offset,string $pattern):array{
+        if(!preg_match('~\\G'.$pattern.'~D',$text,$m,0,$offset))throw new \RuntimeException('Unsupported serialized syntax.');$offset+=strlen($m[0]);return $m;
+    }
+    private function key(string $encoded):string{
+        if($encoded[0]==='i')return 'i:'.(string)(int)substr($encoded,2,-1);
+        if($encoded[0]!=='s')throw new \RuntimeException('Unsupported serialized key.');
+        preg_match('/^s:([0-9]+):"/',$encoded,$m);$key=substr($encoded,strlen($m[0]),(int)$m[1]);
+        if((string)(int)$key===$key)return 'i:'.$key;return 's:'.$key;
+    }
+    private function token(string $text,int &$offset,int $depth,bool $isKey=false):string{
+        if($depth>32||++$this->nodes>20000)throw new \RuntimeException('Serialized depth or node limit.');$start=$offset;$tag=$text[$offset]??'';
+        if(!$isKey&&!in_array($tag,['R','r'],true))$this->references[count($this->references)+1]=$tag;
+        if(in_array($tag,['N','b','i','d','R','r'],true)){
+            $pattern=match($tag){'N'=>'N;','b'=>'b:[01];','i'=>'i:[+-]?[0-9]{1,19};','d'=>'d:(?:NAN|[+-]?INF|[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?);',default=>'[Rr]:[1-9][0-9]{0,9};'};
+            $token=$this->match($text,$offset,$pattern)[0];
+            if($tag==='R'||$tag==='r'){
+                $reference=(int)substr($token,2,-1);$kind=$this->references[$reference]??null;
+                if($kind===null||($tag==='r'&&!in_array($kind,['O','C','E'],true)))throw new \RuntimeException('Invalid serialized reference.');
+                // R aliases an existing slot; r is an additional object value slot.
+                if($tag==='r')$this->references[count($this->references)+1]=$kind;
+            }
+            return $token;
+        }
+        if($tag==='s'||$tag==='E'){
+            $m=$this->match($text,$offset,$tag.':([0-9]{1,8}):"');$length=(int)$m[1];
+            if($length>8388608||$offset+$length+2>strlen($text)||substr($text,$offset+$length,2)!=='";')throw new \RuntimeException('Serialized byte length mismatch.');
+            $value=substr($text,$offset,$length);$offset+=$length+2;$changed=$tag==='s'?$this->text($value,$depth+1):$this->urls($value);
+            if($tag==='E'&&$changed!==$value)throw new \RuntimeException('Opaque enum rewriting is unsupported.');
+            return $changed===$value?substr($text,$start,$offset-$start):'s:'.strlen($changed).':"'.$changed.'";';
+        }
+        if($tag==='a')$m=$this->match($text,$offset,'a:([0-9]{1,5}):\\{');
+        elseif($tag==='O'||$tag==='C'){
+            $m=$this->match($text,$offset,$tag.':([0-9]{1,3}):"');$length=(int)$m[1];$class=substr($text,$offset,$length);$offset+=$length;
+            if(!$length||!preg_match('/^[A-Za-z_\\\\][A-Za-z0-9_\\\\]*$/D',$class))throw new \RuntimeException('Unsupported serialized class name.');
+            $m=$this->match($text,$offset,'":([0-9]{1,8}):\\{');
+            if($tag==='C'){
+                $length=(int)$m[1];if($length>8388608||$offset+$length>=strlen($text)||$text[$offset+$length]!=='}')throw new \RuntimeException('Invalid custom serialized payload.');
+                $payload=substr($text,$offset,$length);if($this->urls($payload)!==$payload)throw new \RuntimeException('Custom serialization cannot be rewritten safely.');$offset+=$length+1;return substr($text,$start,$offset-$start);
+            }
+        }else throw new \RuntimeException('Unsupported serialized token.');
+        $count=(int)$m[1];if($count>10000)throw new \RuntimeException('Serialized member limit.');$out=substr($text,$start,$offset-$start);$keys=[];
+        for($i=0;$i<$count;$i++){
+            if(!in_array($text[$offset]??'',['s','i'],true)||($tag==='O'&&$text[$offset]!=='s'))throw new \RuntimeException('Unsupported serialized member key.');
+            $key=$this->token($text,$offset,$depth+1,true);$identity=$this->key($key);if(isset($keys[$identity]))throw new \RuntimeException('Serialized key collision.');$keys[$identity]=true;
+            $this->append($out,$key);$this->append($out,$this->token($text,$offset,$depth+1));
+        }
+        if(($text[$offset++]??null)!=='}')throw new \RuntimeException('Incomplete serialized container.');$this->append($out,'}');return $out;
+    }
+}
+function wp_restore_values_metadata(array $run):array{
+    $path=$run['work'].'/values-catalog.json';$s=wp_restore_file($path,16777216);
+    if(($s['mode']&0077)||!hash_equals($run['values']['catalog_sha256'],hash_file('sha256',$path)))throw new \RuntimeException('Private values catalog changed.');return json_decode(file_get_contents($path),true,64,JSON_THROW_ON_ERROR);
+}
+function wp_restore_values_metadata_save(array &$run,array $meta):void{
+    $path=$run['work'].'/values-catalog.next';$f=@fopen($path,'xb');if(!$f)throw new \RuntimeException('Cannot create values catalog.');chmod($path,0600);
+    $json=json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);$ok=strlen($json)<=16777216&&fwrite($f,$json)===strlen($json)&&fflush($f);if($ok&&function_exists('fsync'))$ok=fsync($f);fclose($f);
+    if(!$ok||!rename($path,$run['work'].'/values-catalog.json'))throw new \RuntimeException('Cannot save values catalog.');$run['values']['catalog_sha256']=hash('sha256',$json);
+}
+function wp_restore_values_text_column(array $column):bool{return in_array($column['type'],['CHAR','VARCHAR','TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT','ENUM','SET'],true);}
+function wp_restore_values_fit(string $value,array $column):void{
+    if(!preg_match('//u',$value))throw new \RuntimeException('Changed text must be valid UTF-8.');$type=$column['type'];
+    $max=['TINYTEXT'=>255,'TEXT'=>65535,'MEDIUMTEXT'=>16777215,'LONGTEXT'=>8388608];
+    if(isset($max[$type])&&strlen($value)>$max[$type])throw new \RuntimeException('Changed text exceeds column capacity.');
+    if(in_array($type,['CHAR','VARCHAR'],true)){
+        if(count($column['args'])!==1||preg_match_all('/./us',$value)>$column['args'][0])throw new \RuntimeException('Changed text exceeds character capacity.');
+    }elseif(in_array($type,['ENUM','SET'],true)){
+        $choices=array_map(static fn($v)=>base64_decode($v['base64'],true),$column['args']);$parts=$type==='SET'?explode(',',$value):[$value];
+        foreach($parts as$part)if(!in_array($part,$choices,true)&&!($type==='SET'&&$value===''))throw new \RuntimeException('Changed value is outside its prepared type.');
+    }elseif(!isset($max[$type]))throw new \RuntimeException('Uncertain text conversion.');
+}
+function wp_restore_values_cell(array $cell,array $column,WordPressRestoreValues $rewrite):array{
+    // Binary/hex/numeric/NULL tokens are not text. Preserve their exact typed identity.
+    if($cell['type']!=='bytes'||!wp_restore_values_text_column($column))return $cell;
+    $before=base64_decode($cell['base64'],true);if($before===false)throw new \RuntimeException('Invalid typed text.');$after=$rewrite->text($before);
+    if($before!==$after){wp_restore_values_fit($after,$column);$cell['base64']=base64_encode($after);}return $cell;
+}
+function wp_restore_values_name(string $key,string $scope,array $source):string{
+    $prefix=$source['source_prefix'];$target=$source['target_prefix'];
+    if($scope==='options')return $key===$prefix.'user_roles'?$target.'user_roles':$key;
+    return str_starts_with($key,$prefix)?$target.substr($key,strlen($prefix)):$key;
+}
+function wp_restore_values_init(array $source,WordPressRestoreValues $rewrite):array{
+    $meta=['tables'=>[],'seen_options'=>[],'seen_meta'=>[],'plugins'=>0,'omitted_rows'=>0,'row_count'=>0,'chunks'=>[]];$prefix=$source['source_prefix'];
+    foreach($source['tables']as$name=>$table){
+        unset($table['rows']);$table['table']=$source['target_prefix'].substr($name,strlen($prefix));
+        if(strlen($table['table'])>64)throw new \RuntimeException('Destination table name is too long.');
+        foreach($table['columns']as&$column){
+            if($name===$prefix.'posts'&&$column['name']==='guid')continue;
+            $scope=$name===$prefix.'options'&&$column['name']==='option_name'?'options':($name===$prefix.'usermeta'&&$column['name']==='meta_key'?'usermeta':null);
+            if(in_array($column['type'],['ENUM','SET'],true)){
+                $seen=[];
+                foreach($column['args']as&$arg){
+                    $old=base64_decode($arg['base64'],true);
+                    $new=$scope!==null?wp_restore_values_name($old,$scope,$source):$rewrite->text($old);
+                    if($old!==$new&&!preg_match('//u',$new))throw new \RuntimeException('Changed type member must be UTF-8.');
+                    if($column['type']==='SET'&&str_contains($new,','))throw new \RuntimeException('Ambiguous SET member.');
+                    $fold=strtolower($new);
+                    if(isset($seen[$fold]))throw new \RuntimeException('Prepared type member collision.');
+                    $seen[$fold]=true;
+                    $arg['base64']=base64_encode($new);
+                }
+                unset($arg);
+            }
+            if(isset($column['attributes']['default'])){
+                $default=$column['attributes']['default'];
+                if($scope!==null&&$default['type']==='bytes'){
+                    $old=base64_decode($default['base64'],true);
+                    $new=wp_restore_values_name($old,$scope,$source);
+                    if($old!==$new){wp_restore_values_fit($new,$column);$default['base64']=base64_encode($new);}
+                    $column['attributes']['default']=$default;
+                }else $column['attributes']['default']=wp_restore_values_cell($default,$column,$rewrite);
+            }
+        }unset($column);
+        $meta['tables'][$name]=['schema'=>$table,'rows'=>0];
+    }
+    foreach(['options'=>['option_name','option_value'],'usermeta'=>['user_id','meta_key','meta_value'],'posts'=>['guid']]as$suffix=>$required){
+        $columns=array_column($meta['tables'][$prefix.$suffix]['schema']['columns'],null,'name');
+        foreach($required as$key)if(!isset($columns[$key])||($key!=='user_id'&&!wp_restore_values_text_column($columns[$key])))throw new \RuntimeException('Required core column mapping is unsupported.');
+        if($suffix==='usermeta'&&!in_array($columns['user_id']['type'],['BIGINT','INT','INTEGER','MEDIUMINT','SMALLINT'],true))throw new \RuntimeException('Unsupported user identity column.');
+    }
+    return $meta;
+}
+function wp_restore_values_key(array &$seen,string $destination,string $original):void{
+    // Core key collations are not PHP array-key semantics. Reject non-ASCII
+    // uncertainty and conservatively detect ASCII case-insensitive collisions.
+    if(!preg_match('/^[\\x20-\\x7e]*$/D',$destination))throw new \RuntimeException('Non-ASCII core keys require offline migration.');$destination=strtolower($destination);
+    if(isset($seen[$destination])&&$seen[$destination]!==$original)throw new \RuntimeException('Prefix rewrite key collision.');$seen[$destination]=$original;
+    if(count($seen)>100000)throw new \RuntimeException('Too many scoped keys.');
+}
+function wp_restore_values_row(array $frame,array &$meta,array $source,WordPressRestoreValues $rewrite):?array{
+    $name=$frame['table'];$schema=$meta['tables'][$name]['schema'];$columns=array_column($schema['columns'],null,'name');$row=array_combine($frame['columns'],$frame['values']);$prefix=$source['source_prefix'];
+    if($name===$prefix.'options'){
+        if($row['option_name']['type']!=='bytes'||$row['option_value']['type']!=='bytes')throw new \RuntimeException('Core option text must be explicit strings.');$key=base64_decode($row['option_name']['base64'],true);
+        if(str_starts_with($key,'_transient_')||str_starts_with($key,'_site_transient_')){$meta['omitted_rows']++;return null;}
+        $destination=wp_restore_values_name($key,'options',$source);wp_restore_values_key($meta['seen_options'],$destination,$key);
+        if($key==='active_plugins'){if(++$meta['plugins']!==1)throw new \RuntimeException('Duplicate active_plugins option.');$row['option_value']=['type'=>'bytes','base64'=>base64_encode('a:0:{}')];wp_restore_values_fit('a:0:{}',$columns['option_value']);}
+        if($destination!==$key){wp_restore_values_fit($destination,$columns['option_name']);$row['option_name']['base64']=base64_encode($destination);}
+    }
+    if($name===$prefix.'usermeta'){
+        if($row['meta_key']['type']!=='bytes')throw new \RuntimeException('Core meta key must be explicit text.');$key=base64_decode($row['meta_key']['base64'],true);$id=$row['user_id'];
+        $id=$id['type']==='number'?$id['value']:($id['type']==='bytes'?base64_decode($id['base64'],true):'');if(!preg_match('/^[+]?[0-9]{1,20}$/D',$id))throw new \RuntimeException('Uncertain user identity.');$id=ltrim(ltrim($id,'+'),'0');
+        $destination=wp_restore_values_name($key,'usermeta',$source);wp_restore_values_key($meta['seen_meta'],$id.':'.$destination,$key);
+        if($destination!==$key){wp_restore_values_fit($destination,$columns['meta_key']);$row['meta_key']['base64']=base64_encode($destination);}
+    }
+    foreach($row as$key=>&$cell){
+        if(($name===$prefix.'posts'&&$key==='guid')||($name===$prefix.'options'&&$key==='option_name')||($name===$prefix.'usermeta'&&$key==='meta_key'))continue;
+        $cell=wp_restore_values_cell($cell,$columns[$key],$rewrite);
+    }unset($cell);
+    $frame['table']=$schema['table'];$frame['values']=array_values($row);$meta['tables'][$name]['rows']++;$meta['row_count']++;return $frame;
+}
+// Capture only a bounded frame batch, but authenticate ALL source bytes and the
+// source-generated ledger before transforming any captured bytes. No readback blessing.
+function wp_restore_values_source(array $run,array $source,int $offset):array{
+    $path=$run['work'].'/sql-plan.ndjson';$s=wp_restore_file($path,1073741824);
+    if(($s['mode']&0077)||$s['size']!==$run['sql']['plan_bytes'])throw new \RuntimeException('SQL plan identity changed.');
+    $f=fopen($path,'rb');$whole=hash_init('sha256');$chunk=hash_init('sha256');$index=0;$position=0;$lines=[];$end=$offset;$captured=0;
+    try{
+        while(($line=fgets($f,16777218))!==false){
+            $start=$position;$position+=strlen($line);if(!str_ends_with($line,"\n"))throw new \RuntimeException('Incomplete source frame.');hash_update($whole,$line);hash_update($chunk,$line);
+            $expected=$source['plan_chunks'][$index]??null;if(!$expected||$position>$expected['end'])throw new \RuntimeException('Source chunk boundary changed.');
+            if($start===$end&&count($lines)<32&&$captured<1048576){$lines[]=$line;$captured+=strlen($line);$end=$position;}
+            if($position===$expected['end']){if(!hash_equals($expected['sha256'],hash_final($chunk)))throw new \RuntimeException('Source chunk changed.');$index++;$chunk=hash_init('sha256');}
+        }
+    }finally{fclose($f);}
+    if($index!==count($source['plan_chunks'])||$position!==$s['size']||!hash_equals($run['sql']['plan_sha256'],hash_final($whole))||($offset<$position&&!$lines))throw new \RuntimeException('Source plan authentication failed.');return [$lines,$end];
+}
+function wp_restore_values_verify(string $path,array $meta):array{
+    $s=wp_restore_file($path,1073741824);if($s['mode']&0077)throw new \RuntimeException('Prepared plan permissions changed.');
+    $f=fopen($path,'rb');$whole=hash_init('sha256');$chunk=hash_init('sha256');$data=hash_init('sha256');$index=0;
+    try{
+        while(($line=fgets($f,16777218))!==false){
+            if(!str_ends_with($line,"\n"))throw new \RuntimeException('Prepared frame truncated.');hash_update($whole,$line);hash_update($chunk,$line);if(str_starts_with($line,'{"kind":"insert",'))hash_update($data,$line);
+            $expected=$meta['chunks'][$index]??null;$offset=ftell($f);if(!$expected||$offset>$expected['end'])throw new \RuntimeException('Prepared chunk boundary changed.');
+            if($offset===$expected['end']){if(!hash_equals($expected['sha256'],hash_final($chunk)))throw new \RuntimeException('Generated prepared chunk changed.');$index++;$chunk=hash_init('sha256');}
+        }
+    }finally{fclose($f);}
+    if($index!==count($meta['chunks']))throw new \RuntimeException('Prepared chunks missing.');return [hash_final($whole),hash_final($data)];
+}
+function wp_restore_values_summary(array $run,array $meta):array{
+    $tables=[];foreach($meta['tables']as$table){$schema=$table['schema'];$tables[]=['name'=>$schema['table'],'columns'=>array_column($schema['columns'],'name'),'rows'=>$table['rows'],'schema_sha256'=>hash('sha256',json_encode($schema,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)."\n")];}
+    return ['tables'=>$tables,'row_count'=>$meta['row_count'],'omitted_rows'=>$meta['omitted_rows'],'plugins_disabled'=>$meta['plugins']===1,'source_plan_sha256'=>$run['sql']['plan_sha256'],'plan_sha256'=>$run['values']['plan_sha256'],'data_sha256'=>$meta['data_sha256']];
+}
+function wp_restore_values_step(array &$run):void{
+    if(!($run['sql']['ready']??false))throw new \RuntimeException('Ready source plan required.');$source=wp_restore_sql_metadata($run);$p=$run['values']??['ready'=>false,'processed'=>0,'total'=>$run['sql']['plan_bytes'],'plan_bytes'=>0];
+    [$lines,$end]=wp_restore_values_source($run,$source,$p['processed']);$rewrite=new WordPressRestoreValues($source['source_url'],$run['target_url']);
+    $meta=isset($run['values'])?wp_restore_values_metadata($run):wp_restore_values_init($source,$rewrite);$path=$run['work'].'/values-plan.ndjson';
+    if($p['ready']){[$sha]=wp_restore_values_verify($path,$meta);if(!hash_equals($p['plan_sha256'],$sha))throw new \RuntimeException('Ready prepared plan changed.');return;}
+    if($p['plan_bytes']===0&&!file_exists($path)){$f=fopen($path,'xb');chmod($path,0600);fclose($f);}
+    $s=wp_restore_file($path,1073741824);if(($s['mode']&0077)||$s['size']<$p['plan_bytes'])throw new \RuntimeException('Prepared plan changed.');$out=fopen($path,'r+b');$hash=hash_init('sha256');$start=$p['plan_bytes'];
+    try{
+        if(!ftruncate($out,$start)||fseek($out,$start)!==0)throw new \RuntimeException('Cannot resume values output.');
+        foreach($lines as$line){
+            $frame=json_decode($line,true,64,JSON_THROW_ON_ERROR);
+            if($frame['kind']==='create')$frame=$meta['tables'][$frame['table']]['schema'];
+            elseif($frame['kind']==='insert')$frame=wp_restore_values_row($frame,$meta,$source,$rewrite);
+            elseif($frame['kind']!=='settings')throw new \RuntimeException('Unsupported typed source frame.');
+            if($frame!==null){$bytes=strlen(json_encode($frame,JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR))+1;if(ftell($out)-$start+$bytes>33554432)throw new \RuntimeException('Prepared batch growth limit.');wp_restore_sql_frame($out,$frame,$hash);}
+        }
+        if(!fflush($out))throw new \RuntimeException('Cannot flush values plan.');$p['plan_bytes']=ftell($out);
+    }finally{fclose($out);}
+    if($p['plan_bytes']>$start)$meta['chunks'][]=['end'=>$p['plan_bytes'],'sha256'=>hash_final($hash)];$p['processed']=$end;
+    if($end===$p['total']){
+        if($meta['plugins']!==1)throw new \RuntimeException('One explicit active_plugins option is required.');
+        [$p['plan_sha256'],$meta['data_sha256']]=wp_restore_values_verify($path,$meta);$p['ready']=true;
+    }
+    $run['values']=$p;wp_restore_values_metadata_save($run,$meta);
+}
+
 $restore_action = $_GET['action'] ?? null;
 if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'], true)) {
     if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
@@ -2010,6 +2257,10 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
                 $public['sql_manifest'] = wp_restore_sql_summary($run, wp_restore_sql_metadata($run));
             } catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Private SQL catalog changed.']); }
         }
+        if ($run && ($_GET['manifest'] ?? null) === 'values' && ($run['values']['ready'] ?? false)) {
+            try { $public['values_manifest'] = wp_restore_values_summary($run, wp_restore_values_metadata($run)); }
+            catch (\Throwable $e) { site_report_api_reply(409, ['error'=>'Private values catalog changed.']); }
+        }
         site_report_api_reply(200, ['run'=>$public]);
     }
     if (!is_string($_POST['run_id'] ?? null) || !is_string($_POST['stage'] ?? null)) site_report_api_reply(400, ['error'=>'Invalid restore step.']);
@@ -2017,9 +2268,9 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
-    $handler = __NAMESPACE__ . ($operation === 'files' ? '\\wp_restore_files_step' : '\\wp_restore_sql_step');
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);

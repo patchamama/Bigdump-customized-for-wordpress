@@ -338,7 +338,10 @@ new updater nor report/API features provide a production promotion operation.
   This action does **not generate a database dump**.
   Archives can contain private configuration/content; keep them private.
 - **Backup restoration preparation** — authenticated detection of backup-only hosting
-  and private ZIP staging plus restricted gzip/SQL preflight (no SQL execution).
+  and private ZIP staging, restricted gzip/SQL preflight and separate typed value
+  preparation (no SQL execution). The private plan rewrites supported URL/serialized
+  values and permission prefixes, preserves GUIDs, disables plugins and omits transient
+  cache rows. This is not live migration or runtime/plugin certification.
   Database replacement and public placement are not enabled
   yet; see
   [scope and safeguards](docs/wordpress-restore.md).

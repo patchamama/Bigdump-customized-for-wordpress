@@ -172,8 +172,11 @@ Estas son herramientas existentes; no todas fueron recertificadas por las prueba
 
 La nueva detección de backups ofrece **preparar** una restauración autenticada en un
 hosting sin core instalado, validar/descomprimir el ZIP y preparar un plan SQL
-restringido desde gzip en almacenamiento privado, sin ejecutar SQL. Todavía no
-habilita reemplazar tablas ni publicar los archivos restaurados.
+restringido desde gzip en almacenamiento privado, sin ejecutar SQL. Otro paso
+privado prepara URLs/serialización admitida y prefijos de permisos, conserva GUIDs,
+desactiva plugins en el plan y omite filas de caché transient. No migra una base viva
+ni certifica WordPress o plugins funcionando. Todavía no habilita reemplazar tablas
+ni publicar los archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
 | Instaladores | WordPress y phpMyAdmin. El instalador histórico no es un actualizador completo de una instalación existente. |

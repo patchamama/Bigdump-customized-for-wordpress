@@ -1,6 +1,6 @@
 # WordPress backup restoration
 
-**Current scope: detection, preparation, private ZIP staging and restricted SQL preflight only.** The browser offers preparation
+**Current scope: detection, preparation, private ZIP staging, restricted SQL preflight and private value preparation only.** The browser offers preparation
 when the application directory contains the tool, a literal `wp-config.php`,
 `hosting_*.zip` and `db_*.sql.gz` backups, but no installed core or unrelated files.
 The tool's own `.migrate_config` is allowed. Multiple backups require explicit
@@ -11,7 +11,7 @@ and choose **Prepare restoration**. This creates a private, server-owned preflig
 run. It does **not** extract backup code, connect to the database, back up or drop
 tables, import SQL, activate plugins, change configuration or replace the site.
 Database replacement/import and public file placement remain unavailable. The
-private file/SQL preflight adapters are available through the session protocol below;
+private file/SQL/value preflight adapters are available through the session protocol below;
 this is not a complete restoration wizard. SQL readiness means a privately parsed
 plan, not database compatibility, an old-data backup, recovery or permission to import.
 
@@ -134,6 +134,88 @@ cualquier importación. `manifest=sql` muestra metadatos y huellas, nunca filas 
 rutas privadas. «Listo» no certifica compatibilidad, respaldo previo, recuperación ni
 WordPress funcionando; el reemplazo sigue deshabilitado.
 
+## Private value preparation — not a live migration
+
+After SQL preflight is ready, use authenticated `POST ?action=wp_restore_step` with
+`csrf`, `run_id`, `stage=preflight`, **`operation=values`** and the current `revision`.
+This prepares a **new** typed private plan; it never changes the original SQL plan,
+selected inputs, destination credentials or live database. Existing preparation,
+state and manifest responses stay unchanged until values preparation advances.
+There is no values button or import/placement adapter yet.
+
+| Prepared-plan rule | Result |
+|---|---|
+| Source site-base URL | Rewrite to the confirmed target URL at conservative URL boundaries, including slash-escaped JSON URLs and supported nested serialized strings. Preserve other hosts, emails and neighboring paths. |
+| `posts.guid` | Never rewrite, including its default: GUIDs are feed identities, not navigational links. |
+| Tables and permissions | Structurally map table names to the literal destination config prefix. Map the exact role option name and prefix-starting usermeta keys, including compatible key defaults/type members. Do not blanket-replace prefixes in business values. |
+| `active_plugins` | Require exactly one explicit option and prepare `a:0:{}`. `plugins_disabled` describes this private plan only, not a change to running WordPress. |
+| Cache | Omit `_transient_` and `_site_transient_` option rows. Persistent business options, credentials and unrelated keys remain. T2 separately holds disk caches, MU plugins and drop-ins. |
+
+### Supported value profile and limits
+
+The byte-syntax reader supports PHP serialized strings, arrays and ordinary `O`
+object representations **without instantiating classes or calling hooks**. It repairs
+only changed string byte lengths; unchanged token spelling, numeric/NULL values and
+reference markers remain exact. Serialized strings can contain nested serialization,
+UTF-8, NULs and quotes. This is bounded syntax preparation, not certification that an
+arbitrary class/reference graph or plugin will work in WordPress. No `unserialize`,
+backup PHP/config execution, SQL-text replacement or legacy import helper is used.
+
+- A value beginning with a serialization-like one-letter tag must parse completely.
+  Malformed/unknown tokens fail closed. Custom `C` payloads and opaque `E` enum tokens
+  are retained byte-for-byte only when no URL rewrite is needed; otherwise reject.
+  Binary/hex SQL literals, non-text columns and numeric/NULL tokens remain typed and
+  untouched. This is **not** a decoder for every encoded or hardcoded URL.
+- Changed text must remain valid UTF-8 and fit its declared text/character capacity;
+  prepared defaults, ENUM/SET choices and changed row values must agree. SET members
+  containing commas, detected key/type-member collisions, missing required core
+  columns and absent/duplicate plugin activation options reject readiness. Core
+  option/usermeta key matching is restricted to printable ASCII and conservatively
+  checks ASCII case-insensitive collisions; other key/collation layouts need offline
+  migration. Target-server type/collation compatibility is still unverified.
+- Limits: 8 MiB per decoded/output value; depth 32; 10,000 members/container;
+  20,000 serialized nodes and 32 MiB aggregate input/emitted syntax bytes per step
+  (nested/repeated passes count toward these conservative quotas). At most 32 source
+  frames or 1 MiB are selected per step; one frame remains indivisible. Generated
+  batches are limited to 32 MiB, catalogs to 16 MiB, scoped-key inventory to 100,000
+  and plans to 1 GiB. Existing SQL frame limits also apply. These limits can reject
+  large valid backups; they do not promise a universal HTTP/CPU/memory deadline.
+- Every step rereads/authenticates the complete immutable source plan against its
+  final SHA and original source-generated chunk ledger **before transformation**;
+  the captured bytes are the authenticated bytes actually transformed. This costs
+  repeated source reads. Private metadata binds hashes of generated output chunks;
+  all chunks are verified before readiness, not merely hashed after tampering.
+  A future executor **must recheck the final prepared-plan SHA before consumption**.
+
+`GET ?action=wp_restore_state&manifest=values` adds `values_manifest` only when ready:
+`tables` (destination names, column names, row counts, `schema_sha256`), `row_count`,
+`omitted_rows`, `plugins_disabled`, `source_plan_sha256`, `plan_sha256` and
+`data_sha256`. CREATE/INSERT fingerprints use the same canonical JSON/LF encoding
+as SQL preflight; no cells, defaults, base64 data, credentials or private paths are
+public. `preflight.values` adds only `ready`, `processed` and `total`; byte counters
+refer to the original typed plan. Errors use the existing bounded preflight JSON
+and do not advance the public checkpoint. `manifest=sql` and `manifest=1` keep their
+original meanings. Backup/runtime/replacement flags remain **false**.
+
+**Español:** después de `operation=sql`, `operation=values` prepara otro plan privado:
+migra URLs con límites, serialización sin instanciar objetos, prefijos de permisos,
+plugins desactivados en el plan y omisión de transients. Nunca cambia `posts.guid`,
+los originales ni la base viva. `manifest=values` publica solamente contadores,
+nombres y huellas; `plugins_disabled` no afirma haber modificado WordPress. Se
+rechazan estructuras desconocidas, conversiones inciertas, colisiones y exceso de
+cuotas. Los tokens binarios/hex y los formatos opacos sin cambios se conservan; no
+se promete cubrir todas las URLs codificadas, clases ni compatibilidad de plugins.
+Las claves core no ASCII requieren migración offline. «Listo» no certifica el
+servidor, recuperación ni funcionamiento; el reemplazo permanece deshabilitado.
+
+After a separately backed-up, explicitly confirmed future import, manually review
+image/embedded URLs, permalinks and plugin-specific encodings; test functionality,
+then enable ordinary plugins **one at a time**. Review held MU/drop-ins and hosting
+rules separately. No automatic plugin activation or successful runtime test is implied.
+
+References: [WordPress: never change GUIDs](https://developer.wordpress.org/advanced-administration/upgrade/migrating/#important-guid-note),
+[PHP: untrusted unserialize is unsafe, even with allowed_classes](https://www.php.net/manual/en/function.unserialize.php).
+
 ## Selected shared-host fallback
 
 A directory on the same hosting account is not an execution sandbox. The selected
@@ -186,6 +268,22 @@ The SQL tamper case modifies only its own synthetic run in an exclusive inherite
 TMPDIR, then checks rejection and unchanged public checkpoint/counters. It never
 searches or modifies another run. Schema tests distinguish quoted keyword defaults
 from unexecuted timestamp-function metadata.
+
+For the complete new values matrix, run exactly:
+
+```sh
+php tests/wordpress-restore-values.php
+```
+
+It creates exclusive owner-labelled scratch below
+`.atl/wordpress-restore-values-proof/tmp`, retains exact per-case stdout/stderr/exit
+receipts outside `tmp`, and leaves state for **parent-owned cleanup**. Success checks
+use public HTTP metadata and fingerprints, not private storage. Private access is
+limited to source/output tampering in that case's exact owner-bound run. Cases cover
+URL/serialization identity, schema/default/ENUM/SET migration, permissions, plugin
+and transient rules, supported bounds, collisions and authenticated tamper rejection.
+The namespaced wakeup trap must never execute. Existing regression/differential
+checks remain separate; this matrix does not replace them.
 
 The fixtures use synthetic configuration/archives/dumps and a database double that
 refuses connections. It does not execute WordPress or access a real database.
