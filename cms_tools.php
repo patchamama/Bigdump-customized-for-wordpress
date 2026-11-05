@@ -84,7 +84,7 @@ $cms_defs = [
 foreach ([__DIR__, dirname(__DIR__)] as $base) {
     // Metadata discovery must not read legacy configuration contents before auth.
     // All existing commands retain their original CMS discovery behavior.
-    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database', 'wp_restore_discover', 'wp_restore_prepare', 'wp_restore_state', 'wp_restore_step'], true)) break;
+    if (in_array($_GET['action'] ?? null, ['cms_install_discover', 'cms_install_prepare', 'cms_install_state', 'cms_install_step', 'cms_install_database', 'wp_restore_discover', 'wp_restore_prepare', 'wp_restore_state', 'wp_restore_step', 'wp_restore_backup_download'], true)) break;
     if ($detected_cms) break;
     foreach ($cms_defs as $cms => $def) {
         $path = $base . '/' . $def['file'];
@@ -1616,9 +1616,10 @@ function wp_restore_public(array $run) {
         $preflight[$part] = ['ready'=>($p['ready'] ?? false) === true,
             'processed'=>max(0, (int)($p['processed'] ?? 0)), 'total'=>max(0, (int)($p['total'] ?? 0))];
     }
+    if (isset($run['backup'])) $preflight['backup'] = wp_restore_backup_summary($run);
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
-        'backup_verified'=>false,'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
+        'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
 }
 // Future independent preflight adapters live here; no backup code is executed.
 // WP_RESTORE_FILES_ADAPTER
@@ -2204,8 +2205,254 @@ function wp_restore_values_step(array &$run):void{
     $run['values']=$p;wp_restore_values_metadata_save($run,$meta);
 }
 
+// Prior-database capture is read-only SQL. Recovery verification is a separate gate.
+function wp_restore_backup_quote(string $name): string {
+    if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
+    return '`' . $name . '`';
+}
+function wp_restore_backup_pdo(): PDO {
+    $db = wp_restore_configuration();
+    wp_restore_backup_quote($db['name']);
+    if (!preg_match('/^[A-Za-z0-9_.-]+(?::[0-9]{1,5})?$/D', $db['host'])) throw new \RuntimeException('Unsupported prior host.');
+    $host = explode(':', $db['host'], 2);
+    if (isset($host[1]) && ((int)$host[1]<1 || (int)$host[1]>65535)) throw new \RuntimeException('Unsupported prior port.');
+    try {
+        $pdo = new PDO('mysql:host=' . $host[0] . (isset($host[1]) ? ';port=' . $host[1] : '') . ';dbname=' . $db['name'] . ';charset=utf8mb4',
+            $db['user'], $db['pass'], [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT=>5,
+            PDO::ATTR_EMULATE_PREPARES=>false, PDO::ATTR_STRINGIFY_FETCHES=>true,
+            PDO::MYSQL_ATTR_MULTI_STATEMENTS=>false, PDO::MYSQL_ATTR_LOCAL_INFILE=>false,
+            PDO::MYSQL_ATTR_USE_BUFFERED_QUERY=>false]);
+        if ($pdo->query('SELECT DATABASE()')->fetchColumn() !== $db['name']) throw new \RuntimeException();
+        // Direct full-schema grants establish visibility of ALL old tables/objects.
+        // Never persist grant text: it can include account authentication material.
+        $grants = $pdo->query('SHOW GRANTS FOR CURRENT_USER')->fetchAll(PDO::FETCH_COLUMN);
+        $scope = wp_restore_backup_quote($db['name']) . '.*';
+        $escaped = '`' . str_replace('_', '\\_', $db['name']) . '`.*';
+        $visible = false;
+        foreach ($grants as $grant) {
+            if (preg_match('/^GRANT ALL PRIVILEGES ON (.+) TO /D', $grant, $m) && in_array($m[1], [$scope, $escaped], true)) $visible = true;
+        }
+        if (!$visible) throw new \RuntimeException();
+        foreach (["SET SESSION time_zone='+00:00'", "SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'",
+                  'SET SESSION lock_wait_timeout=2', 'SET SESSION innodb_lock_wait_timeout=2'] as $sql) $pdo->exec($sql);
+        return $pdo;
+    } catch (\Throwable $error) { throw new \RuntimeException('Prior database connection or visibility is unsupported.'); }
+}
+function wp_restore_backup_inventory(PDO $pdo): array {
+    foreach (['TRIGGERS'=>'TRIGGER_SCHEMA', 'ROUTINES'=>'ROUTINE_SCHEMA', 'EVENTS'=>'EVENT_SCHEMA',
+              'REFERENTIAL_CONSTRAINTS'=>'CONSTRAINT_SCHEMA'] as $table=>$column) {
+        if ((int)$pdo->query('SELECT COUNT(*) FROM information_schema.' . $table . ' WHERE ' . $column . '=DATABASE()')->fetchColumn() !== 0)
+            throw new \RuntimeException('Unsupported prior database objects.');
+    }
+    $rows = $pdo->query('SELECT TABLE_NAME,TABLE_TYPE,ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY BINARY TABLE_NAME')->fetchAll(PDO::FETCH_NUM);
+    if (count($rows) > 1000) throw new \RuntimeException('Prior table quota.');
+    $names = [];
+    foreach ($rows as [$name, $kind, $engine]) {
+        wp_restore_backup_quote($name);
+        if ($kind !== 'BASE TABLE' || strcasecmp($engine ?? '', 'InnoDB') !== 0) throw new \RuntimeException('Unsupported prior table layout.');
+        $names[] = $name;
+    }
+    return $names;
+}
+function wp_restore_backup_metadata(array $run): array {
+    $path = $run['work'] . '/prior-catalog.json';
+    wp_restore_file($path, 4194304);
+    $bytes = file_get_contents($path);
+    if (!hash_equals($run['backup']['catalog_sha256'] ?? '', hash('sha256', $bytes))) throw new \RuntimeException('Prior catalog changed.');
+    return json_decode($bytes, true, 64, JSON_THROW_ON_ERROR);
+}
+function wp_restore_backup_verified(array $run): bool {
+    $v = $run['backup']['verification'] ?? [];
+    return ($run['backup']['ready'] ?? false) === true && ($v['provenance'] ?? null) === 'operator_verified_external_backup'
+        && ($v['method'] ?? null) === 'separate_database_schema_rows_counters' && ($v['whole_database_confirmed'] ?? false) === true
+        && ($v['app_recovery_verified'] ?? null) === false && ($v['artifact_sha256'] ?? null) === ($run['backup']['sha256'] ?? null);
+}
+function wp_restore_backup_confirm(array &$run): void {
+    if (isset($run['backup']['verification']) || !is_string($_POST['artifact_sha256'] ?? null)
+        || !hash_equals($run['backup']['sha256'] ?? '', $_POST['artifact_sha256'])
+        || ($_POST['recovery_method'] ?? null) !== 'separate_database_schema_rows_counters'
+        || ($_POST['recovery_confirmed'] ?? null) !== '1' || ($_POST['replace_all_tables_confirmed'] ?? null) !== '1')
+        throw new \RuntimeException('Explicit externally tested whole-database recovery declaration required.');
+    [$file, $metadata] = wp_restore_backup_artifact($run);
+    fclose($file);
+    // An authenticated operator declaration, NOT an application recovery test.
+    $run['backup']['verification'] = ['provenance'=>'operator_verified_external_backup',
+        'method'=>'separate_database_schema_rows_counters', 'artifact_sha256'=>$metadata['sha256'],
+        'old_state_sha256'=>$metadata['old_state_sha256'], 'whole_database_confirmed'=>true,
+        'app_recovery_verified'=>false, 'confirmed_at'=>time()];
+    $run['backup']['status'] = 'externally_verified';
+}
+function wp_restore_backup_summary(array $run): array {
+    $p = $run['backup'];
+    return ['ready'=>($p['ready'] ?? false) === true, 'status'=>$p['status'],
+        'tables'=>$p['tables'] ?? 0, 'rows'=>$p['rows'] ?? 0, 'size'=>$p['size'] ?? 0,
+        'sha256'=>$p['sha256'] ?? null, 'provenance'=>wp_restore_backup_verified($run) ? 'operator_verified_external_backup' : 'unverified_export',
+        'app_recovery_verified'=>false];
+}
+function wp_restore_backup_artifact(array $run) {
+    if (!($run['backup']['ready'] ?? false)) throw new \RuntimeException('Prior artifact is not ready.');
+    $metadata = wp_restore_backup_metadata($run);
+    if (($metadata['size'] ?? null) !== $run['backup']['size'] || !hash_equals($run['backup']['sha256'], $metadata['sha256'] ?? ''))
+        throw new \RuntimeException('Prior artifact metadata changed.');
+    $path = $run['work'] . '/prior-database.sql.gz';
+    $identity = wp_restore_file($path, 536870912);
+    if (($identity['mode'] & 0777) !== 0600 || $identity['size'] !== $metadata['size']) throw new \RuntimeException('Prior artifact identity changed.');
+    $file = fopen($path, 'rb');
+    if (!$file) throw new \RuntimeException('Prior artifact unavailable.');
+    try {
+        $opened = array_intersect_key(fstat($file), $identity);
+        if ($opened !== $identity) throw new \RuntimeException('Prior artifact changed while opening.');
+        wp_restore_backup_chunks($file, $metadata, false);
+        if (fseek($file, 0) !== 0) throw new \RuntimeException('Prior artifact seek failed.');
+        return [$file, $metadata];
+    } catch (\Throwable $error) { fclose($file); throw $error; }
+}
+function wp_restore_backup_chunks($file, array $metadata, bool $emit): void {
+    $hash = hash_init('sha256'); $position = 0;
+    if (!is_array($metadata['chunks'] ?? null) || count($metadata['chunks'])>20000) throw new \RuntimeException('Prior chunk ledger invalid.');
+    foreach ($metadata['chunks'] as $chunk) {
+        $length = $chunk['length'] ?? null;
+        if (($chunk['offset'] ?? null) !== $position || !is_int($length) || $length<=0 || $length>33554432) throw new \RuntimeException('Prior chunk bounds changed.');
+        $bytes = '';
+        while (strlen($bytes)<$length) {
+            $part = fread($file, $length-strlen($bytes));
+            if ($part === false || $part === '') throw new \RuntimeException('Prior artifact truncated.');
+            $bytes .= $part;
+        }
+        if (!hash_equals($chunk['sha256'] ?? '', hash('sha256', $bytes))) throw new \RuntimeException('Prior generated chunk changed.');
+        hash_update($hash, $bytes); $position += $length;
+        if ($emit) echo $bytes;
+    }
+    if ($position !== $metadata['size'] || fread($file, 1) !== '' || !hash_equals($metadata['sha256'], hash_final($hash)))
+        throw new \RuntimeException('Prior final artifact changed.');
+}
+function wp_restore_backup_download(array $run): void {
+    [$file, $metadata] = wp_restore_backup_artifact($run);
+    try {
+        ini_set('zlib.output_compression', '0');
+        header('Content-Type: application/gzip');
+        header('Content-Disposition: attachment; filename="prior-database.sql.gz"');
+        header('Cache-Control: no-store, private');
+        header('X-Content-Type-Options: nosniff');
+        header('Content-Length: ' . $metadata['size']);
+        // Recheck each generated chunk immediately before emitting captured bytes.
+        wp_restore_backup_chunks($file, $metadata, true);
+    } finally { fclose($file); }
+    exit;
+}
+
+function wp_restore_backup_step(array &$run): void {
+    foreach (['files','sql','values'] as $part) if (!($run[$part]['ready'] ?? false)) throw new \RuntimeException('Private preparation required.');
+    if (isset($run['backup'])) {
+        if ($run['backup']['ready'] ?? false) { wp_restore_backup_metadata($run); return; }
+        throw new \RuntimeException('Interrupted capture requires recovery, not replay.');
+    }
+    // Persist intent before opening SQL or output. A crashed attempt is never replayed.
+    $run['backup'] = ['status'=>'capturing', 'ready'=>false];
+    $run['revision']++;
+    wp_restore_save($run);
+    $pdo = wp_restore_backup_pdo();
+    $names = wp_restore_backup_inventory($pdo);
+    $locked = false; $file = null;
+    try {
+        if ($names) {
+            $pdo->exec('LOCK TABLES ' . implode(',', array_map(static fn($n)=>wp_restore_backup_quote($n) . ' READ', $names)));
+            $locked = true;
+        }
+        if (wp_restore_backup_inventory($pdo) !== $names) throw new \RuntimeException('Prior inventory changed.');
+        $file = fopen($run['work'] . '/prior-database.sql.gz', 'xb');
+        if (!$file) throw new \RuntimeException('Prior storage unavailable.');
+        if (!chmod($run['work'] . '/prior-database.sql.gz', 0600)) throw new \RuntimeException('Prior output permissions unavailable.');
+        $deflater = deflate_init(ZLIB_ENCODING_GZIP);
+        if ($deflater === false) throw new \RuntimeException('Prior compression unavailable.');
+        $compressedHash = hash_init('sha256'); $chunks = []; $size = 0; $plain = 0;
+        $write = static function(string $bytes) use ($file, $compressedHash, &$chunks, &$size): void {
+            if ($bytes === '') return;
+            if ($size + strlen($bytes) > 536870912 || count($chunks) >= 20000) throw new \RuntimeException('Prior output quota.');
+            $chunks[] = ['offset'=>$size, 'length'=>strlen($bytes), 'sha256'=>hash('sha256', $bytes)];
+            hash_update($compressedHash, $bytes);
+            for ($offset=0; $offset<strlen($bytes); $offset+=$written) {
+                $written = fwrite($file, substr($bytes, $offset));
+                if (!$written) throw new \RuntimeException('Prior write failed.');
+            }
+            $size += strlen($bytes);
+        };
+        $emit = static function(string $sql) use ($deflater, $write, &$plain): void {
+            $plain += strlen($sql);
+            if ($plain > 536870912 || strlen($sql) > 16777216) throw new \RuntimeException('Prior SQL quota.');
+            $bytes = deflate_add($deflater, $sql, ZLIB_NO_FLUSH);
+            if ($bytes === false) throw new \RuntimeException('Prior compression failed.');
+            $write($bytes);
+        };
+        $emit("-- Private prior-database table export; restore only into a separate recovery database.\nSET NAMES utf8mb4;\nSET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO';\nSET SESSION time_zone='+00:00';\n");
+        $tables = []; $totalRows = 0; $dataBytes = 0; $ddlBytes = 0; $started = microtime(true);
+        foreach ($names as $name) {
+            $q = wp_restore_backup_quote($name);
+            $ddl = $pdo->query('SHOW CREATE TABLE ' . $q)->fetchAll(PDO::FETCH_NUM)[0][1];
+            $ddlBytes += strlen($ddl);
+            if ($ddlBytes > 16777216 || strlen($ddl)>1048576 || !str_starts_with($ddl, 'CREATE TABLE ' . $q . ' (')) throw new \RuntimeException('Prior DDL quota or identity.');
+            $columns = $pdo->query('SHOW FULL COLUMNS FROM ' . $q)->fetchAll(PDO::FETCH_ASSOC);
+            if (!$columns || count($columns)>1000) throw new \RuntimeException('Prior columns quota.');
+            $projection = []; $numeric = []; $quoted = [];
+            foreach ($columns as $column) {
+                $id = wp_restore_backup_quote($column['Field']);
+                if (!preg_match('/^(tinyint|smallint|mediumint|int|bigint|decimal|numeric|bit|char|varchar|binary|varbinary|tinytext|text|mediumtext|longtext|tinyblob|blob|mediumblob|longblob|date|time|datetime|timestamp|year|enum|set)\b/i', $column['Type'], $type)
+                    || preg_match('/VIRTUAL|STORED|PERSISTENT/i', $column['Extra'])) throw new \RuntimeException('Unsupported prior column.');
+                $number = in_array(strtolower($type[1]), ['tinyint','smallint','mediumint','int','bigint','decimal','numeric','bit'], true);
+                $numeric[] = $number; $quoted[] = $id;
+                $projection[] = strtolower($type[1]) === 'bit' ? 'CAST(' . $id . ' AS UNSIGNED)' : 'CAST(' . $id . ' AS BINARY)';
+            }
+            $emit($ddl . ";\n");
+            $cursor = $pdo->query('SELECT ' . implode(',', $projection) . ' FROM ' . $q);
+            $hashes = []; $rowCount = 0;
+            while (($row = $cursor->fetch(PDO::FETCH_NUM)) !== false) {
+                if (++$rowCount>100000 || ++$totalRows>1000000 || microtime(true)-$started>20) throw new \RuntimeException('Prior row/time quota.');
+                $values = []; $canonical = [];
+                foreach ($row as $i=>$value) {
+                    if ($value === null) { $values[] = 'NULL'; $canonical[] = null; continue; }
+                    $value = (string)$value; $dataBytes += strlen($value);
+                    if (strlen($value)>8388608 || $dataBytes>134217728) throw new \RuntimeException('Prior data quota.');
+                    $canonical[] = base64_encode($value);
+                    if ($numeric[$i]) {
+                        if (!preg_match('/^-?[0-9]+(?:\.[0-9]+)?$/D', $value)) throw new \RuntimeException('Unsupported prior numeric spelling.');
+                        $values[] = $value;
+                    } else $values[] = "UNHEX('" . bin2hex($value) . "')";
+                }
+                $hashes[] = hash('sha256', json_encode($canonical, JSON_THROW_ON_ERROR));
+                $emit('INSERT INTO ' . $q . ' (' . implode(',', $quoted) . ') VALUES (' . implode(',', $values) . ");\n");
+            }
+            $cursor->closeCursor(); sort($hashes, SORT_STRING);
+            $tables[] = ['name'=>$name, 'rows'=>$rowCount, 'schema_sha256'=>hash('sha256', $ddl), 'data_sha256'=>hash('sha256', implode('', $hashes))];
+        }
+        if (wp_restore_backup_inventory($pdo) !== $names) throw new \RuntimeException('Prior inventory changed.');
+        $end = deflate_add($deflater, '', ZLIB_FINISH);
+        if ($end === false) throw new \RuntimeException('Prior compression failed.');
+        $write($end);
+        if (!fflush($file) || (function_exists('fsync') && !fsync($file))) throw new \RuntimeException('Prior flush failed.');
+        fclose($file); $file = null;
+        $sha = hash_final($compressedHash);
+        wp_restore_file($run['work'] . '/prior-database.sql.gz', 536870912);
+        if (!hash_equals($sha, hash_file('sha256', $run['work'] . '/prior-database.sql.gz'))) throw new \RuntimeException('Prior generated output changed.');
+        $metadata = ['tables'=>$tables, 'rows'=>$totalRows, 'size'=>$size, 'sha256'=>$sha, 'chunks'=>$chunks,
+            'old_state_sha256'=>hash('sha256', json_encode($tables, JSON_THROW_ON_ERROR))];
+        $bytes = json_encode($metadata, JSON_THROW_ON_ERROR);
+        if (strlen($bytes)>4194304) throw new \RuntimeException('Prior catalog quota.');
+        $catalog = fopen($run['work'] . '/prior-catalog.json', 'xb');
+        if (!$catalog) throw new \RuntimeException('Prior catalog unavailable.');
+        if (!chmod($run['work'] . '/prior-catalog.json', 0600)) { fclose($catalog); throw new \RuntimeException('Prior catalog permissions unavailable.'); }
+        try {
+            if (fwrite($catalog, $bytes)!==strlen($bytes) || !fflush($catalog) || (function_exists('fsync') && !fsync($catalog))) throw new \RuntimeException('Prior catalog write failed.');
+        } finally { fclose($catalog); }
+        $run['backup'] = ['status'=>'ready', 'ready'=>true, 'tables'=>count($tables), 'rows'=>$totalRows, 'size'=>$size,
+            'sha256'=>$sha, 'catalog_sha256'=>hash('sha256', $bytes)];
+    } finally {
+        if (is_resource($file)) fclose($file);
+        if ($locked) $pdo->exec('UNLOCK TABLES');
+    }
+}
+
 $restore_action = $_GET['action'] ?? null;
-if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'], true)) {
+if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step','wp_restore_backup_download'], true)) {
     if (($_SESSION['migrate_auth'] ?? false) !== true) site_report_api_reply(401, ['error'=>'Unauthorized.']);
     $method = in_array($restore_action, ['wp_restore_discover','wp_restore_state'], true) ? 'GET' : 'POST';
     if ($_SERVER['REQUEST_METHOD'] !== $method) { header('Allow: '.$method); site_report_api_reply(405, ['error'=>$method.' required.']); }
@@ -2264,20 +2511,30 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
         }
         site_report_api_reply(200, ['run'=>$public]);
     }
+    if ($restore_action === 'wp_restore_backup_download') {
+        if ($run === null || !is_string($_POST['run_id'] ?? null) || !hash_equals($run['run_id'], $_POST['run_id'])) site_report_api_reply(404, ['error'=>'Restore run not found.']);
+        try { wp_restore_backup_download($run); }
+        catch (\Throwable $e) {
+            if (!headers_sent()) site_report_api_reply(409, ['error'=>'Prior backup artifact changed or is unavailable.']);
+            exit;
+        }
+    }
     if (!is_string($_POST['run_id'] ?? null) || !is_string($_POST['stage'] ?? null)) site_report_api_reply(400, ['error'=>'Invalid restore step.']);
     if ($run === null || !hash_equals($run['run_id'], $_POST['run_id'])) site_report_api_reply(404, ['error'=>'Restore run not found.']);
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step'][$operation];
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($operation === 'backup_confirm') site_report_api_reply(400, ['error'=>'Prior recovery confirmation failed. No table replacement was performed.','code'=>'prior_confirmation_failed']);
+        if ($operation === 'backup') site_report_api_reply(400, ['error'=>'Prior database backup failed. The tool did not modify existing tables.','code'=>'prior_backup_failed']);
         site_report_api_reply(400, ['error'=>'Backup preflight failed. No database operation was performed.','code'=>'backup_preflight_failed']);
     }
     site_report_api_reply(200, ['run'=>wp_restore_public($run)]);

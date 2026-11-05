@@ -1,6 +1,6 @@
 # WordPress backup restoration
 
-**Current scope: detection, preparation, private ZIP staging, restricted SQL preflight and private value preparation only.** The browser offers preparation
+**Current scope: private preparation, prior-database capture/download and an explicit externally verified recovery declaration.** The browser offers preparation
 when the application directory contains the tool, a literal `wp-config.php`,
 `hosting_*.zip` and `db_*.sql.gz` backups, but no installed core or unrelated files.
 The tool's own `.migrate_config` is allowed. Multiple backups require explicit
@@ -11,7 +11,7 @@ and choose **Prepare restoration**. This creates a private, server-owned preflig
 run. It does **not** extract backup code, connect to the database, back up or drop
 tables, import SQL, activate plugins, change configuration or replace the site.
 Database replacement/import and public file placement remain unavailable. The
-private file/SQL/value preflight adapters are available through the session protocol below;
+private file/SQL/value and prior-backup adapters are available through the session protocol below;
 this is not a complete restoration wizard. SQL readiness means a privately parsed
 plan, not database compatibility, an old-data backup, recovery or permission to import.
 
@@ -195,7 +195,9 @@ as SQL preflight; no cells, defaults, base64 data, credentials or private paths 
 public. `preflight.values` adds only `ready`, `processed` and `total`; byte counters
 refer to the original typed plan. Errors use the existing bounded preflight JSON
 and do not advance the public checkpoint. `manifest=sql` and `manifest=1` keep their
-original meanings. Backup/runtime/replacement flags remain **false**.
+original meanings. Value preparation alone leaves backup/runtime/replacement flags
+**false**. Only the separate operator recovery declaration below can change the
+backup flag; it never certifies runtime or enables replacement.
 
 **Español:** después de `operation=sql`, `operation=values` prepara otro plan privado:
 migra URLs con límites, serialización sin instanciar objetos, prefijos de permisos,
@@ -216,6 +218,90 @@ rules separately. No automatic plugin activation or successful runtime test is i
 References: [WordPress: never change GUIDs](https://developer.wordpress.org/advanced-administration/upgrade/migrating/#important-guid-note),
 [PHP: untrusted unserialize is unsafe, even with allowed_classes](https://www.php.net/manual/en/function.unserialize.php).
 
+## Prior database: capture, download, then declare verified external recovery
+
+This session protocol is not yet a browser wizard or database importer. Complete
+`files`, `sql` and `values` preparation first. Use `POST ?action=wp_restore_step`
+with the current `csrf`, `run_id`, `stage=preflight`, `revision` and
+**`operation=backup`**. This operation connects to the original database defined
+in the inertly parsed adjacent config, not to a submitted database address.
+
+Capture covers **every old table, including unrelated prefixes**. One connection
+holds READ locks on the entire admitted inventory while producing a private gzip
+SQL export. It does not execute archive/config PHP, rewrite originals, modify
+existing tables or use the legacy importer. Generated compressed bytes have a
+SHA-256 and chunk ledger; final storage is checked against the generated digest.
+Private artifacts use mode 0600 inside the existing mode-0700 run directory.
+`preflight.backup` exposes only readiness/status, table/row counts, compressed size,
+fingerprint and verification provenance—not data, grants, credentials or paths.
+Readiness is **not** a successful recovery test.
+
+The conservative profile requires a directly granted full-schema account (to
+establish complete object visibility), an ASCII identifier database/table/column
+layout, ordinary InnoDB tables and supported integer/decimal/BIT, byte/text and
+date/time columns. Views, triggers, routines, events, foreign keys, generated
+columns, floating-point/spatial/unknown column types and other engines refuse
+capture. Roles alone or incomplete grants are not visibility proof. Native proof
+currently covers MariaDB 10.11.19 in the disposable fixture, not arbitrary servers,
+collations or hosting configurations.
+
+Limits apply together: 1,000 tables, 1,000 columns/table, 100,000 rows/table,
+1,000,000 rows total, 128 MiB of cell data, 8 MiB/cell, 16 MiB/statement,
+512 MiB expanded/compressed SQL, 16 MiB aggregate DDL, 1 MiB/table DDL and 4 MiB
+catalog. Hex encoding and statement overhead can reject a cell even below its
+individual limit. Capture is one request, checks a 20-second budget between rows
+and requests two-second SQL lock waits. Neither those settings nor the quotas
+promise a universal HTTP/network/CPU/memory deadline. Failure or interruption
+retains a non-ready intent checkpoint: **do not replay** the capture in that run.
+Resolve the cause before admitting a fresh run in a separate authenticated session;
+never discard originals or assume a partial gzip is recoverable.
+
+Download using authenticated **POST `?action=wp_restore_backup_download`** with
+`csrf` and the exact `run_id`. It is an attachment, not a public GET URL. The tool
+checks private file identity, generated chunks and the final SHA before streaming,
+and checks each chunk again before emission. Changed/incomplete artifacts fail
+closed. Keep a downloaded copy outside this hosting account.
+
+**Before confirming anything:** recover that exact artifact into a **separate,
+empty recovery database** with a standard compatible SQL client (without
+`--force`), and compare every old table's schema, rows/bytes, explicit zero IDs and
+AUTO_INCREMENT counters. Do not import the prior backup into the live destination
+as a test. A checksum or a renamed table is not this recovery evidence.
+
+Only after that external test succeeds, POST the normal step fields with
+**`operation=backup_confirm`** and these additional fields:
+
+| Field | Required value |
+|---|---|
+| `artifact_sha256` | Exact generated compressed fingerprint from `preflight.backup.sha256` |
+| `recovery_method` | `separate_database_schema_rows_counters` |
+| `recovery_confirmed` | `1`: the separate recovery test already succeeded |
+| `replace_all_tables_confirmed` | `1`: acknowledge the scope is **all** old tables, not just WordPress prefixes |
+
+The tool reauthenticates its artifact and records an immutable, artifact/snapshot-
+bound **operator declaration**, not an app-performed recovery test. Missing/wrong
+fingerprints, checksum-only claims or incomplete acknowledgements are rejected
+without advancing the checkpoint or changing stored data. The public result uses
+`backup_verified=true`, `provenance=operator_verified_external_backup` and
+`app_recovery_verified=false`; runtime and replacement remain **false**. This
+acknowledgement does not itself import or authorize a hidden destructive endpoint.
+A future importer must reauthenticate the final prepared plan and backup, recheck
+the old state under fencing and require its explicit replacement confirmation.
+
+**Español:** este protocolo privado todavía no es el asistente completo. Después
+de preparar archivos, SQL y valores, `operation=backup` captura **todas** las tablas
+anteriores, incluso las de otros prefijos, bajo bloqueos de lectura. No ejecuta PHP
+del respaldo ni modifica tablas. La descarga requiere sesión, POST, CSRF y el run
+exacto; valida los bytes generados antes de entregarlos. Guardá una copia fuera del
+hosting y probá su recuperación en otra base vacía, comparando esquema, filas,
+bytes, IDs cero y AUTO_INCREMENT. Recién después, `operation=backup_confirm`
+acepta la huella exacta, el método indicado y ambas confirmaciones explícitas.
+La procedencia es **verificación externa declarada por el operador**, nunca una
+certificación de recuperación hecha por la aplicación. No habilita importación,
+reemplazo ni certificación de WordPress. Los perfiles no soportados, límites,
+bloqueos o corrupción fallan antes de modificar datos; una captura interrumpida
+no se reintenta a ciegas. No elimines los originales ni uses un gzip parcial.
+
 ## Selected shared-host fallback
 
 A directory on the same hosting account is not an execution sandbox. The selected
@@ -230,7 +316,9 @@ backup fallback will accept explicit operator evidence that recovery of the prio
 backup was already verified externally. Reports must identify that provenance;
 operator verification is not an app-performed recovery test. An unverified backup,
 a readable/checksummed file alone, or renamed old tables is not this prerequisite.
-This database adapter/confirmation flow is not implemented yet.
+The private capture/download/declaration protocol above implements that gate;
+the destructive importer, final placement and complete browser workflow remain
+unavailable.
 
 ## Local checks
 
@@ -247,8 +335,18 @@ endpoint and an existing immutable image containing PHP/PDO MySQL, ZIP/zlib and
 MariaDB client/server tools. It never pulls an image, publishes a port or mounts
 host data. It validates ownership before stopping/removing its disposable
 container and retains receipts under `.atl/wordpress-restore-native-proof/`.
-This checks admission/private preparation and unchanged synthetic old data, not
-backup recovery, database import, public placement or WordPress runtime.
+The default `--scenario admission` checks only admission/private preparation and
+unchanged synthetic old data. `capture` additionally downloads the generated gzip
+and restores it through a standard MariaDB client into a separate recovery database,
+comparing schemas, binary/decimal/BIT/timestamp values, zero IDs and AUTO_INCREMENT.
+`verify` also exercises explicit operator provenance, invalid declarations and
+download authentication. Its trusted fixture router supplies server HTTPS context
+to exercise report-token scope; it does **not** certify TLS transport/certificates.
+Other scenarios are `artifact-tamper`, `catalog-tamper`,
+`lock-contention`, `unsupported`, `grant-refusal` and `cell-quota`; each uses its own
+disposable database/container and checks fail-closed behavior and unchanged OLD data.
+These are fixture-scoped backup tests, never live import/placement or WordPress
+runtime certification. Internal assertion counts are separate from scenario counts.
 
 ```sh
 python3 tests/wordpress-restore-native.py \
@@ -306,5 +404,7 @@ and transient rules, supported bounds, collisions and authenticated tamper rejec
 The namespaced wakeup trap must never execute. Existing regression/differential
 checks remain separate; this matrix does not replace them.
 
-The fixtures use synthetic configuration/archives/dumps and a database double that
-refuses connections. It does not execute WordPress or access a real database.
+The non-native HTTP fixtures use synthetic configuration/archives/dumps and a
+database double that refuses connections. The optional native scenarios above use
+real PDO/MariaDB only inside their owned disposable container. Neither executes
+backup PHP or a WordPress runtime.

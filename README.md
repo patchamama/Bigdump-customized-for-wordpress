@@ -341,9 +341,11 @@ new updater nor report/API features provide a production promotion operation.
   and private ZIP staging, restricted gzip/SQL preflight and separate typed value
   preparation (no SQL execution). The private plan rewrites supported URL/serialized
   values and permission prefixes, preserves GUIDs, disables plugins and omits transient
-  cache rows. This is not live migration or runtime/plugin certification.
-  Database replacement and public placement are not enabled
-  yet; see
+  cache rows. A separate private backup protocol reads **all OLD tables** under
+  locks, provides an authenticated integrity-checked gzip download and requires an
+  artifact-bound declaration of already tested external recovery. Operator evidence
+  is not an app-performed recovery test. This is not live migration or runtime/plugin
+  certification. Database replacement and public placement are not enabled yet; see
   [scope and safeguards](docs/wordpress-restore.md).
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.

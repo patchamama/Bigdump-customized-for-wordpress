@@ -175,8 +175,11 @@ hosting sin core instalado, validar/descomprimir el ZIP y preparar un plan SQL
 restringido desde gzip en almacenamiento privado, sin ejecutar SQL. Otro paso
 privado prepara URLs/serialización admitida y prefijos de permisos, conserva GUIDs,
 desactiva plugins en el plan y omite filas de caché transient. No migra una base viva
-ni certifica WordPress o plugins funcionando. Todavía no habilita reemplazar tablas
-ni publicar los archivos restaurados.
+ni certifica WordPress o plugins funcionando. Otro protocolo privado lee **todas
+las tablas anteriores** bajo bloqueos, permite descargar un gzip autenticado y
+validado, y exige declarar la recuperación externa ya probada de ese artefacto.
+La declaración del operador no es una prueba de recuperación hecha por la
+aplicación. Todavía no habilita reemplazar tablas ni publicar archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
 | Instaladores | WordPress y phpMyAdmin. El instalador histórico no es un actualizador completo de una instalación existente. |

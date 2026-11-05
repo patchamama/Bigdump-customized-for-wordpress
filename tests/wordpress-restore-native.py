@@ -14,6 +14,8 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True, help='Explicit local unix:// Docker endpoint')
 parser.add_argument('--image', required=True, help='Existing immutable sha256 image ID with MariaDB/PHP/PDO')
+parser.add_argument('--scenario', choices=['admission', 'capture', 'verify', 'artifact-tamper', 'catalog-tamper', 'lock-contention', 'unsupported', 'grant-refusal', 'cell-quota'], default='admission',
+                    help='Default admission baseline, prior capture/recovery, or external verification gate')
 args = parser.parse_args()
 if not args.endpoint.startswith('unix:///') or not re.fullmatch(r'sha256:[0-9a-f]{64}', args.image):
     parser.error('A local Unix endpoint and full immutable image ID are required.')
@@ -23,7 +25,7 @@ proof = root / '.atl/wordpress-restore-native-proof' / ('native-' + owner)
 proof.mkdir(parents=True, mode=0o700)
 docker = ['docker', '--host', args.endpoint]
 record = {'owner': owner, 'name': 'cms-restore-native-' + owner[:16], 'image': args.image,
-          'id': None, 'ready': False, 'cleaned': False, 'commands': []}
+          'id': None, 'ready': False, 'cleaned': False, 'scenario': args.scenario, 'commands': []}
 container = None
 exit_code = 1
 
@@ -87,7 +89,7 @@ try:
     call('copy independent trusted inputs', ['exec', '-i', container, '/bin/sh', '-c',
          'umask 077; mkdir /tmp/restore-proof && tar -xf - -C /tmp/restore-proof'], package.getvalue())
     result = call('public native admission contract', ['exec', container, 'php',
-                  '/tmp/restore-proof/tests/fixtures/wordpress-restore/native-client.php'], check=False, timeout=90)
+                  '/tmp/restore-proof/tests/fixtures/wordpress-restore/native-client.php', args.scenario], check=False, timeout=90)
     (proof / 'admission.stdout').write_bytes(result.stdout)
     (proof / 'admission.stderr').write_bytes(result.stderr)
     (proof / 'admission.exit').write_text(str(result.returncode) + '\n')
