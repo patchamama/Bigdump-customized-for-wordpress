@@ -1,6 +1,6 @@
 # WordPress backup restoration
 
-**Current scope: private preparation, prior-database capture/download and an explicit externally verified recovery declaration.** The browser offers preparation
+**Current scope: private preparation, verified-prior-backup gating, and explicitly confirmed progressive SQL staging into NEW tables.** The browser offers preparation
 when the application directory contains the tool, a literal `wp-config.php`,
 `hosting_*.zip` and `db_*.sql.gz` backups, but no installed core or unrelated files.
 The tool's own `.migrate_config` is allowed. Multiple backups require explicit
@@ -10,8 +10,8 @@ Log in, set a custom tool password, review the selected files and destination UR
 and choose **Prepare restoration**. This creates a private, server-owned preflight
 run. It does **not** extract backup code, connect to the database, back up or drop
 tables, import SQL, activate plugins, change configuration or replace the site.
-Database replacement/import and public file placement remain unavailable. The
-private file/SQL/value and prior-backup adapters are available through the session protocol below;
+Final table replacement and public file placement remain unavailable. The
+private file/SQL/value, prior-backup and SQL-staging adapters use the session protocol below;
 this is not a complete restoration wizard. SQL readiness means a privately parsed
 plan, not database compatibility, an old-data backup, recovery or permission to import.
 
@@ -141,7 +141,7 @@ After SQL preflight is ready, use authenticated `POST ?action=wp_restore_step` w
 This prepares a **new** typed private plan; it never changes the original SQL plan,
 selected inputs, destination credentials or live database. Existing preparation,
 state and manifest responses stay unchanged until values preparation advances.
-There is no values button or import/placement adapter yet.
+There is no values/staging browser button or final replacement/placement adapter yet.
 
 | Prepared-plan rule | Result |
 |---|---|
@@ -302,6 +302,75 @@ reemplazo ni certificación de WordPress. Los perfiles no soportados, límites,
 bloqueos o corrupción fallan antes de modificar datos; una captura interrumpida
 no se reintenta a ciegas. No elimines los originales ni uses un gzip parcial.
 
+## Confirmed progressive SQL staging — NEW tables only
+
+After `files`, `sql`, `values`, `backup` and `backup_confirm` have succeeded, read
+`GET ?action=wp_restore_state&manifest=values`. Keep the exact final
+`run.values_manifest.plan_sha256` and the generated prior-artifact fingerprint.
+Then POST `?action=wp_restore_step` with `csrf`, `run_id`, `stage=preflight`,
+`operation=staging`, the **current** `revision`, and all three extra fields:
+
+| Field | Required value |
+|---|---|
+| `artifact_sha256` | Exact `preflight.backup.sha256` of the externally recovery-tested generated backup |
+| `plan_sha256` | Exact final `values_manifest.plan_sha256`, not the original SQL-plan fingerprint |
+| `staging_confirmed` | `1`: explicitly acknowledge executing this plan into NEW run-owned staging tables |
+
+Each step requires those bindings again, reauthenticates the backup, and scans the
+whole prepared plan against its final SHA and original generated chunk ledger.
+Only the captured authenticated frame bytes are compiled; no reopen/reread of
+untrusted executable bytes follows verification. Client SQL, table names, executor
+or target paths are not accepted. No legacy raw importer or dependency download is
+used; runtime implementation remains entirely in `cms_tools.php`.
+
+- At most eight typed frames are selected per request, stopping selection after
+  1 MiB; one frame remains indivisible under the existing 16 MiB frame limit.
+  Whole-plan/artifact rereads and database waits are not a universal HTTP deadline.
+- Only validated CREATE, complete-column INSERT and supported settings frames are
+  compiled. Sessions enforce strict conversions, UTC and explicit zero-ID semantics.
+  Text, binary/hex, NULL, numeric values, defaults, indexes and type precision remain
+  typed; stored objects are never deserialized. Unsupported target collations fail
+  before writes. Other server/type/conversion failures stop staging without enabling
+  final replacement; readiness is not cross-server or WordPress compatibility certification.
+- The whole supported database inventory is rechecked on each request: newly
+  introduced triggers/foreign objects are refused before journal writes, not allowed
+  to redirect those writes into OLD data. Total OLD + staging + control tables must
+  fit the 1,000-object inventory quota before staging begins.
+- Physical names derive from validated run metadata, never final table names.
+  A fixed database control object and an active-request advisory lock cooperatively
+  fence different tool sessions across HTTP steps. Unknown control/staging collisions
+  are refused, never adopted, overwritten, expired or stolen. Control and staged
+  objects remain for explicit recovery; this unit provides no cleanup endpoint.
+- Filesystem intent **and its session-bound hash** are persisted before mutation.
+  A separate database journal records pending/outcome state. They are not an atomic
+  transaction with filesystem checkpoints or DDL implicit commits. A crash or
+  uncertain checkpoint/journal leaves pending intent or a mismatch: **stop; never
+  automatically retry SQL**. Keep the earlier recoverable artifact and all originals.
+- Successful responses expose `preflight.staging`: `status` (`progress`, `ready`, or
+  terminal `pending`), `ready`, `recovery_needed`, `processed`, `total`, `frames`,
+  `tables` and `rows`. Counters acknowledge only observed successful batches.
+  A mutating successful step advances revision twice (intent, then outcome).
+  Inspect state after a lost response; stale revisions cannot replay SQL.
+- Rejected authentication/proof/revision/input does not advance stored counters.
+  Pending intent or a database ownership/journal mismatch requires operator recovery,
+  not a new owner takeover. No credentials, SQL, raw cells, owner secrets or private
+  paths appear in the staging DTO or bounded error response.
+
+This fence does **not** lock arbitrary external applications. OLD tables, schemas,
+raw rows, zero IDs and AUTO_INCREMENT are not staging targets and remain unchanged.
+Final replacement must later lock/recheck the **complete OLD snapshot** before any
+destructive cutover. Staging leaves `runtime_verified=false` and
+`replacement_enabled=false`; it neither installs final table names, places files,
+executes backup/config PHP nor certifies runtime. The full browser workflow remains
+future work. Plugins stay disabled in staged data; hosting rules remain withheld.
+
+**Español:** `operation=staging` exige sesión, CSRF, revisión vigente, respaldo
+externamente verificado y confirmación ligada a ambas huellas. Ejecuta solamente el
+plan tipado autenticado en tablas NUEVAS del run, sin tocar las anteriores. La
+propiedad persiste entre peticiones; colisiones y estados inciertos se rechazan sin
+robar propiedad ni repetir SQL. «Listo» sólo significa staging, nunca reemplazo,
+publicación de archivos ni WordPress funcionando. Conservá respaldo y originales.
+
 ## Selected shared-host fallback
 
 A directory on the same hosting account is not an execution sandbox. The selected
@@ -342,11 +411,32 @@ comparing schemas, binary/decimal/BIT/timestamp values, zero IDs and AUTO_INCREM
 `verify` also exercises explicit operator provenance, invalid declarations and
 download authentication. Its trusted fixture router supplies server HTTPS context
 to exercise report-token scope; it does **not** certify TLS transport/certificates.
-Other scenarios are `artifact-tamper`, `catalog-tamper`,
+Other prior-backup scenarios are `artifact-tamper`, `catalog-tamper`,
 `lock-contention`, `unsupported`, `grant-refusal` and `cell-quota`; each uses its own
 disposable database/container and checks fail-closed behavior and unchanged OLD data.
-These are fixture-scoped backup tests, never live import/placement or WordPress
+These are fixture-scoped backup tests, never live replacement/placement or WordPress
 runtime certification. Internal assertion counts are separate from scenario counts.
+
+New optional staging scenarios (default admission and prior-backup cases unchanged):
+
+| `--scenario` | Native proof |
+|---|---|
+| `staging` | Real authenticated prerequisites, separate standard-client recovery, explicit confirmation, bounded typed staging, exact OLD preservation and actual staged values/schema/counters |
+| `staging-utf8` | Supported historical UTF8/utf8mb3 charset and collation aliases |
+| `staging-plan-tamper`, `staging-artifact-tamper` | Generated bytes cannot be blessed by later execution |
+| `staging-control-collision`, `staging-table-collision` | Unknown objects are not adopted or modified |
+| `staging-owner`, `staging-lock` | Independent verified session cannot take over between steps; active request contention is also refused |
+| `staging-journal` | Unacknowledged database intent prevents replay despite valid filesystem authority |
+| `staging-interrupt` | Actual server process killed during fixture-blocked INSERT after preceding implicit-commit DDL; restarted session retains pending intent and refuses replay without acknowledging the interrupted batch |
+| `staging-collation` | Unsupported target collation refused before database writes |
+| `staging-trigger` | A trigger introduced after backup cannot redirect control writes into OLD tables |
+
+Use the same explicit `--endpoint` and pinned `--image` arguments, adding for example
+`--scenario staging`. Each invocation is bounded and uses its own disposable engine.
+Staging receipts are retained under `.atl/wordpress-restore-import-proof/native-*`
+(`admission.stdout`, `admission.stderr`, `admission.exit`, `contract.json`, `run.json`).
+The final file records exact-owner container cleanup. No production fault-injection
+switch is added. These synthetic native tests never use production databases.
 
 ```sh
 python3 tests/wordpress-restore-native.py \

@@ -344,8 +344,12 @@ new updater nor report/API features provide a production promotion operation.
   cache rows. A separate private backup protocol reads **all OLD tables** under
   locks, provides an authenticated integrity-checked gzip download and requires an
   artifact-bound declaration of already tested external recovery. Operator evidence
-  is not an app-performed recovery test. This is not live migration or runtime/plugin
-  certification. Database replacement and public placement are not enabled yet; see
+  is not an app-performed recovery test. A separately confirmed session operation
+  progressively executes the authenticated typed plan into NEW run-owned tables,
+  with persistent database ownership and fail-closed SQL intent journaling. OLD
+  tables remain exact; pending/uncertain SQL is not automatically replayed. This is
+  staging, not final migration or runtime/plugin certification. Database replacement
+  and public placement are not enabled yet; see
   [scope and safeguards](docs/wordpress-restore.md).
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.

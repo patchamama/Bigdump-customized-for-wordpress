@@ -11,11 +11,12 @@ function nativeCheck(bool $condition, string $label): void {
     echo "PASS $label\n";
 }
 function nativeQuote(string $name): string { return '`' . str_replace('`', '``', $name) . '`'; }
-function nativeOracle(PDO $pdo): string {
+function nativeOracle(PDO $pdo, ?array $only = null): string {
     $tables = $pdo->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_NUM);
     usort($tables, static fn($a, $b) => strcmp($a[0], $b[0]));
     $state = [];
     foreach ($tables as [$name, $kind]) {
+        if ($only !== null && !in_array($name, $only, true)) continue;
         if ($kind !== 'BASE TABLE') throw new RuntimeException('Unexpected fixture object');
         $q = nativeQuote($name);
         $ddl = $pdo->query('SHOW CREATE TABLE ' . $q)->fetch(PDO::FETCH_NUM)[1];
@@ -99,6 +100,16 @@ try {
     fclose($socket);
     $target = 'http://127.0.0.1:' . $port . '/confirmed-destination';
     [$sql] = valuesFixture('valid', $target, $base . '/BACKUP_EXECUTED');
+    if (str_starts_with($scenario, 'staging')) {
+        // The passive values fixture includes non-UTF8 binary cells. Give these
+        // an actual binary target rather than demanding lossy UTF8 conversion.
+        $sql = str_replace('CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGTEXT)',
+            'CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGBLOB)', $sql);
+        $sql .= "SET TIME_ZONE='+00:00';\nCREATE TABLE old_types (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, payload LONGBLOB, amount DECIMAL(20,6) NOT NULL DEFAULT -1.250000, flag BIT(9) NOT NULL DEFAULT 0x0001, stamp TIMESTAMP(6) NULL DEFAULT NULL, label VARCHAR(32) NOT NULL DEFAULT 'quote\\'slash\\\\end', PRIMARY KEY (id), KEY label_idx (label(8) DESC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=19;\n";
+        $sql .= 'INSERT INTO old_types VALUES (0,_binary' . valueQuote("A\0\x1a\\'\xff") . ",12.340000,0x01FF,'2024-02-03 04:05:06.123456','explicit'),(7,NULL,-9.000001,0x0001,NULL,'other');\n";
+    }
+    if ($scenario === 'staging-utf8') $sql = str_replace('CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci', 'CHARSET=utf8 COLLATE=utf8_unicode_ci', $sql);
+    if ($scenario === 'staging-collation') $sql = str_replace('utf8mb4_unicode_ci', 'utf8mb4_future_fixture_ci', $sql);
     file_put_contents($site . '/db_fixture.sql.gz', gzencode($sql));
     $zip = new ZipArchive();
     $zip->open($site . '/hosting_fixture.zip', ZipArchive::CREATE | ZipArchive::EXCL);
@@ -206,7 +217,7 @@ try {
         nativeCheck($deniedDownload === 409 && nativeOracle($pdo) === $before, 'incomplete capture is not downloadable and OLD data, schema and counters remain exact');
         foreach ($originals as $name => $sha) nativeCheck(hash_file('sha256', $site . '/' . $name) === $sha, 'failed capture preserves original ' . $name);
     }
-    if (in_array($scenario, ['capture', 'verify', 'artifact-tamper', 'catalog-tamper'], true)) {
+    if (in_array($scenario, ['capture', 'verify', 'artifact-tamper', 'catalog-tamper'], true) || str_starts_with($scenario, 'staging')) {
         $prior = $run;
         [$status, $j] = nativeJson('wp_restore_step', ['csrf' => $csrf, 'run_id' => $run['run_id'],
             'stage' => 'preflight', 'operation' => 'backup', 'revision' => $run['revision']]);
@@ -263,7 +274,7 @@ try {
             [$stateStatus, $state] = nativeJson('wp_restore_state');
             nativeCheck($stateStatus === 200 && $state['run'] === $run && nativeOracle($pdo) === $before, 'tamper rejection preserves exact checkpoint, flags, counters and OLD data');
         }
-        if ($scenario === 'verify') {
+        if ($scenario === 'verify' || str_starts_with($scenario, 'staging')) {
             $proof = ['artifact_sha256' => $run['preflight']['backup']['sha256'],
                 'recovery_method' => 'separate_database_schema_rows_counters',
                 'recovery_confirmed' => '1', 'replace_all_tables_confirmed' => '1'];
@@ -289,6 +300,10 @@ try {
                 'operator declaration is truthfully distinguished from app recovery certification');
             nativeCheck(!$verified['run']['runtime_verified'] && !$verified['run']['replacement_enabled'] && nativeOracle($pdo) === $before,
                 'confirmation alone does not import, replace tables or certify runtime');
+            if (str_starts_with($scenario, 'staging')) {
+                $run = $verified['run'];
+                require __DIR__ . '/import.php';
+            }
         }
     }
     $exit = 0;

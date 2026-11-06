@@ -1617,6 +1617,12 @@ function wp_restore_public(array $run) {
             'processed'=>max(0, (int)($p['processed'] ?? 0)), 'total'=>max(0, (int)($p['total'] ?? 0))];
     }
     if (isset($run['backup'])) $preflight['backup'] = wp_restore_backup_summary($run);
+    if (isset($run['staging'])) {
+        $p = $run['staging'];
+        $preflight['staging'] = ['status'=>$p['status'], 'ready'=>$p['status'] === 'ready',
+            'recovery_needed'=>$p['status'] === 'pending', 'processed'=>$p['processed'],
+            'total'=>$run['values']['plan_bytes'], 'rows'=>$p['rows'], 'tables'=>$p['tables'], 'frames'=>$p['frames']];
+    }
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
         'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
@@ -2205,6 +2211,283 @@ function wp_restore_values_step(array &$run):void{
     $run['values']=$p;wp_restore_values_metadata_save($run,$meta);
 }
 
+// Staging is deliberately separate from final replacement. No OLD object is a SQL target.
+function wp_restore_staging_literal(array $cell, string $charset, bool $default = false): string {
+    if (($cell['type'] ?? '') === 'null' && count($cell) === 1) return 'NULL';
+    if (($cell['type'] ?? '') === 'current_timestamp' && $default) {
+        $precision = $cell['precision'] ?? 0;
+        if (!is_int($precision) || $precision < 0 || $precision > 6) throw new \RuntimeException('Invalid temporal precision.');
+        return 'CURRENT_TIMESTAMP(' . $precision . ')';
+    }
+    if (($cell['type'] ?? '') === 'number' && is_string($cell['value'] ?? null)
+        && strlen($cell['value']) <= 128 && preg_match('/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/D', $cell['value'])) return $cell['value'];
+    if (($cell['type'] ?? '') === 'hex' && is_string($cell['value'] ?? null)
+        && preg_match('/^(?:[A-Fa-f0-9]{2})+$/D', $cell['value'])) return "X'" . $cell['value'] . "'";
+    if (in_array($cell['type'] ?? '', ['bytes','binary'], true) && is_string($cell['base64'] ?? null)) {
+        $bytes = base64_decode($cell['base64'], true);
+        if ($bytes === false || base64_encode($bytes) !== $cell['base64'] || strlen($bytes) > 8388608) throw new \RuntimeException('Invalid staged bytes.');
+        // Defaults/comments use quoted strings under NO_BACKSLASH_ESCAPES. Data uses hex,
+        // with an explicit source encoding rather than implicit connection conversion.
+        if ($default) return "'" . str_replace("'", "''", $bytes) . "'";
+        $hex = "UNHEX('" . bin2hex($bytes) . "')";
+        return $cell['type'] === 'binary' ? $hex : 'CONVERT(' . $hex . ' USING ' . wp_restore_sql_charset($charset) . ')';
+    }
+    throw new \RuntimeException('Unsupported staged literal.');
+}
+function wp_restore_staging_create(array $schema, string $physical): string {
+    $q = __NAMESPACE__ . '\\wp_restore_backup_quote';
+    $parts = []; $seen = [];
+    if (($schema['kind'] ?? '') !== 'create' || count($schema['columns'] ?? []) < 1 || count($schema['columns']) > 1000) throw new \RuntimeException('Invalid staged schema.');
+    $options = $schema['options'];
+    $charset = wp_restore_sql_charset($options['CHARSET']);
+    foreach ($schema['columns'] as $column) {
+        $name = $column['name']; $type = $column['type']; $args = $column['args'];
+        if (isset($seen[strtolower($name)])) throw new \RuntimeException('Duplicate staged column.');
+        $seen[strtolower($name)] = true;
+        if (!in_array($type, ['TINYINT','SMALLINT','MEDIUMINT','INT','INTEGER','BIGINT','DECIMAL','NUMERIC','FLOAT','DOUBLE','REAL','BIT','CHAR','VARCHAR','BINARY','VARBINARY','TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT','TINYBLOB','BLOB','MEDIUMBLOB','LONGBLOB','DATE','TIME','DATETIME','TIMESTAMP','YEAR','ENUM','SET'], true)) throw new \RuntimeException('Unsupported staged type.');
+        $sql = $q($name) . ' ' . $type;
+        if ($args) {
+            if (count($args) > 256) throw new \RuntimeException('Staged type quota.');
+            $compiled = [];
+            foreach ($args as $arg) {
+                if (in_array($type, ['ENUM','SET'], true)) {
+                    if (($arg['type'] ?? '') !== 'bytes') throw new \RuntimeException('Invalid enum.');
+                    $compiled[] = wp_restore_staging_literal($arg, $charset, true);
+                } else {
+                    if (!is_int($arg) || $arg < 0 || $arg > 65535) throw new \RuntimeException('Invalid type size.');
+                    $compiled[] = (string)$arg;
+                }
+            }
+            $sql .= '(' . implode(',', $compiled) . ')';
+        }
+        foreach ($column['attributes'] as $attribute => $value) {
+            switch ($attribute) {
+                case 'not_null': if (!is_bool($value)) throw new \RuntimeException('Invalid nullability.'); $sql .= $value ? ' NOT NULL' : ' NULL'; break;
+                case 'unsigned': case 'zerofill': case 'auto_increment':
+                    if ($value !== true) throw new \RuntimeException('Invalid type attribute.');
+                    $sql .= ' ' . strtoupper($attribute); break;
+                case 'charset': $sql .= ' CHARACTER SET ' . wp_restore_sql_charset($value); break;
+                case 'collation': $sql .= ' COLLATE ' . wp_restore_sql_collation($value); break;
+                case 'default': case 'comment': $sql .= ' ' . strtoupper($attribute) . ' ' . wp_restore_staging_literal($value, $charset, true); break;
+                case 'on_update':
+                    if (($value['type'] ?? '') !== 'current_timestamp') throw new \RuntimeException('Invalid temporal update.');
+                    $sql .= ' ON UPDATE ' . wp_restore_staging_literal($value, $charset, true); break;
+                default: throw new \RuntimeException('Unsupported staged attribute.');
+            }
+        }
+        $parts[] = $sql;
+    }
+    if (count($schema['keys']) > 256) throw new \RuntimeException('Staged key quota.');
+    foreach ($schema['keys'] as $key) {
+        $kind = ['primary'=>'PRIMARY KEY','unique'=>'UNIQUE KEY','index'=>'KEY'][$key['kind']] ?? null;
+        if ($kind === null || !$key['columns'] || count($key['columns']) > 64) throw new \RuntimeException('Invalid staged index.');
+        $index = [];
+        foreach ($key['columns'] as $part) {
+            if (!isset($seen[strtolower($part['name'])])) throw new \RuntimeException('Unknown index column.');
+            $sql = $q($part['name']);
+            if (isset($part['length'])) {
+                if (!is_int($part['length']) || $part['length'] < 1 || $part['length'] > 3072) throw new \RuntimeException('Invalid index prefix.');
+                $sql .= '(' . $part['length'] . ')';
+            }
+            if (isset($part['order'])) {
+                if (!in_array($part['order'], ['ASC','DESC'], true)) throw new \RuntimeException('Invalid index direction.');
+                $sql .= ' ' . $part['order'];
+            }
+            $index[] = $sql;
+        }
+        $parts[] = $kind . ($key['kind'] === 'primary' ? '' : ' ' . $q($key['name'])) . ' (' . implode(',', $index) . ')';
+    }
+    if (($options['ENGINE'] ?? '') !== 'INNODB') throw new \RuntimeException('Staging requires InnoDB.');
+    $sql = 'CREATE TABLE ' . $q($physical) . ' (' . implode(',', $parts) . ') ENGINE=InnoDB DEFAULT CHARSET=' . $charset . ' COLLATE=' . wp_restore_sql_collation($options['COLLATE']);
+    foreach ($options as $key => $value) {
+        if (in_array($key, ['ENGINE','CHARSET','COLLATE'], true)) continue;
+        if ($key === 'AUTO_INCREMENT' && is_string($value) && preg_match('/^[0-9]{1,20}$/D', $value)) $sql .= ' AUTO_INCREMENT=' . $value;
+        elseif ($key === 'ROW_FORMAT' && in_array($value, ['DYNAMIC','COMPACT','REDUNDANT'], true)) $sql .= ' ROW_FORMAT=' . $value;
+        else throw new \RuntimeException('Unsupported staged table option.');
+    }
+    return $sql;
+}
+function wp_restore_staging_capture(array $run, array $meta, int $offset): array {
+    // Capture the actual bounded batch while authenticating every original generated
+    // chunk and the FINAL prepared digest. Never hash then reopen executable bytes.
+    $path = $run['work'] . '/values-plan.ndjson';
+    $identity = wp_restore_file($path, 1073741824);
+    if (($identity['mode'] & 0777) !== 0600 || $identity['size'] !== $run['values']['plan_bytes']) throw new \RuntimeException('Staged plan identity changed.');
+    $file = fopen($path, 'rb'); $hash = hash_init('sha256'); $chunk = hash_init('sha256');
+    $position = 0; $index = 0; $batch = []; $end = $offset; $size = 0;
+    try {
+        if (array_intersect_key(fstat($file), $identity) !== $identity) throw new \RuntimeException('Staged plan open changed.');
+        while (($line = fgets($file, 16777218)) !== false) {
+            $start = $position; $position += strlen($line);
+            if (!str_ends_with($line, "\n")) throw new \RuntimeException('Truncated staged frame.');
+            hash_update($hash, $line); hash_update($chunk, $line);
+            $expected = $meta['chunks'][$index] ?? null;
+            if (!$expected || $position > $expected['end']) throw new \RuntimeException('Staged chunk boundary changed.');
+            if ($start === $end && count($batch) < 8 && $size < 1048576) {
+                $batch[] = $line; $end = $position; $size += strlen($line);
+            }
+            if ($position === $expected['end']) {
+                if (!hash_equals($expected['sha256'], hash_final($chunk))) throw new \RuntimeException('Staged generated chunk changed.');
+                $index++; $chunk = hash_init('sha256');
+            }
+        }
+    } finally { fclose($file); }
+    if ($index !== count($meta['chunks']) || $position !== $identity['size'] || !hash_equals($run['values']['plan_sha256'], hash_final($hash))
+        || ($offset < $position && !$batch)) throw new \RuntimeException('Staged final plan changed.');
+    return [$batch, $end];
+}
+function wp_restore_staging_compile(array $lines, array $meta, array $names, string $charset): array {
+    $queries = []; $rows = 0; $tables = 0;
+    foreach ($lines as $line) {
+        $frame = json_decode($line, true, 64, JSON_THROW_ON_ERROR);
+        if (($frame['kind'] ?? '') === 'settings') {
+            // T10 already accepts only UTC and supported encodings/modes. Never
+            // execute the dump's SET text or relax our mandatory strict semantics.
+            if (!in_array($frame['time_zone'] ?? null, [null, '+00:00'], true)) throw new \RuntimeException('Unsupported staged time zone.');
+            $charset = wp_restore_sql_charset($frame['charset']);
+            $queries[] = ['sql'=>'SET NAMES ' . $charset, 'rows'=>0, 'tables'=>0];
+            continue;
+        }
+        $table = $frame['table'] ?? ''; $schema = $meta['tables'][$table]['schema'] ?? null;
+        if (!$schema || !isset($names[$table])) throw new \RuntimeException('Unknown staged table.');
+        if ($frame['kind'] === 'create') {
+            if ($frame !== $schema) throw new \RuntimeException('Staged catalog schema mismatch.');
+            $queries[] = ['sql'=>wp_restore_staging_create($schema, $names[$table]), 'rows'=>0, 'tables'=>1]; $tables++;
+        } elseif ($frame['kind'] === 'insert') {
+            $columns = array_column($schema['columns'], 'name');
+            $ordered = $frame['columns']; $sorted = $ordered; $expected = $columns;
+            sort($sorted); sort($expected);
+            if ($sorted !== $expected || count($frame['values']) !== count($columns)) throw new \RuntimeException('Staged row shape changed.');
+            $values = []; $definitions = array_column($schema['columns'], null, 'name');
+            foreach ($frame['values'] as $index => $cell) {
+                $type = $definitions[$ordered[$index]]['type'];
+                if (($cell['type'] ?? '') === 'bytes' && in_array($type, ['BINARY','VARBINARY','TINYBLOB','BLOB','MEDIUMBLOB','LONGBLOB'], true)) $cell['type'] = 'binary';
+                $values[] = wp_restore_staging_literal($cell, $charset);
+            }
+            $columns = $ordered;
+            $queries[] = ['sql'=>'INSERT INTO ' . wp_restore_backup_quote($names[$table]) . ' (' . implode(',', array_map(__NAMESPACE__ . '\\wp_restore_backup_quote', $columns)) . ') VALUES (' . implode(',', $values) . ')', 'rows'=>1, 'tables'=>0]; $rows++;
+        } else throw new \RuntimeException('Unsupported staged frame.');
+    }
+    return [$queries, $charset, $rows, $tables];
+}
+function wp_restore_staging_intent(array &$run): void {
+    $run['staging']['status'] = 'pending';
+    $run['revision']++;
+    wp_restore_save($run);
+    // Persist the session's authoritative checkpoint hash BEFORE SQL. The database
+    // journal is separate: neither this flush nor a DDL implicit commit is atomic
+    // with the filesystem. Any crash in between is terminal, never a replay signal.
+    if (!session_write_close() || !session_start()) throw new \RuntimeException('Cannot persist staging authority.');
+    if (($_SESSION['migrate_auth'] ?? false) !== true || !is_string($_SESSION['wp_restore_csrf'] ?? null)
+        || !hash_equals($_SESSION['wp_restore_csrf'], $_POST['csrf'] ?? '') || wp_restore_load() !== $run)
+        throw new \RuntimeException('Staging authority changed during intent flush.');
+}
+function wp_restore_staging_step(array &$run): void {
+    if (!wp_restore_backup_verified($run) || !($run['files']['ready'] ?? false) || !($run['values']['ready'] ?? false)
+        || ($_POST['staging_confirmed'] ?? null) !== '1' || !is_string($_POST['artifact_sha256'] ?? null)
+        || !is_string($_POST['plan_sha256'] ?? null) || !hash_equals($run['backup']['sha256'], $_POST['artifact_sha256'])
+        || !hash_equals($run['values']['plan_sha256'], $_POST['plan_sha256'])) throw new \RuntimeException('Explicit artifact/plan-bound staging confirmation required.');
+    foreach (['sql','table','target_path','executor'] as $forbidden) if (array_key_exists($forbidden, $_POST)) throw new \RuntimeException('Client execution targets are forbidden.');
+    if (isset($run['staging']) && !in_array($run['staging']['status'], ['progress','ready'], true)) throw new \RuntimeException('Staging recovery needed.');
+    [$artifact] = wp_restore_backup_artifact($run); fclose($artifact);
+    $meta = wp_restore_values_metadata($run);
+    $progress = $run['staging'] ?? ['status'=>'progress','processed'=>0,'rows'=>0,'tables'=>0,'frames'=>0,'charset'=>'utf8mb4'];
+    [$lines, $end] = wp_restore_staging_capture($run, $meta, $progress['processed']);
+    if (!preg_match('/^[a-f0-9]{64}$/D', $run['run_id'])) throw new \RuntimeException('Invalid staging owner.');
+    $names = []; $i = 0; $execution = ['tables'=>[]];
+    foreach ($meta['tables'] as $table) {
+        $name = $table['schema']['table'];
+        wp_restore_backup_quote($name);
+        if (isset($names[$name])) throw new \RuntimeException('Duplicate staged target.');
+        $execution['tables'][$name] = $table;
+        $names[$name] = '_wpr_' . substr($run['run_id'], 0, 32) . '_' . ++$i;
+        wp_restore_staging_create($table['schema'], $names[$name]);
+    }
+    [$queries, $charset, $rows, $tables] = wp_restore_staging_compile($lines, $execution, $names, $progress['charset']);
+    $pdo = wp_restore_backup_pdo();
+    $pdo->exec("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'");
+    $database = $pdo->query('SELECT DATABASE()')->fetchColumn();
+    $lock = 'wpr:' . substr(hash('sha256', $database), 0, 48);
+    $stmt = $pdo->prepare('SELECT GET_LOCK(?,0)'); $stmt->execute([$lock]);
+    if ((string)$stmt->fetchColumn() !== '1') throw new \RuntimeException('Staging request is busy.');
+    $stmt->closeCursor();
+    try {
+        // Refuse newly introduced triggers/foreign objects as well as unsupported
+        // layouts. In particular a control-table trigger must never redirect our
+        // journal writes into OLD business data. This is still not an external
+        // writer/DDL lock; final replacement needs its own locked OLD recheck.
+        $inventory = wp_restore_backup_inventory($pdo);
+        if (!isset($run['staging']) && count($inventory) + count($names) + 1 > 1000) throw new \RuntimeException('Staging database object quota.');
+        // Fixed database-wide namespace: unknown objects are refused, NEVER adopted.
+        $control = '`_wpr_staging_owner`';
+        $exists = $pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='_wpr_staging_owner'")->fetchColumn();
+        if (!isset($run['staging'])) {
+            if ((int)$exists !== 0) throw new \RuntimeException('Database already owned or unknown control collision.');
+            $check = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?');
+            foreach ($names as $physical) {
+                $check->execute([$physical]); $collision = $check->fetchColumn(); $check->closeCursor();
+                if ((int)$collision !== 0) throw new \RuntimeException('Staging name collision.');
+            }
+            // Target charset/collation compatibility is checked before any write.
+            $collations = $pdo->query('SHOW COLLATION')->fetchAll(PDO::FETCH_ASSOC);
+            $supported = [];
+            foreach ($collations as $collation) $supported[$collation['Collation']] = $collation['Charset'];
+            // utf8 is the historical alias of utf8mb3 on supported target servers.
+            foreach ($supported as $name => $encoding) if (in_array($encoding, ['utf8','utf8mb3'], true)) {
+                $supported[$name] = 'utf8mb3';
+                if (str_starts_with($name, 'utf8mb3_')) $supported['utf8_' . substr($name, 8)] = 'utf8mb3';
+            }
+            foreach ($meta['tables'] as $table) {
+                $schema = $table['schema'];
+                $encoding = $schema['options']['CHARSET'] === 'utf8' ? 'utf8mb3' : $schema['options']['CHARSET'];
+                if (($supported[$schema['options']['COLLATE']] ?? null) !== $encoding) throw new \RuntimeException('Unsupported target collation.');
+                foreach ($schema['columns'] as $column) {
+                    $attributes = $column['attributes'];
+                    $columnEncoding = $attributes['charset'] ?? $schema['options']['CHARSET'];
+                    if ($columnEncoding === 'utf8') $columnEncoding = 'utf8mb3';
+                    if (isset($attributes['collation']) && ($supported[$attributes['collation']] ?? null) !== $columnEncoding) throw new \RuntimeException('Unsupported column collation.');
+                }
+            }
+            $progress['token'] = bin2hex(random_bytes(32));
+            $run['staging'] = $progress;
+            wp_restore_staging_intent($run);
+            $pdo->exec('CREATE TABLE ' . $control . ' (id TINYINT NOT NULL PRIMARY KEY, owner CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, token CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, plan CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, position BIGINT UNSIGNED NOT NULL, phase VARCHAR(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL) ENGINE=InnoDB');
+            $ddl = $pdo->query('SHOW CREATE TABLE ' . $control)->fetch(PDO::FETCH_NUM)[1];
+            $run['staging']['control_sha256'] = hash('sha256', $ddl);
+            $stmt = $pdo->prepare('INSERT INTO ' . $control . ' VALUES (1,?,?,?,0,?)');
+            $stmt->execute([$run['run_id'], $progress['token'], $run['values']['plan_sha256'], 'pending']);
+        } else {
+            if ((int)$exists !== 1) throw new \RuntimeException('Database ownership disappeared.');
+            $ddl = $pdo->query('SHOW CREATE TABLE ' . $control)->fetch(PDO::FETCH_NUM)[1];
+            if (!hash_equals($run['staging']['control_sha256'], hash('sha256', $ddl))) throw new \RuntimeException('Unknown control schema.');
+            $owner = $pdo->query('SELECT * FROM ' . $control)->fetchAll(PDO::FETCH_ASSOC);
+            if (count($owner) !== 1 || $owner[0] !== ['id'=>'1','owner'=>$run['run_id'],'token'=>$progress['token'],'plan'=>$run['values']['plan_sha256'],'position'=>(string)$progress['processed'],'phase'=>'done']) throw new \RuntimeException('Database ownership or journal changed.');
+            if ($progress['status'] === 'ready') return;
+            wp_restore_staging_intent($run);
+            $stmt = $pdo->prepare('UPDATE ' . $control . ' SET phase=? WHERE id=1 AND owner=? AND token=? AND position=? AND phase=?');
+            $stmt->execute(['pending', $run['run_id'], $progress['token'], $progress['processed'], 'done']);
+            if ($stmt->rowCount() !== 1) throw new \RuntimeException('Journal intent not observed.');
+        }
+        // Every DDL/DML outcome remains uncertain until all results and warnings
+        // were observed and the DATABASE journal acknowledges this exact batch.
+        foreach ($queries as $query) {
+            $affected = $pdo->exec($query['sql']);
+            if (($query['rows'] && $affected !== 1) || (int)$pdo->query('SHOW COUNT(*) WARNINGS')->fetchColumn() !== 0) throw new \RuntimeException('Staging outcome uncertain.');
+        }
+        $stmt = $pdo->prepare('UPDATE ' . $control . ' SET position=?,phase=? WHERE id=1 AND owner=? AND token=? AND position=? AND phase=?');
+        $stmt->execute([$end, 'done', $run['run_id'], $progress['token'], $progress['processed'], 'pending']);
+        if ($stmt->rowCount() !== 1) throw new \RuntimeException('Journal outcome not observed.');
+        $run['staging']['status'] = $end === $run['values']['plan_bytes'] ? 'ready' : 'progress';
+        $run['staging']['processed'] = $end;
+        $run['staging']['rows'] += $rows; $run['staging']['tables'] += $tables;
+        $run['staging']['frames'] += count($lines); $run['staging']['charset'] = $charset;
+        // The controller checkpoints this outcome. A failure there leaves pending
+        // authority or a DB/filesystem mismatch, both of which refuse SQL replay.
+    } finally {
+        $release = $pdo->prepare('SELECT RELEASE_LOCK(?)'); $release->execute([$lock]); $release->closeCursor();
+    }
+}
+
 // Prior-database capture is read-only SQL. Recovery verification is a separate gate.
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
@@ -2524,15 +2807,16 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm'][$operation];
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($operation === 'staging') site_report_api_reply(400, ['error'=>'Staging refused or interrupted. Existing tables were not replaced. Inspect state; pending SQL requires recovery.','code'=>'staging_failed']);
         if ($operation === 'backup_confirm') site_report_api_reply(400, ['error'=>'Prior recovery confirmation failed. No table replacement was performed.','code'=>'prior_confirmation_failed']);
         if ($operation === 'backup') site_report_api_reply(400, ['error'=>'Prior database backup failed. The tool did not modify existing tables.','code'=>'prior_backup_failed']);
         site_report_api_reply(400, ['error'=>'Backup preflight failed. No database operation was performed.','code'=>'backup_preflight_failed']);

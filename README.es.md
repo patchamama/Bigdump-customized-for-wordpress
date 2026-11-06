@@ -179,7 +179,12 @@ ni certifica WordPress o plugins funcionando. Otro protocolo privado lee **todas
 las tablas anteriores** bajo bloqueos, permite descargar un gzip autenticado y
 validado, y exige declarar la recuperación externa ya probada de ese artefacto.
 La declaración del operador no es una prueba de recuperación hecha por la
-aplicación. Todavía no habilita reemplazar tablas ni publicar archivos restaurados.
+aplicación. Otra operación de sesión, confirmada y ligada a ambas huellas, ejecuta
+progresivamente el plan tipado autenticado sólo en tablas NUEVAS del run. Conserva
+las anteriores y usa propiedad persistente de la base y un diario de intención;
+SQL pendiente o incierto no se repite automáticamente. Esto es staging, no
+reemplazo final ni certificación. Todavía no habilita reemplazar tablas ni publicar
+archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
 | Instaladores | WordPress y phpMyAdmin. El instalador histórico no es un actualizador completo de una instalación existente. |

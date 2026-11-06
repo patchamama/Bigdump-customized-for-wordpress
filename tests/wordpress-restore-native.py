@@ -14,14 +14,15 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True, help='Explicit local unix:// Docker endpoint')
 parser.add_argument('--image', required=True, help='Existing immutable sha256 image ID with MariaDB/PHP/PDO')
-parser.add_argument('--scenario', choices=['admission', 'capture', 'verify', 'artifact-tamper', 'catalog-tamper', 'lock-contention', 'unsupported', 'grant-refusal', 'cell-quota'], default='admission',
-                    help='Default admission baseline, prior capture/recovery, or external verification gate')
+parser.add_argument('--scenario', choices=['admission', 'capture', 'verify', 'artifact-tamper', 'catalog-tamper', 'lock-contention', 'unsupported', 'grant-refusal', 'cell-quota', 'staging', 'staging-plan-tamper', 'staging-artifact-tamper', 'staging-control-collision', 'staging-table-collision', 'staging-owner', 'staging-journal', 'staging-interrupt', 'staging-utf8', 'staging-lock', 'staging-collation', 'staging-trigger'], default='admission',
+                    help='Default admission baseline; capture/verify backup; staging validates bounded typed SQL; staging-* exercise isolated refusal, ownership, journal and abrupt-kill boundaries')
 args = parser.parse_args()
 if not args.endpoint.startswith('unix:///') or not re.fullmatch(r'sha256:[0-9a-f]{64}', args.image):
     parser.error('A local Unix endpoint and full immutable image ID are required.')
 root = pathlib.Path(__file__).resolve().parents[1]
 owner = secrets.token_hex(16)
-proof = root / '.atl/wordpress-restore-native-proof' / ('native-' + owner)
+proof_area = '.atl/wordpress-restore-import-proof' if args.scenario.startswith('staging') else '.atl/wordpress-restore-native-proof'
+proof = root / proof_area / ('native-' + owner)
 proof.mkdir(parents=True, mode=0o700)
 docker = ['docker', '--host', args.endpoint]
 record = {'owner': owner, 'name': 'cms-restore-native-' + owner[:16], 'image': args.image,
@@ -84,12 +85,12 @@ try:
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as archive:
         for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/native-client.php',
-                     'tests/fixtures/wordpress-restore/values.php']:
+                     'tests/fixtures/wordpress-restore/values.php'] + (['tests/fixtures/wordpress-restore/import.php'] if args.scenario.startswith('staging') else []):
             archive.add(root / name, arcname=name, recursive=False)
     call('copy independent trusted inputs', ['exec', '-i', container, '/bin/sh', '-c',
          'umask 077; mkdir /tmp/restore-proof && tar -xf - -C /tmp/restore-proof'], package.getvalue())
     result = call('public native admission contract', ['exec', container, 'php',
-                  '/tmp/restore-proof/tests/fixtures/wordpress-restore/native-client.php', args.scenario], check=False, timeout=90)
+                  '/tmp/restore-proof/tests/fixtures/wordpress-restore/native-client.php', args.scenario], check=False, timeout=20 if args.scenario.startswith('staging') else 90)
     (proof / 'admission.stdout').write_bytes(result.stdout)
     (proof / 'admission.stderr').write_bytes(result.stderr)
     (proof / 'admission.exit').write_text(str(result.returncode) + '\n')
@@ -98,7 +99,10 @@ try:
         parsed = json.loads(evidence.stdout)
         (proof / 'contract.json').write_text(json.dumps(parsed, indent=2) + '\n')
     exit_code = result.returncode or (1 if result.stderr else 0)
-    sys.stdout.buffer.write(result.stdout)
+    if args.scenario.startswith('staging'):
+        print('Native staging assertions:', result.stdout.count(b'PASS '), 'exit:', result.returncode)
+    else:
+        sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
 except Exception as error:
     print('Native fixture failed: ' + type(error).__name__ + ': ' + str(error), file=sys.stderr)
