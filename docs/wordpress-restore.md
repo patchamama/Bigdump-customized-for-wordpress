@@ -335,9 +335,45 @@ selects unchanged-default regressions and `STAGING_DEFAULT_SOURCE` selects trust
 Los defaults literales TEXT/BLOB conservan sus bytes; esta corrección no admite
 expresiones arbitrarias ni certifica WordPress o el reemplazo final.
 
-**Pending assurance boundary:** the authenticated prepared plan and ownership journal
-are not seals of subsequent live NEW content. Existing `ready` runs must not be
-interpreted as content-assured or eligible for final replacement.
+### Locked historical content comparison
+
+After confirmed staging is ready, an authenticated `wp_restore_step` POST may use
+`operation=assurance`, the current `stage` and `revision`, `csrf`, `run_id`,
+`assurance_confirmed=1`, and the exact `artifact_sha256` / `plan_sha256` fingerprints.
+Client SQL, table names, target paths and executors are not accepted.
+
+The initial admitted comparison profile is the demonstrated Oracle MySQL 8.4.13
+Community/InnoDB profile, not generic MySQL, MariaDB or cloud compatibility.
+Authenticated captured plan bytes build session-private TEMPORARY expectations;
+live NEW readback never defines the expected result. Under bounded object locks,
+the operation checks the exact OLD + derived NEW + authenticated control inventory,
+including legitimate `_wpr_*` business tables, journal authority, backup-bound OLD
+schema/data/counters, and NEW schema/defaults/indexes/AI and NULL/binary-sensitive
+row multisets. Duplicate multiplicity matters. The cooperative mutex is not an
+external-writer fence; it does not replace the actual object locks.
+
+Success adds `run.preflight.assurance.status=compared_as_of` with artifact/plan/state
+fingerprints, observation time and `requires_locked_recheck=true`. It is a historical
+locked observation only. Later writes remain possible after release, and GET state
+does not perform a fresh comparison. Replacement and runtime flags remain false.
+T3 must compare again within its OWN uninterrupted exclusion/replacement window.
+
+Mismatch, unsupported profile, quota, ownership or cleanup failure returns HTTP 400:
+`{"error":"Staged content assurance failed. No permanent table was changed.","code":"assurance_failed"}`.
+Rejected requests preserve the durable run checkpoint and counters. No repair or
+pending-SQL replay occurs. Only owned temporary expectations are dropped; permanent
+OLD/NEW/control tables and the four original hosting inputs are not modified.
+
+The isolated runner supports `valid`, `row`, `schema`, `default`, `index`, `ai`,
+`plan`, `backup`, `authority`, `inventory`, `concurrent` and `unsupported` scenarios.
+`red` retains the historical missing-operation proof. Each fresh case needs the
+pinned binding and receipt parent above; it uses the unchanged 22-second inner
+fixture budget. Quota checks between operations are not a universal wall-clock SLA.
+
+La comparación es histórica, no autoriza el reemplazo futuro ni certifica WordPress,
+plugins, HTTP o recuperación probada por la app. Un cambio posterior requiere una
+comparación nueva; SQL pendiente nunca se reintenta a ciegas. Se mantienen el
+respaldo verificado externamente y su procedencia declarada por el operador.
 
 After `files`, `sql`, `values`, `backup` and `backup_confirm` have succeeded, read
 `GET ?action=wp_restore_state&manifest=values`. Keep the exact final

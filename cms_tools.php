@@ -1623,6 +1623,7 @@ function wp_restore_public(array $run) {
             'recovery_needed'=>$p['status'] === 'pending', 'processed'=>$p['processed'],
             'total'=>$run['values']['plan_bytes'], 'rows'=>$p['rows'], 'tables'=>$p['tables'], 'frames'=>$p['frames']];
     }
+    if (isset($run['assurance'])) $preflight['assurance'] = $run['assurance'];
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
         'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
@@ -2234,7 +2235,7 @@ function wp_restore_staging_literal(array $cell, string $charset, bool $default 
     }
     throw new \RuntimeException('Unsupported staged literal.');
 }
-function wp_restore_staging_create(array $schema, string $physical): string {
+function wp_restore_staging_create(array $schema, string $physical, bool $temporary = false): string {
     $q = __NAMESPACE__ . '\\wp_restore_backup_quote';
     $parts = []; $seen = [];
     if (($schema['kind'] ?? '') !== 'create' || count($schema['columns'] ?? []) < 1 || count($schema['columns']) > 1000) throw new \RuntimeException('Invalid staged schema.');
@@ -2304,7 +2305,7 @@ function wp_restore_staging_create(array $schema, string $physical): string {
         $parts[] = $kind . ($key['kind'] === 'primary' ? '' : ' ' . $q($key['name'])) . ' (' . implode(',', $index) . ')';
     }
     if (($options['ENGINE'] ?? '') !== 'INNODB') throw new \RuntimeException('Staging requires InnoDB.');
-    $sql = 'CREATE TABLE ' . $q($physical) . ' (' . implode(',', $parts) . ') ENGINE=InnoDB DEFAULT CHARSET=' . $charset . ' COLLATE=' . wp_restore_sql_collation($options['COLLATE']);
+    $sql = 'CREATE ' . ($temporary ? 'TEMPORARY ' : '') . 'TABLE ' . $q($physical) . ' (' . implode(',', $parts) . ') ENGINE=InnoDB DEFAULT CHARSET=' . $charset . ' COLLATE=' . wp_restore_sql_collation($options['COLLATE']);
     foreach ($options as $key => $value) {
         if (in_array($key, ['ENGINE','CHARSET','COLLATE'], true)) continue;
         if ($key === 'AUTO_INCREMENT' && is_string($value) && preg_match('/^[0-9]{1,20}$/D', $value)) $sql .= ' AUTO_INCREMENT=' . $value;
@@ -2342,7 +2343,7 @@ function wp_restore_staging_capture(array $run, array $meta, int $offset): array
         || ($offset < $position && !$batch)) throw new \RuntimeException('Staged final plan changed.');
     return [$batch, $end];
 }
-function wp_restore_staging_compile(array $lines, array $meta, array $names, string $charset): array {
+function wp_restore_staging_compile(array $lines, array $meta, array $names, string $charset, bool $temporary = false): array {
     $queries = []; $rows = 0; $tables = 0;
     foreach ($lines as $line) {
         $frame = json_decode($line, true, 64, JSON_THROW_ON_ERROR);
@@ -2358,7 +2359,7 @@ function wp_restore_staging_compile(array $lines, array $meta, array $names, str
         if (!$schema || !isset($names[$table])) throw new \RuntimeException('Unknown staged table.');
         if ($frame['kind'] === 'create') {
             if ($frame !== $schema) throw new \RuntimeException('Staged catalog schema mismatch.');
-            $queries[] = ['sql'=>wp_restore_staging_create($schema, $names[$table]), 'rows'=>0, 'tables'=>1]; $tables++;
+            $queries[] = ['sql'=>wp_restore_staging_create($schema, $names[$table], $temporary), 'rows'=>0, 'tables'=>1]; $tables++;
         } elseif ($frame['kind'] === 'insert') {
             $columns = array_column($schema['columns'], 'name');
             $ordered = $frame['columns']; $sorted = $ordered; $expected = $columns;
@@ -2516,6 +2517,159 @@ function wp_restore_staging_step(array &$run): void {
 }
 
 // Prior-database capture is read-only SQL. Recovery verification is a separate gate.
+// Metadata reads are bounded by the admitted inventory/column quotas.
+function wp_restore_assurance_read(PDO $pdo, string $sql): array {
+    $cursor = $pdo->query($sql);
+    try { return $cursor->fetchAll(PDO::FETCH_NUM); }
+    finally { $cursor->closeCursor(); }
+}
+function wp_restore_assurance_deadline(array $quota): void {
+    if (microtime(true) - $quota['started'] > 20) throw new \RuntimeException('Comparison time quota.');
+}
+function wp_restore_assurance_table(PDO $pdo, string $name, ?bool $temporary, array &$quota): array {
+    wp_restore_assurance_deadline($quota);
+    $q = wp_restore_backup_quote($name);
+    $ddl = wp_restore_assurance_read($pdo, 'SHOW CREATE TABLE ' . $q)[0][1];
+    $prefix = 'CREATE ' . ($temporary === true ? 'TEMPORARY ' : '') . 'TABLE ' . $q;
+    $quota['ddl'] += strlen($ddl);
+    if (strlen($ddl) > 1048576 || $quota['ddl'] > 50331648 || !str_starts_with($ddl, $prefix . ' ('))
+        throw new \RuntimeException('Comparison DDL identity or quota.');
+    // Replace ONLY the anchored server-emitted identifier/TEMP marker, not user bytes.
+    if ($temporary !== null) $ddl = 'CREATE TABLE `expected_shape`' . substr($ddl, strlen($prefix));
+    $columns = wp_restore_assurance_read($pdo, 'SHOW FULL COLUMNS FROM ' . $q);
+    if (!$columns || count($columns) > 1000) throw new \RuntimeException('Comparison column quota.');
+    $projection = [];
+    foreach ($columns as $column) {
+        if (preg_match('/VIRTUAL|STORED|PERSISTENT/i', $column[6])) throw new \RuntimeException('Unsupported generated column.');
+        $id = wp_restore_backup_quote($column[0]);
+        $projection[] = 'CAST(' . $id . (str_starts_with(strtolower($column[1]), 'bit(') ? ' AS UNSIGNED)' : ' AS BINARY)');
+    }
+    $cursor = $pdo->query('SELECT ' . implode(',', $projection) . ' FROM ' . $q);
+    $hashes = [];
+    try {
+        while (($row = $cursor->fetch(PDO::FETCH_NUM)) !== false) {
+            if (count($hashes) >= 100000 || ++$quota['rows'] > 3000000) throw new \RuntimeException('Comparison row quota.');
+            wp_restore_assurance_deadline($quota);
+            $cells = [];
+            foreach ($row as $value) {
+                if ($value === null) { $cells[] = null; continue; }
+                $value = (string)$value; $quota['bytes'] += strlen($value);
+                if (strlen($value) > 8388608 || $quota['bytes'] > 402653184) throw new \RuntimeException('Comparison byte quota.');
+                $cells[] = base64_encode($value);
+            }
+            $hashes[] = hash('sha256', json_encode($cells, JSON_THROW_ON_ERROR));
+        }
+    } finally { $cursor->closeCursor(); }
+    // Preserve duplicate multiplicity and the exact backup-catalog canonical spelling.
+    sort($hashes, SORT_STRING);
+    return ['rows'=>count($hashes), 'schema_sha256'=>hash('sha256', $ddl),
+        'data_sha256'=>hash('sha256', implode('', $hashes))];
+}
+function wp_restore_assurance_step(array &$run): void {
+    if (!wp_restore_backup_verified($run) || ($run['staging']['status'] ?? null) !== 'ready'
+        || $run['staging']['processed'] !== $run['values']['plan_bytes']
+        || ($_POST['assurance_confirmed'] ?? null) !== '1'
+        || !is_string($_POST['artifact_sha256'] ?? null) || !is_string($_POST['plan_sha256'] ?? null)
+        || !hash_equals($run['backup']['sha256'], $_POST['artifact_sha256'])
+        || !hash_equals($run['values']['plan_sha256'], $_POST['plan_sha256']))
+        throw new \RuntimeException('Explicit ready artifact/plan-bound comparison required.');
+    foreach (['sql','table','target_path','executor'] as $key) if (array_key_exists($key, $_POST))
+        throw new \RuntimeException('Client comparison targets forbidden.');
+    [$artifact, $old] = wp_restore_backup_artifact($run); fclose($artifact);
+    if (!hash_equals($old['old_state_sha256'], hash('sha256', json_encode($old['tables'], JSON_THROW_ON_ERROR)))
+        || !hash_equals($old['old_state_sha256'], $run['backup']['verification']['old_state_sha256']))
+        throw new \RuntimeException('Prior state authority changed.');
+    $meta = wp_restore_values_metadata($run);
+    $pdo = wp_restore_backup_pdo();
+    $profile = wp_restore_assurance_read($pdo, 'SELECT VERSION(),@@version_comment,@@innodb_table_locks,DATABASE()')[0];
+    if ($profile[0] !== '8.4.13' || $profile[1] !== 'MySQL Community Server - GPL' || $profile[2] !== '1')
+        throw new \RuntimeException('Unsupported comparison profile.');
+    $quota = ['started'=>microtime(true), 'rows'=>0, 'bytes'=>0, 'ddl'=>0];
+    $names = []; $temporary = []; $execution = ['tables'=>[]]; $i = 0; $nonce = bin2hex(random_bytes(12));
+    foreach ($meta['tables'] as $table) {
+        $key = $table['schema']['table'];
+        $execution['tables'][$key] = $table;
+        $names[$key] = '_wpr_' . substr($run['run_id'], 0, 32) . '_' . ++$i;
+        $temporary[$key] = '_wpe_' . $nonce . '_' . $i;
+    }
+    $oldNames = array_column($old['tables'], 'name');
+    $inventory = array_merge($oldNames, array_values($names), ['_wpr_staging_owner']);
+    sort($inventory, SORT_STRING);
+    if (!$names || count($inventory) !== count(array_unique($inventory)) || count($inventory) > 1000
+        || wp_restore_backup_inventory($pdo) !== $inventory) throw new \RuntimeException('Comparison inventory changed.');
+    $lock = 'wpr:' . substr(hash('sha256', $profile[3]), 0, 48);
+    $owned = false; $locked = false; $summary = null;
+    try {
+        $stmt = $pdo->prepare('SELECT GET_LOCK(?,0)');
+        try { $stmt->execute([$lock]); $owned = (string)$stmt->fetchColumn() === '1'; }
+        finally { $stmt->closeCursor(); }
+        if (!$owned) throw new \RuntimeException('Comparison ownership busy.');
+        $pdo->exec("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'");
+        $offset = 0; $charset = 'utf8mb4'; $rows = 0; $tables = 0;
+        // Reuse capture's chunk+FINAL authentication on every bounded batch. Only
+        // those captured bytes are compiled; no later reopening as executable SQL.
+        while ($offset < $run['values']['plan_bytes']) {
+            wp_restore_assurance_deadline($quota);
+            [$lines, $end] = wp_restore_staging_capture($run, $meta, $offset);
+            [$queries, $charset, $batchRows, $batchTables] = wp_restore_staging_compile($lines, $execution, $temporary, $charset, true);
+            foreach ($queries as $query) {
+                wp_restore_assurance_deadline($quota);
+                $affected = $pdo->exec($query['sql']);
+                if (($query['rows'] && $affected !== 1) || wp_restore_staging_warning_count($pdo) !== 0)
+                    throw new \RuntimeException('Private expectation outcome uncertain.');
+            }
+            $rows += $batchRows; $tables += $batchTables; $offset = $end;
+        }
+        if ($tables !== count($names) || $rows !== $run['staging']['rows']) throw new \RuntimeException('Incomplete private expectation.');
+        // Same demonstrated recipe as T15. START TRANSACTION would release locks.
+        $pdo->exec('SET autocommit=0');
+        $pdo->exec('LOCK TABLES ' . implode(',', array_map(static fn($name)=>wp_restore_backup_quote($name) . ' WRITE', $inventory)));
+        $locked = true;
+        if (wp_restore_backup_inventory($pdo) !== $inventory) throw new \RuntimeException('Locked inventory changed.');
+        $ddl = wp_restore_assurance_read($pdo, 'SHOW CREATE TABLE `_wpr_staging_owner`')[0][1];
+        if (!hash_equals($run['staging']['control_sha256'], hash('sha256', $ddl))) throw new \RuntimeException('Control schema changed.');
+        $owner = wp_restore_assurance_read($pdo, 'SELECT id,owner,token,plan,position,phase FROM `_wpr_staging_owner`');
+        if ($owner !== [['1',$run['run_id'],$run['staging']['token'],$run['values']['plan_sha256'],(string)$offset,'done']])
+            throw new \RuntimeException('Control ownership changed.');
+        foreach ($old['tables'] as $table) {
+            $actual = ['name'=>$table['name']] + wp_restore_assurance_table($pdo, $table['name'], null, $quota);
+            if ($actual !== $table) throw new \RuntimeException('Locked prior content changed.');
+        }
+        $compared = [];
+        foreach ($names as $key=>$name) {
+            $expected = wp_restore_assurance_table($pdo, $temporary[$key], true, $quota);
+            $actual = wp_restore_assurance_table($pdo, $name, false, $quota);
+            if ($actual !== $expected) throw new \RuntimeException('Locked staged content differs.');
+            $compared[] = $actual;
+        }
+        wp_restore_assurance_deadline($quota);
+        if (wp_restore_backup_inventory($pdo) !== $inventory) throw new \RuntimeException('Comparison namespace changed.');
+        $summary = ['status'=>'compared_as_of', 'requires_locked_recheck'=>true, 'compared_at'=>time(),
+            'position'=>$offset, 'plan_sha256'=>$run['values']['plan_sha256'], 'artifact_sha256'=>$run['backup']['sha256'],
+            'old_state_sha256'=>$old['old_state_sha256'], 'new_state_sha256'=>hash('sha256', json_encode($compared, JSON_THROW_ON_ERROR)),
+            'inventory_sha256'=>hash('sha256', json_encode($inventory, JSON_THROW_ON_ERROR)), 'profile'=>'mysql-8.4.13-innodb'];
+    } finally {
+        // Always attempt every cleanup, even if one fails. TEMPORARY is mandatory:
+        // cleanup must NEVER fall through to a permanent same-name table.
+        $clean = true;
+        if ($locked) { try { $pdo->exec('UNLOCK TABLES'); } catch (\Throwable $e) { $clean = false; } }
+        foreach ($temporary as $name) {
+            try { $pdo->exec('DROP TEMPORARY TABLE IF EXISTS ' . wp_restore_backup_quote($name)); }
+            catch (\Throwable $e) { $clean = false; }
+        }
+        if ($owned) {
+            try {
+                $stmt = $pdo->prepare('SELECT RELEASE_LOCK(?)');
+                try { $stmt->execute([$lock]); if ((string)$stmt->fetchColumn() !== '1') $clean = false; }
+                finally { $stmt->closeCursor(); }
+            } catch (\Throwable $e) { $clean = false; }
+        }
+        if (!$clean) throw new \RuntimeException('Comparison cleanup failed.');
+    }
+    // Historical observation only. T3 must rerun in its OWN uninterrupted window.
+    // GET_LOCK is cooperative; object locks do not fence future namespace changes.
+    $run['assurance'] = $summary;
+}
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
     return '`' . $name . '`';
@@ -2834,15 +2988,16 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step'][$operation];
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($operation === 'assurance') site_report_api_reply(400, ['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed']);
         if ($operation === 'staging') site_report_api_reply(400, ['error'=>'Staging refused or interrupted. Existing tables were not replaced. Inspect state; pending SQL requires recovery.','code'=>'staging_failed']);
         if ($operation === 'backup_confirm') site_report_api_reply(400, ['error'=>'Prior recovery confirmation failed. No table replacement was performed.','code'=>'prior_confirmation_failed']);
         if ($operation === 'backup') site_report_api_reply(400, ['error'=>'Prior database backup failed. The tool did not modify existing tables.','code'=>'prior_backup_failed']);

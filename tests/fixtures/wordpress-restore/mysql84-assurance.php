@@ -144,6 +144,7 @@ try {
         // Adapt trusted synthetic input data, never product PHP source.
         $sql = str_replace('CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGTEXT)', 'CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGBLOB)', $sql);
         $sql .= "SET TIME_ZONE='+00:00';\nCREATE TABLE old_types (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,payload LONGBLOB,amount DECIMAL(20,6) NOT NULL DEFAULT -1.250000,flag BIT(9) NOT NULL DEFAULT 0x0001,stamp TIMESTAMP(6) NULL DEFAULT NULL,label VARCHAR(32) NOT NULL DEFAULT 'literal-default',PRIMARY KEY (id),KEY label_idx (label(8) DESC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=19;\nINSERT INTO old_types VALUES (0,0x4100FF27,12.340000,0x01FF,'2024-02-03 04:05:06.123456','explicit'),(7,NULL,-9.000001,0x0001,NULL,'other');\n";
+        $sql .= "INSERT INTO old_postmeta VALUES (NULL,0x00FF),(NULL,0x00FF),(NULL,NULL),(NULL,NULL);\n";
         file_put_contents($site . '/db_fixture.sql.gz',gzencode($sql));
         $zip = new ZipArchive(); $zip->open($site . '/hosting_fixture.zip',ZipArchive::CREATE|ZipArchive::EXCL);
         foreach (['index.php'=>'<?php die("must not execute");','wp-settings.php'=>'Inert core','wp-load.php'=>'Inert core','wp-includes/version.php'=>"<?php \$wp_version='6.8.3';"] as $path=>$bytes) $zip->addFromString($path,$bytes);
@@ -219,22 +220,68 @@ try {
             check(!file_exists($site.'/index.php') && !file_exists($base.'/BACKUP_EXECUTED'),'no placement or backup PHP execution');
             return; // Compatibility regression only, no assurance request.
         }
-        if ($case==='row') $pdo->exec('UPDATE '.$q." SET label='tampered' WHERE id=7");
+        $bag = null;
+        foreach ($manifest['run']['values_manifest']['tables'] as $index=>$table)
+            if ($table['name']==='wp_postmeta') $bag='`_wpr_'.substr($run['run_id'],0,32).'_'.($index+1).'`';
+        check(is_string($bag) && $pdo->query('SELECT COUNT(*) FROM '.$bag.' WHERE id IS NULL AND payload IS NULL')->fetchColumn()==='2'
+            && $pdo->query("SELECT COUNT(*) FROM ".$bag." WHERE id IS NULL AND payload=UNHEX('00FF')")->fetchColumn()==='2','staged duplicate NULL and binary multiplicities are exact');
+        if ($case==='row') check($pdo->exec('UPDATE '.$bag." SET payload=NULL WHERE id IS NULL AND payload=UNHEX('00FF') LIMIT 1")===1,
+            'row negative changes multiplicities but preserves row count and distinct value set');
         if ($case==='schema') $pdo->exec('ALTER TABLE '.$q.' ADD unexpected INT');
         if ($case==='default') $pdo->exec('ALTER TABLE '.$q." ALTER label SET DEFAULT 'changed'");
         if ($case==='index') $pdo->exec('ALTER TABLE '.$q.' DROP INDEX label_idx');
         if ($case==='ai') $pdo->exec('ALTER TABLE '.$q.' AUTO_INCREMENT=999');
         if ($case==='inventory') $pdo->exec('CREATE TABLE unexpected_business (id INT) ENGINE=InnoDB');
-        if ($case==='unsupported') $pdo->exec('CREATE TABLE unsupported_engine (id INT) ENGINE=MyISAM');
+        if ($case==='unsupported') {
+            $pdo->exec('CREATE TABLE unsupported_engine (id INT) ENGINE=MyISAM');
+            check($pdo->query("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='unsupported_engine'")->fetchColumn()==='MyISAM','real unsupported storage profile, not a forged response');
+        }
         if (in_array($case,['plan','backup'],true)) {
             $path=ownedWork() . ($case==='plan'?'/values-plan.ndjson':'/prior-database.sql.gz');
             $bytes=file_get_contents($path); $bytes[32]=chr(ord($bytes[32])^1); file_put_contents($path,$bytes);
         }
-        $permanent = oracle($pdo);
-        if ($case==='concurrent') $pdo->exec('LOCK TABLES '.$q.' WRITE');
-        $previous = $run;
+        $permanent = oracle($pdo); // AFTER intentional trusted mutation.
+        $checkpoint=hash_file('sha256',ownedWork().'/state.json');
+        if ($case==='authority') {
+            $refused=['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed'];
+            $inputs=[$proof,array_replace($proof,['artifact_sha256'=>str_repeat('0',64),'assurance_confirmed'=>'1']),
+                array_replace($proof,['plan_sha256'=>str_repeat('0',64),'assurance_confirmed'=>'1'])];
+            foreach (['sql','table','target_path','executor'] as $field) $inputs[]=$proof+['assurance_confirmed'=>'1',$field=>'forbidden'];
+            foreach ($inputs as $input) {
+                [$s,$bad]=step('assurance',$input);
+                check($s===400 && $bad===$refused,'artifact plan explicit confirmation and executor authority refused');
+                [$s,$state]=request('wp_restore_state');
+                check($s===200 && $state['run']===$run && oracle($pdo)===$permanent
+                    && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'authority refusal preserves durable checkpoint and permanent state');
+            }
+            $pdo->exec("UPDATE _wpr_staging_owner SET token='".str_repeat('0',64)."' WHERE id=1");
+            $permanent=oracle($pdo);
+            [$s,$bad]=step('assurance',$proof+['assurance_confirmed'=>'1']);
+            [$readStatus,$state]=request('wp_restore_state');
+            check($s===400 && $bad===$refused && $readStatus===200 && $state['run']===$run && oracle($pdo)===$permanent
+                && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'journal authority tamper refused without checkpoint change or permanent repair');
+        }
+        if ($case==='concurrent') {
+            $mutex="CONCAT('wpr:',LEFT(SHA2(DATABASE(),256),48))";
+            check($pdo->query('SELECT IS_FREE_LOCK('.$mutex.')')->fetchColumn()==='1','cooperative mutex free; exclusion case holds a real object instead');
+            $pdo->exec('SET autocommit=0'); $pdo->exec('LOCK TABLES '.$q.' WRITE');
+        }
+        $started=microtime(true); $previous = $run;
         [$status,$j] = step('assurance',$proof+['assurance_confirmed'=>'1']+($case==='authority'?['csrf'=>'wrong']:[]));
-        if ($case==='concurrent') $pdo->exec('UNLOCK TABLES');
+        if ($case==='concurrent') {
+            $pdo->exec('UNLOCK TABLES');
+            check(microtime(true)-$started>=1 && $pdo->query('SELECT IS_FREE_LOCK('.$mutex.')')->fetchColumn()==='1','bounded external-object exclusion refusal, not cooperative mutex possession');
+        }
+        if ($case==='red' && $status!==200) {
+            $failed=$lastHttp; [$readStatus,$state]=request('wp_restore_state');
+            $files=[];
+            foreach ($originals as $name=>$hash) $files[$name]=hash_file('sha256',$site.'/'.$name)===$hash;
+            echo 'ASSURANCE_RED '.json_encode(['response'=>$failed,'state_status'=>$readStatus,
+                'checkpoint_unchanged'=>$state['run']===$previous,'permanent_before_sha256'=>$permanent,
+                'permanent_after_sha256'=>oracle($pdo),'old_sha256'=>oracle($pdo,['legacy_native','_wpr_business']),
+                'original_files_unchanged'=>$files],JSON_THROW_ON_ERROR)."\n";
+            $lastHttp=$failed;
+        }
         if (in_array($case,['red','valid'],true)) {
             check($status===200,'public assurance operation accepted'); $run=$j['run'];
             $a=$run['preflight']['assurance'];
@@ -243,15 +290,16 @@ try {
         } else {
             $expected = $case==='authority' ? ['error'=>'Invalid restore session.'] : ['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed'];
             check($status===($case==='authority'?403:400) && $j===$expected,'exact safe public rejection for '.$case);
-            [$s,$state]=request('wp_restore_state'); check($s===200 && $state['run']===$previous,'rejection leaves exact checkpoint and counters unchanged');
+            [$s,$state]=request('wp_restore_state'); check($s===200 && $state['run']===$previous && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'rejection leaves exact durable checkpoint and counters unchanged');
         }
         check(oracle($pdo)===$permanent,'assurance never mutates permanent OLD NEW control schemas rows counters');
         if ($case==='valid') {
             $pdo->exec('UPDATE '.$q." SET label='changed-after-release' WHERE id=7"); $permanent=oracle($pdo); $previous=$run;
+            $checkpoint=hash_file('sha256',ownedWork().'/state.json');
             [$s,$state]=request('wp_restore_state'); check($s===200 && $state['run']['preflight']['assurance']===$run['preflight']['assurance'] && !$state['run']['replacement_enabled'],'historical summary survives later tamper without granting future authority');
             [$s,$bad]=step('assurance',$proof+['assurance_confirmed'=>'1']);
             check($s===400 && $bad===['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed'],'fresh comparison refuses post-as-of tamper');
-            [$s,$state]=request('wp_restore_state'); check($state['run']===$previous && oracle($pdo)===$permanent,'later mismatch preserves historical checkpoint and tampered data without repair');
+            [$s,$state]=request('wp_restore_state'); check($state['run']===$previous && oracle($pdo)===$permanent && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'later mismatch preserves exact historical checkpoint and tampered data without repair');
         }
         foreach ($originals as $name=>$hash) check(hash_file('sha256',$site.'/'.$name)===$hash,'original bytes preserved '.$name);
         check(!file_exists($site.'/index.php') && !file_exists($base.'/BACKUP_EXECUTED'),'no public placement or backup PHP execution');

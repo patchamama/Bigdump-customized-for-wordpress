@@ -183,7 +183,11 @@ aplicación. Otra operación de sesión, confirmada y ligada a ambas huellas, ej
 progresivamente el plan tipado autenticado sólo en tablas NUEVAS del run. Conserva
 las anteriores y usa propiedad persistente de la base y un diario de intención;
 SQL pendiente o incierto no se repite automáticamente. Esto es staging, no
-reemplazo final ni certificación. Todavía no habilita reemplazar tablas ni publicar
+reemplazo final ni certificación. Otra operación confirmada compara el contenido
+vivo con expectativas privadas autenticadas en el perfil MySQL 8.4.13 demostrado.
+Su resultado histórico no otorga autoridad futura: el reemplazo debe comparar de
+nuevo dentro de su propia ventana de bloqueo ininterrumpida.
+Todavía no habilita reemplazar tablas ni publicar
 archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
