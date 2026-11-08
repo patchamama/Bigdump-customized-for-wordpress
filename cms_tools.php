@@ -2268,7 +2268,13 @@ function wp_restore_staging_create(array $schema, string $physical): string {
                     $sql .= ' ' . strtoupper($attribute); break;
                 case 'charset': $sql .= ' CHARACTER SET ' . wp_restore_sql_charset($value); break;
                 case 'collation': $sql .= ' COLLATE ' . wp_restore_sql_collation($value); break;
-                case 'default': case 'comment': $sql .= ' ' . strtoupper($attribute) . ' ' . wp_restore_staging_literal($value, $charset, true); break;
+                case 'default':
+                    $literal = wp_restore_staging_literal($value, $charset, true);
+                    // MySQL requires expression syntax even for literal TEXT/BLOB defaults.
+                    if (in_array($type, ['TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT','TINYBLOB','BLOB','MEDIUMBLOB','LONGBLOB'], true)
+                        && in_array($value['type'] ?? '', ['bytes','binary','hex','number'], true)) $literal = '(' . $literal . ')';
+                    $sql .= ' DEFAULT ' . $literal; break;
+                case 'comment': $sql .= ' COMMENT ' . wp_restore_staging_literal($value, $charset, true); break;
                 case 'on_update':
                     if (($value['type'] ?? '') !== 'current_timestamp') throw new \RuntimeException('Invalid temporal update.');
                     $sql .= ' ON UPDATE ' . wp_restore_staging_literal($value, $charset, true); break;
@@ -2369,6 +2375,27 @@ function wp_restore_staging_compile(array $lines, array $meta, array $names, str
         } else throw new \RuntimeException('Unsupported staged frame.');
     }
     return [$queries, $charset, $rows, $tables];
+}
+function wp_restore_staging_warning_count(PDO $pdo): int {
+    // Native preparation of this diagnostic SHOW can itself produce Error 1295.
+    // Use text protocol only for the fixed reader; never clear or ignore conditions.
+    $previous = $pdo->getAttribute(PDO::ATTR_EMULATE_PREPARES);
+    $cursor = null;
+    try {
+        if (!$pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, true)) throw new \RuntimeException('Cannot select diagnostic reader protocol.');
+        $cursor = $pdo->query('SHOW COUNT(*) WARNINGS');
+        if (!$cursor) throw new \RuntimeException('Diagnostic reader unavailable.');
+        $count = $cursor->fetchColumn();
+        if ((!is_int($count) && !is_string($count)) || !preg_match('/^(?:0|[1-9][0-9]{0,9})$/D', (string)$count))
+            throw new \RuntimeException('Invalid diagnostic count.');
+        return (int)$count;
+    } finally {
+        try {
+            if ($cursor instanceof PDOStatement && !$cursor->closeCursor()) throw new \RuntimeException('Cannot close diagnostic reader.');
+        } finally {
+            if (!$pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $previous)) throw new \RuntimeException('Cannot restore execution protocol.');
+        }
+    }
 }
 function wp_restore_staging_intent(array &$run): void {
     $run['staging']['status'] = 'pending';
@@ -2472,7 +2499,7 @@ function wp_restore_staging_step(array &$run): void {
         // were observed and the DATABASE journal acknowledges this exact batch.
         foreach ($queries as $query) {
             $affected = $pdo->exec($query['sql']);
-            if (($query['rows'] && $affected !== 1) || (int)$pdo->query('SHOW COUNT(*) WARNINGS')->fetchColumn() !== 0) throw new \RuntimeException('Staging outcome uncertain.');
+            if (($query['rows'] && $affected !== 1) || wp_restore_staging_warning_count($pdo) !== 0) throw new \RuntimeException('Staging outcome uncertain.');
         }
         $stmt = $pdo->prepare('UPDATE ' . $control . ' SET position=?,phase=? WHERE id=1 AND owner=? AND token=? AND position=? AND phase=?');
         $stmt->execute([$end, 'done', $run['run_id'], $progress['token'], $progress['processed'], 'pending']);

@@ -304,6 +304,41 @@ no se reintenta a ciegas. No elimines los originales ni uses un gzip parcial.
 
 ## Confirmed progressive SQL staging — NEW tables only
 
+### Diagnostic warning-reader compatibility
+
+The staging warning-count reader temporarily selects text protocol for its fixed
+SHOW command, closes the cursor and restores the exact prior PDO preparation flag
+in `finally`. SQL execution and journal statements remain native; nonzero warnings
+still refuse the batch. Missing/malformed counts and reader failures fail closed.
+This targets the native diagnostic reader's manufactured Error 1295 on the
+observed PHP 8.3.36 / MySQL 8.4.13 profile; it is not a warning-code bypass.
+
+Focused supplement: `php tests/wordpress-restore-warning-reader.php` checks failure
+paths with doubles. The isolated public runner's `--scenario staging-only` checks
+staging compatibility without assurance; `--check-reader` also exercises the actual
+runtime helper with clean and genuine-warning native controls. Helper nonzero
+preservation is not itself public warning-rejection proof. No generic dump/type
+compatibility, content assurance or final-replacement authority follows from this
+reader correction. Exploratory diagnostic source and receipts remain archived.
+
+A new checkout also needs the [pinned image binding](wordpress-restore-mysql84-fixture.md)
+and this private receipt parent before invoking the runner:
+
+```sh
+mkdir -p -m 700 .atl/wordpress-restore-content-assurance-proof
+```
+
+Already-admitted non-NULL literal TEXT/BLOB defaults use parenthesized expression
+syntax while preserving their literal bytes; comments and other defaults are unchanged.
+`php tests/wordpress-restore-staging-defaults.php` checks this emission; `--existing`
+selects unchanged-default regressions and `STAGING_DEFAULT_SOURCE` selects trusted source.
+Los defaults literales TEXT/BLOB conservan sus bytes; esta corrección no admite
+expresiones arbitrarias ni certifica WordPress o el reemplazo final.
+
+**Pending assurance boundary:** the authenticated prepared plan and ownership journal
+are not seals of subsequent live NEW content. Existing `ready` runs must not be
+interpreted as content-assured or eligible for final replacement.
+
 After `files`, `sql`, `values`, `backup` and `backup_confirm` have succeeded, read
 `GET ?action=wp_restore_state&manifest=values`. Keep the exact final
 `run.values_manifest.plan_sha256` and the generated prior-artifact fingerprint.
