@@ -693,3 +693,19 @@ disabled). `runtime_verified` is true only for `verified`. These are bounded smo
 checks, not a compatibility test. The end-to-end proof installs an official WordPress
 core in the isolated containers: `python3 tests/wordpress-restore-assurance.py
 --endpoint <local docker socket> --scenario e2e-wordpress --wordpress <wordpress.tar.gz>`.
+
+## Installations in one database
+
+On the first tab the tool lists every complete WordPress installation in the configured
+database: a prefix that owns `options`, `posts` and `users`, with its blog title, URL,
+published posts, active plugins and table count. *Preview* opens a modal whose selector
+switches the prefix live. A preview is a throwaway folder `wpr_preview_<random>` that
+copies the WordPress entry scripts, symlinks `wp-includes`, `wp-content/{plugins,themes,
+mu-plugins,uploads}` and the `wp-admin` asset folders, and has its own `wp-config.php`
+(selected prefix, forced `WP_HOME`/`WP_SITEURL`, cron and file modifications disabled).
+Every request needs a random token (query once, then a cookie), and the folder is removed
+when the modal closes. Because it runs real code, a preview may write to that
+installation's tables. *Create snapshot* copies every table of the current installation to
+`<prefix>_<YYYYMMDD>_` (`_<HHMM>_` appended if it exists), never overwriting, and rewrites
+the prefix-bound `user_roles` option and usermeta keys. Files and assets are not copied.
+Proof: `e2e-wordpress` scenario and `node tests/wordpress-installs-ui.cjs <page.html>`.

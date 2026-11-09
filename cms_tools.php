@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.19.0');
+define('TOOL_VERSION',  '3.20.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -228,6 +228,26 @@ $GLOBALS['__I18N'] = [
         'Database archive' => 'Archivo de la base de datos',
         'Confirm destination URL' => 'Confirmar URL del destino',
         'Prepare restoration' => 'Preparar restauración',
+        'WordPress installations in this database' => 'Instalaciones de WordPress en esta base de datos',
+        'Installations detected: {count}. Each table prefix is one installation.' => 'Instalaciones detectadas: {count}. Cada prefijo de tablas es una instalación.',
+        'Only the current installation was found.' => 'Solo se encontró la instalación actual.',
+        'Prefix' => 'Prefijo',
+        'Site title' => 'Título del sitio',
+        'Posts' => 'Entradas',
+        'Plugins' => 'Plugins',
+        'Tables' => 'Tablas',
+        'current' => 'actual',
+        'Preview' => 'Vista previa',
+        'Create snapshot of the current site' => 'Crear snapshot del sitio actual',
+        'Copies every table of the current installation into the same database under the prefix {prefix}. Nothing existing is changed.' => 'Copia todas las tablas de la instalación actual en la misma base de datos con el prefijo {prefix}. No se modifica nada existente.',
+        'Snapshot created with prefix {prefix}. Files and assets are not copied, so it may look incomplete later if they disappear.' => 'Snapshot creado con el prefijo {prefix}. Los archivos y recursos no se copian, así que más adelante puede verse incompleto si desaparecen.',
+        'Copying table {name} ({done}/{total})…' => 'Copiando la tabla {name} ({done}/{total})…',
+        'Installation preview' => 'Vista previa de la instalación',
+        'The preview runs that installation with the current files and plugins, so it may write to its tables and can look different from the original. Access needs a temporary random token and ends when you close this window.' => 'La vista previa ejecuta esa instalación con los archivos y plugins actuales, por lo que puede escribir en sus tablas y verse distinta del original. El acceso requiere un token aleatorio temporal y termina al cerrar esta ventana.',
+        'Installation' => 'Instalación',
+        'Close' => 'Cerrar',
+        'Loading the preview…' => 'Cargando la vista previa…',
+        'Installations could not be listed.' => 'No se pudieron listar las instalaciones.',
         'I confirm re-enabling the plugins that were active in the backup, one at a time, keeping each only if the site stays healthy.' => 'Confirmo reactivar uno a uno los plugins que estaban activos en el backup, conservando cada uno solo si el sitio sigue sano.',
         'Checking the restored site over HTTP and re-enabling plugins one by one.' => 'Comprobando el sitio restaurado por HTTP y reactivando los plugins uno a uno.',
         'Restored site checked: the home page and login respond correctly and {count} plugin(s) were re-enabled without breaking the site. These are bounded smoke checks, not a full compatibility test. Next: update image URLs and regenerate .htaccess.' => 'Sitio restaurado comprobado: la portada y el login responden correctamente y se reactivaron {count} plugin(s) sin romper el sitio. Son comprobaciones básicas acotadas, no una prueba completa de compatibilidad. Siguiente: actualizar las URLs de imágenes y regenerar el .htaccess.',
@@ -7637,6 +7657,161 @@ if ($authenticated && isset($_GET['action'])) {
     // The sandbox table prefix derives from the live prefix (wp_ -> wptest_).
     $sandbox_prefix = function ($live_prefix) { return rtrim($live_prefix, '_') . 'test_'; };
 
+    // --- INSTALLATIONS: several WordPress installs (table prefixes) in one database ---
+    // An install is a prefix owning <p>options, <p>posts and <p>users. Everything below validates
+    // prefixes against that detected list; no client-supplied identifier is trusted.
+    $installs_scan = function (PDO $pdo, string $live): array {
+        $tables = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+        $set = array_flip($tables); $found = [];
+        foreach ($tables as $t) {
+            if (!str_ends_with($t, 'options') || !preg_match('/^[A-Za-z0-9_]{8,64}$/D', $t)) continue;
+            $p = substr($t, 0, -7);
+            if (preg_match('/^[A-Za-z0-9_]{1,40}$/D', $p) && isset($set[$p . 'posts'], $set[$p . 'users'])) $found[$p] = true;
+        }
+        $prefixes = array_keys($found); $owned = array_fill_keys($prefixes, []);
+        foreach ($tables as $t) { // a table belongs to the longest matching install prefix
+            $best = null;
+            foreach ($prefixes as $p) if (str_starts_with($t, $p) && ($best === null || strlen($p) > strlen($best))) $best = $p;
+            if ($best !== null) $owned[$best][] = $t;
+        }
+        $out = [];
+        foreach ($prefixes as $p) {
+            $q = "`{$p}options`";
+            $st = $pdo->prepare("SELECT option_name, option_value FROM $q WHERE option_name IN ('blogname','siteurl','template','active_plugins')");
+            $st->execute(); $o = $st->fetchAll(PDO::FETCH_KEY_PAIR);
+            $active = @unserialize((string)($o['active_plugins'] ?? ''), ['allowed_classes' => false]);
+            $posts = (int)$pdo->query("SELECT COUNT(*) FROM `{$p}posts` WHERE post_status='publish' AND post_type IN ('post','page')")->fetchColumn();
+            $out[] = ['prefix' => $p, 'current' => $p === $live, 'title' => mb_substr((string)($o['blogname'] ?? ''), 0, 120),
+                'url' => mb_substr((string)($o['siteurl'] ?? ''), 0, 200), 'theme' => (string)($o['template'] ?? ''),
+                'plugins' => is_array($active) ? count($active) : 0, 'posts' => $posts, 'tables' => count($owned[$p]),
+                'snapshot' => (bool)preg_match('/_[0-9]{8}(?:_[0-9]{4})?_$/', $p)];
+        }
+        usort($out, fn($a, $b) => [!$a['current'], $a['prefix']] <=> [!$b['current'], $b['prefix']]);
+        return [$out, $owned];
+    };
+    $preview_remove = function (string $dir): void {
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($it as $f) { $path = $f->getPathname(); if (is_link($path)) @unlink($path); elseif ($f->isDir()) @rmdir($path); else @unlink($path); }
+        @rmdir($dir);
+    };
+    $preview_config = function (array $c_db, string $prefix, string $url, string $token) {
+        $path = rtrim(parse_url($url, PHP_URL_PATH) ?: '/', '/') . '/';
+        $cfg  = "<?php\n/* CMS Tools installation preview: token protected, removed when the viewer closes. */\n";
+        $cfg .= "\$cmspv = " . var_export($token, true) . ";\n";
+        $cfg .= "if (!isset(\$_COOKIE['cmspv']) || !hash_equals(\$cmspv, (string)\$_COOKIE['cmspv'])) {\n"
+              . "    if (!isset(\$_GET['cmspv']) || !hash_equals(\$cmspv, (string)\$_GET['cmspv'])) { http_response_code(403); exit('Preview token required.'); }\n"
+              . "    setcookie('cmspv', \$cmspv, ['path' => " . var_export($path, true) . ", 'httponly' => true, 'samesite' => 'Lax']); \$_COOKIE['cmspv'] = \$cmspv;\n}\n";
+        foreach (['DB_NAME' => 'name', 'DB_USER' => 'user', 'DB_PASSWORD' => 'pass', 'DB_HOST' => 'host'] as $const => $key) $cfg .= "define('$const', " . var_export($c_db[$key], true) . ");\n";
+        $cfg .= "define('DB_CHARSET', 'utf8mb4');\n\$table_prefix = " . var_export($prefix, true) . ";\n";
+        $cfg .= "define('WP_HOME', " . var_export($url, true) . ");\ndefine('WP_SITEURL', " . var_export($url, true) . ");\n";
+        $cfg .= "define('DISABLE_WP_CRON', true);\ndefine('AUTOMATIC_UPDATER_DISABLED', true);\ndefine('DISALLOW_FILE_MODS', true);\ndefine('WP_DEBUG', false);\n";
+        return $cfg . "if (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');\nrequire_once ABSPATH . 'wp-settings.php';\n";
+    };
+    $preview_dir = function (string $folder) use ($abspath): ?string {
+        $dir = rtrim($abspath, '/') . '/' . $folder;
+        return preg_match('/^wpr_preview_[0-9a-f]{16}$/D', $folder) && is_dir($dir) && !is_link($dir) ? $dir : null;
+    };
+    if (in_array($action, ['installs_list', 'installs_snapshot_start', 'installs_snapshot_table', 'installs_snapshot_finish',
+                           'installs_preview_open', 'installs_preview_switch', 'installs_preview_close'], true)) {
+        @set_time_limit(0);
+        $c_db = $sandbox_db(); $live = $c_db['prefix'];
+        $r = try_db_connect($c_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo'];
+        try {
+            // WordPress schemas legitimately carry zero-date defaults that strict modes refuse to copy.
+            $pdo->exec("SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'");
+            [$installs, $owned] = $installs_scan($pdo, $live);
+            $known = array_column($installs, 'prefix');
+            $base_url = function () {
+                $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                return rtrim(dirname($proto . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['REQUEST_URI'] ?? '/')), '/');
+            };
+            $new = (string)($_POST['new_prefix'] ?? '');
+            $snap_ok = preg_match('/^' . preg_quote(rtrim($live, '_'), '/') . '_[0-9]{8}(?:_[0-9]{4})?_$/D', $new) === 1;
+            if ($action === 'installs_list') {
+                echo json_encode(['ok' => true, 'live' => $live, 'installs' => $installs]); exit;
+            }
+            if ($action === 'installs_snapshot_start') {
+                if (!in_array($live, $known, true)) throw new RuntimeException('The current prefix is not a complete WordPress installation.');
+                $exists = fn(string $pfx) => (bool)$pdo->query("SHOW TABLES LIKE " . $pdo->quote(str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $pfx) . '%'))->fetchColumn();
+                $new = rtrim($live, '_') . '_' . date('Ymd') . '_';
+                if ($exists($new)) $new = rtrim($live, '_') . '_' . date('Ymd_Hi') . '_';
+                if ($exists($new)) throw new RuntimeException('A snapshot with this prefix already exists.');
+                $tables = [];
+                foreach ($owned[$live] as $t) $tables[] = ['name' => $t, 'rows' => (int)$pdo->query("SELECT COUNT(*) FROM `$t`")->fetchColumn()];
+                echo json_encode(['ok' => true, 'new_prefix' => $new, 'tables' => $tables]); exit;
+            }
+            if ($action === 'installs_snapshot_table' || $action === 'installs_snapshot_finish') {
+                if (!$snap_ok) throw new RuntimeException('Invalid snapshot prefix.');
+            }
+            if ($action === 'installs_snapshot_table') {
+                $t = (string)($_POST['table'] ?? '');
+                if (!in_array($t, $owned[$live] ?? [], true)) throw new RuntimeException('Table does not belong to the current installation.');
+                $target = $new . substr($t, strlen($live));
+                if (strlen($target) > 64 || $pdo->query("SHOW TABLES LIKE " . $pdo->quote(str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $target)))->fetchColumn())
+                    throw new RuntimeException('Snapshot table already exists or its name is too long.');
+                $pdo->exec("CREATE TABLE `$target` LIKE `$t`");
+                $pdo->exec("INSERT INTO `$target` SELECT * FROM `$t`");
+                echo json_encode(['ok' => true, 'table' => $t, 'into' => $target, 'rows' => (int)$pdo->query("SELECT COUNT(*) FROM `$target`")->fetchColumn()]); exit;
+            }
+            if ($action === 'installs_snapshot_finish') {
+                // Prefix-bound data inside the copy must follow the new prefix, or roles/capabilities are lost.
+                $like = str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $live) . '%';
+                $pdo->prepare("UPDATE `{$new}options` SET option_name = ? WHERE option_name = ?")->execute([$new . 'user_roles', $live . 'user_roles']);
+                $st = $pdo->prepare("UPDATE `{$new}usermeta` SET meta_key = CONCAT(?, SUBSTRING(meta_key, ?)) WHERE meta_key LIKE ?");
+                $st->execute([$new, strlen($live) + 1, $like]);
+                [$after] = $installs_scan($pdo, $live);
+                echo json_encode(['ok' => in_array($new, array_column($after, 'prefix'), true), 'new_prefix' => $new, 'usermeta_rewritten' => $st->rowCount()]); exit;
+            }
+            // Previews: a token-protected, throwaway WordPress folder that reuses the live core, plugins,
+            // themes and uploads (symlinks) and points at the selected prefix.
+            $prefix = (string)($_POST['prefix'] ?? '');
+            if ($action === 'installs_preview_open') {
+                if (!in_array($prefix, $known, true)) throw new RuntimeException('Unknown installation prefix.');
+                $root = rtrim($abspath, '/');
+                if (!is_file($root . '/wp-load.php') || !is_dir($root . '/wp-includes')) throw new RuntimeException('WordPress core files were not found next to this tool.');
+                foreach (glob($root . '/wpr_preview_*', GLOB_ONLYDIR) ?: [] as $old) if (!is_link($old) && preg_match('/wpr_preview_[0-9a-f]{16}$/D', $old)) $preview_remove($old);
+                $folder = 'wpr_preview_' . bin2hex(random_bytes(8)); $dir = $root . '/' . $folder; $token = bin2hex(random_bytes(16));
+                if (!@mkdir($dir, 0755)) throw new RuntimeException('Could not create the preview folder (web root not writable).');
+                // PHP resolves a symlinked script to its real path, so entry scripts are COPIED: their __DIR__/ABSPATH
+                // must be this folder or WordPress would load the live wp-config.php. Large trees are symlinked, and
+                // wp-admin keeps only its asset/include folders plus admin-ajax.php, so no admin entry point can run
+                // against the live configuration from inside a preview.
+                $links = ['wp-includes'];
+                foreach (['includes', 'css', 'images', 'js'] as $d) if (is_dir($root . '/wp-admin/' . $d)) $links[] = 'wp-admin/' . $d;
+                @mkdir($dir . '/wp-content', 0755); @mkdir($dir . '/wp-admin', 0755);
+                foreach (['plugins', 'themes', 'mu-plugins', 'uploads'] as $d) if (is_dir($root . '/wp-content/' . $d)) $links[] = 'wp-content/' . $d;
+                $copies = [];
+                foreach (glob($root . '/*.php') ?: [] as $f) if (!in_array(basename($f), ['wp-config.php', basename(__FILE__)], true)) $copies[] = basename($f);
+                if (is_file($root . '/wp-admin/admin-ajax.php')) $copies[] = 'wp-admin/admin-ajax.php';
+                foreach ($links as $name) {
+                    if (!@symlink($root . '/' . $name, $dir . '/' . $name)) { $preview_remove($dir); throw new RuntimeException('Symlinks are required for installation previews on this host.'); }
+                }
+                foreach ($copies as $name) {
+                    if (!@copy($root . '/' . $name, $dir . '/' . $name)) { $preview_remove($dir); throw new RuntimeException('Could not copy WordPress entry scripts for the preview.'); }
+                }
+                $url = $base_url() . '/' . $folder;
+                file_put_contents($dir . '/wp-config.php', $preview_config($c_db, $prefix, $url, $token)); @chmod($dir . '/wp-config.php', 0600);
+                echo json_encode(['ok' => true, 'folder' => $folder, 'token' => $token, 'url' => $url . '/?cmspv=' . $token, 'prefix' => $prefix]); exit;
+            }
+            $dir = $preview_dir((string)($_POST['folder'] ?? ''));
+            if ($dir === null) throw new RuntimeException('Unknown preview folder.');
+            $cfg = (string)@file_get_contents($dir . '/wp-config.php');
+            if (!preg_match("/^\\\$cmspv = '([0-9a-f]{32})';/m", $cfg, $m) || !hash_equals($m[1], (string)($_POST['token'] ?? ''))) throw new RuntimeException('Preview token mismatch.');
+            if ($action === 'installs_preview_switch') {
+                if (!in_array($prefix, $known, true)) throw new RuntimeException('Unknown installation prefix.');
+                $url = $base_url() . '/' . basename($dir);
+                file_put_contents($dir . '/wp-config.php', $preview_config($c_db, $prefix, $url, $m[1]));
+                echo json_encode(['ok' => true, 'url' => $url . '/?cmspv=' . $m[1], 'prefix' => $prefix]); exit;
+            }
+            $preview_remove($dir); // installs_preview_close
+            echo json_encode(['ok' => true]); exit;
+        } catch (Throwable $e) {
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]); exit;
+        }
+    }
+
     // --- CLONE TABLES: list the source tables + row counts ---
     if ($action === 'clone_tables_start') {
         $c_db = $sandbox_db();
@@ -10643,6 +10818,111 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
         } catch (error) { el('wp-restore-progress').textContent = error.message || text.failed; el('wp-restore-wizard').hidden = false; }
     };
     window.wpRestoreWizard();
+})();
+</script>
+
+<section id="installs-card" class="instructions" hidden>
+    <h3><?= h(t('WordPress installations in this database')) ?></h3>
+    <p id="installs-summary" role="status"></p>
+    <div id="installs-list" style="overflow-x:auto"></div>
+    <p><button id="installs-snapshot" type="button" class="btn btn-sm"><?= h(t('Create snapshot of the current site')) ?></button></p>
+    <p id="installs-status" role="status"></p>
+</section>
+<div id="installs-modal" role="dialog" aria-modal="true" aria-labelledby="installs-modal-title" hidden
+     style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--surface,#1a1d2e);color:var(--text,#e2e8f0);border:1px solid var(--border,#2d3148);border-radius:8px;width:min(1100px,100%);height:min(86vh,100%);display:flex;flex-direction:column">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--border,#2d3148)">
+            <strong id="installs-modal-title"><?= h(t('Installation preview')) ?></strong>
+            <label><span style="font-size:12px"><?= h(t('Installation')) ?></span>
+                <select id="installs-switch" style="padding:5px 8px;background:var(--surface2,#232640);border:1px solid var(--border,#2d3148);border-radius:4px;color:inherit"></select></label>
+            <span id="installs-modal-status" role="status" style="font-size:12px"></span>
+            <button id="installs-close" type="button" class="btn btn-sm" style="margin-left:auto"><?= h(t('Close')) ?></button>
+        </div>
+        <p style="font-size:12px;margin:6px 14px;color:var(--text-dim,#a0aec0)"><?= h(t('The preview runs that installation with the current files and plugins, so it may write to its tables and can look different from the original. Access needs a temporary random token and ends when you close this window.')) ?></p>
+        <iframe id="installs-frame" title="<?= h(t('Installation preview')) ?>" style="flex:1;border:0;background:#fff;width:100%" referrerpolicy="no-referrer"></iframe>
+    </div>
+</div>
+<script>
+(() => {
+    const el = id => document.getElementById(id);
+    const text = <?= json_encode([
+        'count'=>t('Installations detected: {count}. Each table prefix is one installation.'), 'single'=>t('Only the current installation was found.'),
+        'prefix'=>t('Prefix'), 'title'=>t('Site title'), 'posts'=>t('Posts'), 'plugins'=>t('Plugins'), 'tables'=>t('Tables'),
+        'current'=>t('current'), 'snapshot'=>t('snapshot'), 'preview'=>t('Preview'),
+        'snapshotHelp'=>t('Copies every table of the current installation into the same database under the prefix {prefix}. Nothing existing is changed.'),
+        'snapshotDone'=>t('Snapshot created with prefix {prefix}. Files and assets are not copied, so it may look incomplete later if they disappear.'),
+        'copying'=>t('Copying table {name} ({done}/{total})…'), 'loading'=>t('Loading the preview…'), 'failed'=>t('Installations could not be listed.'),
+    ], JSON_UNESCAPED_UNICODE) ?>;
+    let preview = null, installs = [];
+    async function call(action, fields = {}) {
+        const body = new FormData();
+        for (const [k, v] of Object.entries(fields)) body.append(k, v);
+        const response = await fetch('?action=' + action, {method: 'POST', credentials: 'same-origin', body});
+        const data = await response.json();
+        if (!data.ok) throw new Error(data.error || text.failed);
+        return data;
+    }
+    const cell = (value, tag = 'td') => { const c = document.createElement(tag); c.textContent = value; c.style.padding = '4px 10px'; c.style.textAlign = 'left'; return c; };
+    function render(data) {
+        installs = data.installs;
+        const box = el('installs-card'); box.hidden = false;
+        el('installs-summary').textContent = installs.length > 1 ? text.count.replace('{count}', String(installs.length)) : text.single;
+        const table = document.createElement('table'); const head = table.insertRow();
+        for (const label of [text.prefix, text.title, 'URL', text.posts, text.plugins, text.tables, '']) head.appendChild(cell(label, 'th'));
+        for (const row of installs) {
+            const tr = table.insertRow();
+            tr.appendChild(cell(row.prefix + (row.current ? ' (' + text.current + ')' : row.snapshot ? ' (' + text.snapshot + ')' : '')));
+            tr.appendChild(cell(row.title)); tr.appendChild(cell(row.url));
+            tr.appendChild(cell(String(row.posts))); tr.appendChild(cell(String(row.plugins))); tr.appendChild(cell(String(row.tables)));
+            const action = document.createElement('td'); const b = document.createElement('button');
+            b.type = 'button'; b.className = 'btn btn-sm'; b.textContent = text.preview; b.addEventListener('click', () => openPreview(row.prefix));
+            action.appendChild(b); tr.appendChild(action);
+        }
+        el('installs-list').replaceChildren(table);
+    }
+    async function refresh() { render(await call('installs_list')); }
+    async function openPreview(prefix) {
+        const select = el('installs-switch'); select.replaceChildren();
+        for (const row of installs) select.add(new Option(row.prefix + (row.title ? ' — ' + row.title : ''), row.prefix));
+        select.value = prefix;
+        el('installs-modal').hidden = false; el('installs-modal').style.display = 'flex';
+        el('installs-modal-status').textContent = text.loading;
+        try {
+            const data = preview ? await call('installs_preview_switch', {folder: preview.folder, token: preview.token, prefix})
+                                 : await call('installs_preview_open', {prefix});
+            preview = {folder: data.folder || preview.folder, token: data.token || preview.token};
+            el('installs-frame').src = data.url + '&_=' + Date.now();
+            el('installs-modal-status').textContent = prefix;
+        } catch (error) { el('installs-modal-status').textContent = error.message; }
+        el('installs-close').focus();
+    }
+    async function closePreview() {
+        el('installs-modal').hidden = true; el('installs-modal').style.display = 'none'; el('installs-frame').src = 'about:blank';
+        const current = preview; preview = null;
+        if (current) try { await call('installs_preview_close', {folder: current.folder, token: current.token}); } catch (error) { /* removed on next open */ }
+    }
+    async function snapshot() {
+        const status = el('installs-status'), button = el('installs-snapshot'); button.disabled = true;
+        try {
+            const start = await call('installs_snapshot_start');
+            status.textContent = text.snapshotHelp.replace('{prefix}', start.new_prefix);
+            let done = 0;
+            for (const t of start.tables) {
+                status.textContent = text.copying.replace('{name}', t.name).replace('{done}', String(++done)).replace('{total}', String(start.tables.length));
+                await call('installs_snapshot_table', {new_prefix: start.new_prefix, table: t.name});
+            }
+            await call('installs_snapshot_finish', {new_prefix: start.new_prefix});
+            status.textContent = text.snapshotDone.replace('{prefix}', start.new_prefix);
+            await refresh();
+        } catch (error) { status.textContent = error.message; }
+        button.disabled = false;
+    }
+    el('installs-switch').addEventListener('change', event => openPreview(event.target.value));
+    el('installs-close').addEventListener('click', closePreview);
+    document.addEventListener('keydown', event => { if (event.key === 'Escape' && !el('installs-modal').hidden) closePreview(); });
+    window.addEventListener('pagehide', () => { if (preview) { const body = new FormData(); body.append('folder', preview.folder); body.append('token', preview.token); navigator.sendBeacon('?action=installs_preview_close', body); } });
+    el('installs-snapshot').addEventListener('click', snapshot);
+    refresh().catch(() => { /* no database configured yet: the card stays hidden */ });
 })();
 </script>
 

@@ -162,6 +162,40 @@ try {
     check($pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='restore_target' AND TABLE_NAME LIKE 'srcwp\\_%'")->fetchColumn() === '0'
         && $pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='restore_target' AND TABLE_NAME='unrelated_old'")->fetchColumn() === '0', 'previous tables are gone and no source-prefix table remains');
     check(str_contains((string)file_get_contents($site . '/wp-config.php'), "\$table_prefix='wp_'"), 'wp-config.php keeps the destination prefix and credentials');
+    // Several installations in one database: list, snapshot, previews.
+    [$status, $list] = api('installs_list', []);
+    check($status === 200 && $list['ok'] && $list['live'] === 'wp_' && count($list['installs']) === 1 && $list['installs'][0]['title'] === 'E2E Restored Site'
+        && $list['installs'][0]['current'] === true && $list['installs'][0]['posts'] >= 1, 'installation list shows the single restored site with its blog title');
+    [$status, $start] = api('installs_snapshot_start', []);
+    check($status === 200 && $start['ok'] && preg_match('/^wp_[0-9]{8}_$/', $start['new_prefix']) && count($start['tables']) >= 12, 'snapshot prefix is the current prefix plus today\'s date');
+    $snap = $start['new_prefix'];
+    foreach ($start['tables'] as $t) { [$status, $copy] = api('installs_snapshot_table', ['new_prefix'=>$snap, 'table'=>$t['name']]); if (!($copy['ok'] ?? false)) throw new RuntimeException('snapshot table failed: ' . json_encode($copy)); }
+    [$status, $fin] = api('installs_snapshot_finish', ['new_prefix'=>$snap]);
+    check($fin['ok'] === true && $fin['usermeta_rewritten'] >= 2, 'snapshot completed and prefix-bound keys were rewritten');
+    check($pdo->query("SELECT COUNT(*) FROM {$snap}usermeta WHERE meta_key='{$snap}capabilities'")->fetchColumn() === '1'
+        && $pdo->query("SELECT COUNT(*) FROM {$snap}options WHERE option_name='{$snap}user_roles'")->fetchColumn() === '1'
+        && $pdo->query("SELECT COUNT(*) FROM wp_options WHERE option_name='wp_user_roles'")->fetchColumn() === '1', 'snapshot owns its roles and capabilities; the live installation is untouched');
+    [$status, $list] = api('installs_list', []);
+    check(count($list['installs']) === 2 && $list['installs'][1]['prefix'] === $snap && $list['installs'][1]['snapshot'] === true
+        && $list['installs'][1]['title'] === 'E2E Restored Site', 'the snapshot is listed as a second installation');
+    [$status, $dup] = api('installs_snapshot_table', ['new_prefix'=>'evil_', 'table'=>'wp_options']);
+    check(($dup['ok'] ?? true) === false && $pdo->query("SHOW TABLES LIKE 'evil%'")->fetchColumn() === false, 'a snapshot prefix outside the current-prefix-plus-date pattern is refused');
+    [$status, $open] = api('installs_preview_open', ['prefix'=>$snap]);
+    check($status === 200 && $open['ok'] && str_contains($open['url'], 'cmspv='), 'preview of the snapshot opened');
+    [$status, $page] = http('GET', parse_url($open['url'], PHP_URL_PATH) . '?' . parse_url($open['url'], PHP_URL_QUERY), null, '', true);
+    check($status === 200 && str_contains($page, 'E2E Restored Post') && str_contains($page, 'E2E Restored Site'), 'the real blog renders from the snapshot tables');
+    [$status] = http('GET', '/' . $open['folder'] . '/');
+    check($status === 403, 'the preview refuses requests without its token');
+    [$status, $switch] = api('installs_preview_switch', ['folder'=>$open['folder'], 'token'=>$open['token'], 'prefix'=>'wp_']);
+    check($status === 200 && $switch['ok'] && str_contains(file_get_contents($site . '/' . $open['folder'] . '/wp-config.php'), "\$table_prefix = 'wp_'"), 'live switch repoints the same preview to another prefix');
+    [$status, $page] = http('GET', parse_url($switch['url'], PHP_URL_PATH) . '?' . parse_url($switch['url'], PHP_URL_QUERY), null, '', true);
+    check($status === 200 && str_contains($page, 'E2E Restored Post'), 'the preview renders the other installation after switching');
+    [$status, $bad] = api('installs_preview_switch', ['folder'=>$open['folder'], 'token'=>str_repeat('0', 32), 'prefix'=>$snap]);
+    check(($bad['ok'] ?? true) === false, 'switching with a wrong token is refused');
+    [$status, $closed] = api('installs_preview_close', ['folder'=>$open['folder'], 'token'=>$open['token']]);
+    check($closed['ok'] === true && !file_exists($site . '/' . $open['folder']) && is_file($site . '/wp-load.php'), 'closing removes the preview folder and leaves the live site intact');
+    [$status, $unknown] = api('installs_preview_open', ['prefix'=>'nope_']);
+    check(($unknown['ok'] ?? true) === false, 'an unknown prefix cannot be previewed');
     exit(0);
 } catch (Throwable $e) {
     fwrite(STDERR, 'E2E stopped: ' . get_class($e) . ' ' . $e->getMessage() . "\n");
