@@ -39,7 +39,7 @@ T5 | S1,S6,S7,S9 | inline + independent verify | done | Explicit guarded placeme
 T6 | S1–S7,S9 | independent gentle-ai-verify after inline self-verification | done | Public fixture and disposable-engine acceptance, original-command differential/seam checks, no real hosting mutation; record every unavailable proof. Local PHP suites 10/10, UI tests 2/2, native assurance valid/authority/replacement-authority/terminal/partition/complete all exit0. Unavailable: runtime/plugin/HTTP certification (S7), native.py MariaDB staging matrix not rerun. Commit: see T5 fix.
 T7 | S1–S7 | owner decision | done | Selected feature-branch-chain; prepare dependent reviewable units off main, no PR/push authorization inferred.
 
-T8 | S8 | inline final delivery | pending | After T1–T6 complete and required proof accepted, normal final commit/fast-forward/push to origin/main, verify exact remote SHA and clean tree. No force or premature publication.
+T8 | S8 | inline final delivery | done | After T1–T6 complete and required proof accepted, normal final commit/fast-forward/push to origin/main, verify exact remote SHA and clean tree. No force or premature publication. Published: fast-forward origin/main to 5ef9f12 + tag v3.18.0-wp; remote SHA verified, clean tree.
 
 T9 | S2,S7,S9 | owner product decision | done | Owner selected accept_operator_verified_external_backup: require explicit operator confirmation of recovery already verified externally; report provenance distinctly from app verification. No unverified/rename-only backup substitute.
 
