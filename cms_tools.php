@@ -2893,6 +2893,9 @@ function wp_restore_placement_trial(array &$run): void {
     $p = $run['placement'] ?? ['status'=>'trial','index'=>0,'total'=>count($entries),'held'=>count(wp_restore_files_manifest($run)) - count($entries)];
     if (!isset($run['placement'])) {
         if (file_exists($trial) || is_link($trial) || !mkdir($trial, 0755)) throw new \RuntimeException('Trial folder unavailable.');
+        // The trial folder is web-reachable and may hold PHP; deny HTTP access until promotion.
+        $deny = "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n";
+        if (file_put_contents($trial . '/.htaccess', $deny) !== strlen($deny)) throw new \RuntimeException('Trial protection unavailable.');
         $run['placement'] = $p; $run['revision']++; wp_restore_save($run);
     }
     $bytes = 0;
@@ -2950,6 +2953,7 @@ function wp_restore_placement_promote(array &$run): void {
         $p['plugins_disabled'] = wp_restore_placement_disable_plugins($run);
         $p['status'] = 'promoted';
         // Best-effort removal of now-empty trial directories; leftovers are reported, not forced.
+        @unlink($trial . '/.htaccess');
         $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($trial, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::CHILD_FIRST);
         foreach ($it as $node) if ($node->isDir() && !$node->isLink()) @rmdir($node->getPathname());
         @rmdir($trial);
@@ -10375,7 +10379,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     <h3><?= h(t('Restoration progress')) ?></h3>
     <p id="wp-restore-progress" role="status"></p>
     <button id="wp-restore-download" type="button" class="btn btn-sm" hidden><?= h(t('Download recovery copy')) ?></button>
-    <label id="wp-restore-ack-row" hidden><input id="wp-restore-ack" type="checkbox"> <span id="wp-restore-ack-text"></span></label>
+    <label id="wp-restore-ack-row" hidden><input id="wp-restore-ack" type="checkbox" autocomplete="off"> <span id="wp-restore-ack-text"></span></label>
     <button id="wp-restore-next" type="button" class="btn btn-warning"><?= h(t('Continue restoration')) ?></button>
 </section>
 <script>
@@ -10396,7 +10400,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
         'terminal'=>t('Stopped. Do not repeat database steps; keep the recovery copy and recover manually.'),
         'failed'=>t('Restore step failed. No automatic retry was made.'),
     ], JSON_UNESCAPED_UNICODE) ?>;
-    let csrf = null, run = null, busy = false;
+    let csrf = null, run = null, busy = false, ackedGate = null; // the confirmation the user's tick covers
     async function api(action, body) {
         const response = await fetch('?action=' + action, body === undefined
             ? {credentials: 'same-origin'} : {method: 'POST', credentials: 'same-origin', body});
@@ -10449,7 +10453,6 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     async function advance() {
         if (busy) return;
         busy = true;
-        let ackGate = null; // the confirmation the user's tick currently covers
         try {
             for (let i = 0; i < 100000; i++) {
                 const hashes = await refresh();
@@ -10457,12 +10460,12 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
                 const step = plan(run, hashes);
                 render(step);
                 if (step.stop) return;
-                if (step.gate && step.gate !== ackGate) {
-                    // A different confirmation always needs its own fresh tick.
-                    if (ackGate !== null) el('wp-restore-ack').checked = false;
-                    ackGate = null;
+                if (step.gate && step.gate !== ackedGate) {
+                    // A different confirmation always needs its own fresh tick, even after an error and retry.
+                    if (ackedGate !== null) el('wp-restore-ack').checked = false;
+                    ackedGate = null;
                     if (!el('wp-restore-ack').checked) return;
-                    ackGate = step.gate;
+                    ackedGate = step.gate;
                 }
                 el('wp-restore-next').disabled = true;
                 await api('wp_restore_step', new URLSearchParams({csrf, run_id: run.run_id, stage: run.stage,

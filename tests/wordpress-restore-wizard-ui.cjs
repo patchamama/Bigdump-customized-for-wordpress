@@ -12,6 +12,7 @@ const elements = Object.fromEntries(['wizard', 'progress', 'download', 'ack-row'
 const run = {run_id: 'r', stage: 'preflight', revision: 0, backup_verified: false, runtime_verified: false,
   preflight: {files: {ready: false}, sql: {ready: false}}};
 const ops = [], bodies = [];
+let failTrialOnce = true;
 const advance = {
   files: () => { run.preflight.files.ready = true; },
   sql: () => { run.preflight.sql.ready = true; },
@@ -37,6 +38,7 @@ const context = {
     else if (action === 'wp_restore_step') {
       const body = new URLSearchParams(options.body.toString()); bodies.push(body);
       assert.equal(body.get('csrf'), 'csrf-token'); assert.equal(body.get('revision'), String(run.revision));
+      if (body.get('operation') === 'placement_trial' && failTrialOnce) { failTrialOnce = false; return {ok: false, json: async () => ({error: 'transient'})}; }
       ops.push(body.get('operation')); advance[body.get('operation')](); run.revision++;
       data = {run: JSON.parse(JSON.stringify(run))};
     } else throw new Error('unexpected ' + action);
@@ -64,8 +66,12 @@ const context = {
   await click();
   assert.ok(!ops.includes('replacement_prepare'), 'destructive replacement never starts without its own tick');
   ack.checked = true; await click();
-  assert.deepEqual(ops.slice(7), ['replacement_prepare', 'replacement', 'placement_trial'], 'one replacement confirmation, then trial placement only');
-  const replace = bodies[8];
+  assert.deepEqual(ops.slice(7), ['replacement_prepare', 'replacement'], 'replacement completes, then the transient trial error stops the loop');
+  assert.match(elements['wp-restore-progress'].textContent, /transient/);
+  await click();
+  assert.deepEqual(ops.slice(9), ['placement_trial'], 'retry after an error places only into the trial folder');
+  assert.ok(!ops.includes('placement_promote'), 'a tick from an earlier gate never authorizes promotion');
+  const replace = bodies[7];
   assert.equal(replace.get('scope_confirmed'), 'exact_original_old_set');
   assert.equal(ack.checked, false);
   await click();

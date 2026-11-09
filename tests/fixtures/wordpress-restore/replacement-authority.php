@@ -38,7 +38,7 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
             if ($run['preflight']['placement']['status']==='trial_ready') break;
         }
         check($run['preflight']['placement']['status']==='trial_ready' && $run['preflight']['placement']['held']===1,'trial ready with the held .htaccess counted');
-        check(is_file($trial.'/wp-load.php') && !file_exists($trial.'/.htaccess') && !file_exists($site.'/wp-load.php') && !file_exists($site.'/index.php'),'files exist only in the trial folder; nothing reached the app root');
+        check(is_file($trial.'/wp-load.php') && str_contains(file_get_contents($trial.'/.htaccess'),'denied') && !file_exists($trial.'/wp-includes/.htaccess') && !file_exists($site.'/wp-load.php') && !file_exists($site.'/index.php'),'files exist only in the trial folder; nothing reached the app root');
         [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1']);
         check($status===400 && !file_exists($site.'/wp-load.php'),'promotion without the exact scope confirmation is refused');
         for ($i=0;$i<20;$i++) {
