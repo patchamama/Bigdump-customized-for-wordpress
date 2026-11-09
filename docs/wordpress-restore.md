@@ -661,3 +661,14 @@ cache and `mu-plugins` stay held privately and are never placed).
 An interrupted promotion resumes safely: an already moved file must match its
 recorded hash. Placement makes no runtime claim: plugins, HTTP behaviour and image
 URLs are unverified; update image URLs and re-create `.htaccess` as next steps.
+
+## Guided wizard
+
+After "Prepare restoration" the page shows a wizard (`Continue restoration`). It runs
+private preparation and the recovery-copy capture automatically, then stops at four
+explicit confirmations, each needing its own tick: (1) the recovery copy was tested
+outside the tool, (2) create the new tables beside the current ones (followed by the
+read-only comparison), (3) replace all current tables, (4) move the trial files into
+the site root. Between (3) and (4) files are only copied into the trial folder. The
+final message states that site functionality is not verified and lists next steps
+(image URLs, `.htaccess`, plugins). Test: `node tests/wordpress-restore-wizard-ui.cjs <page.html>`.

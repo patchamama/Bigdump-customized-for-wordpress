@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.17.0');
+define('TOOL_VERSION',  '3.18.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -228,7 +228,24 @@ $GLOBALS['__I18N'] = [
         'Database archive' => 'Archivo de la base de datos',
         'Confirm destination URL' => 'Confirmar URL del destino',
         'Prepare restoration' => 'Preparar restauración',
-        'Preparation recorded. No files or tables have been replaced. Execution adapters are not available yet.' => 'Preparación registrada. No se reemplazaron archivos ni tablas. Los adaptadores de ejecución aún no están disponibles.',
+        'Restoration progress' => 'Progreso de la restauración',
+        'Continue restoration' => 'Continuar la restauración',
+        'Working…' => 'Trabajando…',
+        'Preparing private files, SQL and values plan.' => 'Preparando archivos privados, SQL y plan de valores.',
+        'Capturing a recovery copy of the current database.' => 'Capturando una copia de recuperación de la base de datos actual.',
+        'Download the recovery copy now and test restoring it in a separate database. The tool cannot verify it for you.' => 'Descargá ahora la copia de recuperación y probá restaurarla en una base de datos separada. La herramienta no puede verificarla por vos.',
+        'Download recovery copy' => 'Descargar copia de recuperación',
+        'I tested restoring this copy outside this tool and confirm it replaces all current tables.' => 'Probé restaurar esta copia fuera de esta herramienta y confirmo que reemplaza todas las tablas actuales.',
+        'I confirm creating the new tables beside the current ones. Current tables are not changed in this step.' => 'Confirmo crear las tablas nuevas junto a las actuales. Las tablas actuales no se modifican en este paso.',
+        'Staging and comparing new tables.' => 'Preparando y comparando las tablas nuevas.',
+        'I confirm replacing ALL current tables with the restored ones. Current tables are dropped after the recovery copy was confirmed.' => 'Confirmo reemplazar TODAS las tablas actuales por las restauradas. Las tablas actuales se eliminan tras confirmar la copia de recuperación.',
+        'Copying files into a trial folder. Nothing reaches the site root yet.' => 'Copiando los archivos a una carpeta de prueba. Todavía no se toca la raíz del sitio.',
+        'Files are in the trial folder. Inspect it, then confirm moving them into the site root. Existing files are never overwritten.' => 'Los archivos están en la carpeta de prueba. Revisala y confirmá moverlos a la raíz del sitio. Los archivos existentes nunca se sobrescriben.',
+        'I confirm moving the trial files into the site root.' => 'Confirmo mover los archivos de la carpeta de prueba a la raíz del sitio.',
+        'Restoration finished, but site functionality is NOT verified. Plugins are disabled where possible and the backup .htaccess stays aside. Next: update image URLs, regenerate .htaccess and re-enable plugins one by one.' => 'La restauración terminó, pero el funcionamiento del sitio NO está verificado. Los plugins quedan desactivados cuando es posible y el .htaccess del backup queda aparte. Siguiente: actualizar las URLs de imágenes, regenerar el .htaccess y reactivar los plugins uno a uno.',
+        'Stopped. Do not repeat database steps; keep the recovery copy and recover manually.' => 'Detenido. No repitas pasos de base de datos; conservá la copia de recuperación y recuperá manualmente.',
+        'Restore step failed. No automatic retry was made.' => 'El paso de restauración falló. No se reintentó automáticamente.',
+        'Preparation recorded. No files or tables have been replaced yet.' => 'Preparación registrada. Todavía no se reemplazó ningún archivo ni tabla.',
         'Set a custom tool password before preparing a restore.' => 'Definí una contraseña propia para la herramienta antes de preparar una restauración.',
         'Restore request failed. No automatic retry was made.' => 'Falló la solicitud de restauración. No se reintentó automáticamente.',
         'How to migrate'                      => 'Cómo migrar',
@@ -10315,7 +10332,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     const box = document.getElementById('wp-restore-offer');
     const button = document.getElementById('wp-restore-prepare');
     const status = document.getElementById('wp-restore-status');
-    const prepared = <?= json_encode(t('Preparation recorded. No files or tables have been replaced. Execution adapters are not available yet.')) ?>;
+    const prepared = <?= json_encode(t('Preparation recorded. No files or tables have been replaced yet.')) ?>;
     const customPassword = <?= json_encode(t('Set a custom tool password before preparing a restore.')) ?>;
     const failure = <?= json_encode(t('Restore request failed. No automatic retry was made.')) ?>;
     let discovery;
@@ -10347,10 +10364,129 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
             archive: document.getElementById('wp-restore-archive').value,
             database: document.getElementById('wp-restore-database').value,
             target_url: document.getElementById('wp-restore-target').value});
-        try { await jsonRequest('wp_restore_prepare', body); status.textContent = prepared; }
+        try { await jsonRequest('wp_restore_prepare', body); status.textContent = prepared; if (window.wpRestoreWizard) window.wpRestoreWizard(); }
         catch (error) { status.textContent = error.message || failure; button.disabled = !discovery.can_prepare; }
     });
     discover().catch(() => { status.textContent = failure; });
+})();
+</script>
+
+<section id="wp-restore-wizard" class="instructions" hidden>
+    <h3><?= h(t('Restoration progress')) ?></h3>
+    <p id="wp-restore-progress" role="status"></p>
+    <button id="wp-restore-download" type="button" class="btn btn-sm" hidden><?= h(t('Download recovery copy')) ?></button>
+    <label id="wp-restore-ack-row" hidden><input id="wp-restore-ack" type="checkbox"> <span id="wp-restore-ack-text"></span></label>
+    <button id="wp-restore-next" type="button" class="btn btn-warning"><?= h(t('Continue restoration')) ?></button>
+</section>
+<script>
+(() => {
+    const el = id => document.getElementById(id);
+    const text = <?= json_encode([
+        'busy'=>t('Working…'), 'prepare'=>t('Preparing private files, SQL and values plan.'),
+        'backup'=>t('Capturing a recovery copy of the current database.'),
+        'download'=>t('Download the recovery copy now and test restoring it in a separate database. The tool cannot verify it for you.'),
+        'ack_backup'=>t('I tested restoring this copy outside this tool and confirm it replaces all current tables.'),
+        'ack_staging'=>t('I confirm creating the new tables beside the current ones. Current tables are not changed in this step.'),
+        'staging'=>t('Staging and comparing new tables.'),
+        'ack_replace'=>t('I confirm replacing ALL current tables with the restored ones. Current tables are dropped after the recovery copy was confirmed.'),
+        'trial'=>t('Copying files into a trial folder. Nothing reaches the site root yet.'),
+        'trial_ready'=>t('Files are in the trial folder. Inspect it, then confirm moving them into the site root. Existing files are never overwritten.'),
+        'ack_promote'=>t('I confirm moving the trial files into the site root.'),
+        'done'=>t('Restoration finished, but site functionality is NOT verified. Plugins are disabled where possible and the backup .htaccess stays aside. Next: update image URLs, regenerate .htaccess and re-enable plugins one by one.'),
+        'terminal'=>t('Stopped. Do not repeat database steps; keep the recovery copy and recover manually.'),
+        'failed'=>t('Restore step failed. No automatic retry was made.'),
+    ], JSON_UNESCAPED_UNICODE) ?>;
+    let csrf = null, run = null, busy = false;
+    async function api(action, body) {
+        const response = await fetch('?action=' + action, body === undefined
+            ? {credentials: 'same-origin'} : {method: 'POST', credentials: 'same-origin', body});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || text.failed);
+        return data;
+    }
+    // Returns the next operation; gate names a human confirmation that must be ticked first.
+    function plan(r, hashes) {
+        const p = r.preflight, art = p.backup && p.backup.sha256, plan = hashes.plan;
+        if (!p.files.ready) return {op: 'files', note: text.prepare};
+        if (!p.sql.ready) return {op: 'sql', note: text.prepare};
+        if (!p.values || !p.values.ready) return {op: 'values', note: text.prepare};
+        if (!p.backup) return {op: 'backup', note: text.backup};
+        if (!p.backup.ready) return {stop: text.terminal};
+        if (!r.backup_verified) return {op: 'backup_confirm', gate: 'ack_backup', download: true, note: text.download,
+            extra: {artifact_sha256: art, recovery_method: 'separate_database_schema_rows_counters', recovery_confirmed: '1', replace_all_tables_confirmed: '1'}};
+        const bound = {artifact_sha256: art, plan_sha256: plan};
+        if (!p.staging || p.staging.status === 'progress') return {op: 'staging', gate: 'ack_staging', note: text.staging, extra: {staging_confirmed: '1', ...bound}};
+        if (p.staging.status !== 'ready') return {stop: text.terminal};
+        if (!p.assurance) return {op: 'assurance', note: text.staging, extra: {assurance_confirmed: '1', ...bound}};
+        const rep = p.replacement && p.replacement.status;
+        const repExtra = {replacement_confirmed: '1', scope_confirmed: 'exact_original_old_set', ...bound};
+        if (!rep) return {op: 'replacement_prepare', gate: 'ack_replace', download: true, note: text.download, extra: repExtra};
+        if (rep === 'prepared') return {op: 'replacement', gate: 'ack_replace', download: true, note: text.download, extra: repExtra};
+        if (rep !== 'complete') return {stop: text.terminal};
+        const pl = p.placement && p.placement.status;
+        if (!pl || pl === 'trial') return {op: 'placement_trial', note: text.trial, extra: {}};
+        if (pl === 'trial_ready' || pl === 'promoting') return {op: 'placement_promote', gate: 'ack_promote', note: text.trial_ready,
+            extra: {promote_confirmed: '1', scope_confirmed: 'trial_to_root', artifact_sha256: art}};
+        return {stop: text.done, finished: true};
+    }
+    async function refresh() {
+        const state = await api('wp_restore_state');
+        run = state.run;
+        if (!run) return null;
+        const hashes = {};
+        if (run.preflight.values && run.preflight.values.ready) hashes.plan = (await api('wp_restore_state&manifest=values')).run.values_manifest.plan_sha256;
+        return hashes;
+    }
+    function render(step) {
+        el('wp-restore-wizard').hidden = false;
+        el('wp-restore-progress').textContent = step.stop || step.note || '';
+        el('wp-restore-download').hidden = !step.download;
+        el('wp-restore-ack-row').hidden = !step.gate;
+        if (step.gate) el('wp-restore-ack-text').textContent = text[step.gate];
+        el('wp-restore-next').hidden = !!step.stop;
+        el('wp-restore-next').disabled = busy;
+    }
+    async function advance() {
+        if (busy) return;
+        busy = true;
+        let ackGate = null; // the confirmation the user's tick currently covers
+        try {
+            for (let i = 0; i < 100000; i++) {
+                const hashes = await refresh();
+                if (!run) return;
+                const step = plan(run, hashes);
+                render(step);
+                if (step.stop) return;
+                if (step.gate && step.gate !== ackGate) {
+                    // A different confirmation always needs its own fresh tick.
+                    if (ackGate !== null) el('wp-restore-ack').checked = false;
+                    ackGate = null;
+                    if (!el('wp-restore-ack').checked) return;
+                    ackGate = step.gate;
+                }
+                el('wp-restore-next').disabled = true;
+                await api('wp_restore_step', new URLSearchParams({csrf, run_id: run.run_id, stage: run.stage,
+                    operation: step.op, revision: String(run.revision), ...step.extra}));
+            }
+        } catch (error) {
+            el('wp-restore-progress').textContent = error.message || text.failed;
+        } finally { busy = false; el('wp-restore-next').disabled = false; }
+    }
+    el('wp-restore-next').addEventListener('click', advance);
+    el('wp-restore-download').addEventListener('click', async () => {
+        const response = await fetch('?action=wp_restore_backup_download', {method: 'POST', credentials: 'same-origin',
+            body: new URLSearchParams({csrf, run_id: run.run_id})});
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(await response.blob()); link.download = 'prior-database.sql.gz'; link.click();
+    });
+    window.wpRestoreWizard = async () => {
+        try {
+            csrf = (await api('wp_restore_discover')).csrf;
+            const hashes = await refresh();
+            if (run) render(plan(run, hashes));
+        } catch (error) { el('wp-restore-progress').textContent = error.message || text.failed; el('wp-restore-wizard').hidden = false; }
+    };
+    window.wpRestoreWizard();
 })();
 </script>
 
