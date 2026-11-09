@@ -146,10 +146,27 @@ try {
         $sql = str_replace('CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGTEXT)', 'CREATE TABLE `old_postmeta` (`id` BIGINT,`payload` LONGBLOB)', $sql);
         $sql .= "SET TIME_ZONE='+00:00';\nCREATE TABLE old_types (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,payload LONGBLOB,amount DECIMAL(20,6) NOT NULL DEFAULT -1.250000,flag BIT(9) NOT NULL DEFAULT 0x0001,stamp TIMESTAMP(6) NULL DEFAULT NULL,label VARCHAR(32) NOT NULL DEFAULT 'literal-default',PRIMARY KEY (id),KEY label_idx (label(8) DESC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=19;\nINSERT INTO old_types VALUES (0,0x4100FF27,12.340000,0x01FF,'2024-02-03 04:05:06.123456','explicit'),(7,NULL,-9.000001,0x0001,NULL,'other');\n";
         $sql .= "INSERT INTO old_postmeta VALUES (NULL,0x00FF),(NULL,0x00FF),(NULL,NULL),(NULL,NULL);\n";
+        if ($case==='replacement-complete') $sql = preg_replace_callback('/a:1:\{i:0;s:18:(\\\\?)"example\/plugin\.php\\\\?";\}/', static function ($m) {
+            $q = $m[1]; $list = ['good/good.php','bad/bad.php','missing/missing.php']; $out = 'a:3:{';
+            foreach ($list as $i=>$name) $out .= 'i:'.$i.';s:'.strlen($name).':'.$q.'"'.$name.$q.'";';
+            return $out.'}';
+        }, $sql, -1, $replaced);
         file_put_contents($site . '/db_fixture.sql.gz',gzencode($sql));
         $zip = new ZipArchive(); $zip->open($site . '/hosting_fixture.zip',ZipArchive::CREATE|ZipArchive::EXCL);
         foreach (['index.php'=>'<?php die("must not execute");','wp-settings.php'=>'Inert core','wp-load.php'=>'Inert core','wp-includes/version.php'=>"<?php \$wp_version='6.8.3';"] as $path=>$bytes) $zip->addFromString($path,$bytes);
-        if ($case==='replacement-complete') $zip->addFromString('.htaccess','RewriteEngine Off');
+        if ($case==='replacement-complete') {
+            // Deterministic stand-in for WordPress: the front page loads whichever plugins the restored options table activates.
+            $zip->addFromString('.htaccess','RewriteEngine Off');
+            $zip->addFromString('index.php','<?php preg_match("/DB_PASSWORD\'\\s*,\\s*\'([^\']*)\'/",file_get_contents(__DIR__."/wp-config.php"),$m);'
+                .'$pdo=new PDO("mysql:unix_socket=/var/run/mysqld/fixture.sock;dbname=restore_target","restore_fixture",$m[1]);'
+                .'$v=$pdo->query("SELECT option_value FROM wp_options WHERE option_name=\'active_plugins\'")->fetchColumn();'
+                .'echo "<html><body>";foreach(unserialize($v,["allowed_classes"=>false]) as $f)include __DIR__."/wp-content/plugins/".$f;echo "mock site</body></html>";');
+            // The fixture's target URL is /destination, so the stand-in login page lives there.
+            $zip->addFromString('destination/index.php','<?php require __DIR__."/../index.php";');
+            $zip->addFromString('destination/wp-login.php','<html><body><form><input name="user_login"></form></body></html>');
+            $zip->addFromString('wp-content/plugins/good/good.php','<?php echo "<!--good-->";');
+            $zip->addFromString('wp-content/plugins/bad/bad.php','<?php throw new Error("plugin broke the site");');
+        }
         $zip->close();
         $originals = [];
         foreach (['cms_tools.php','wp-config.php','hosting_fixture.zip','db_fixture.sql.gz'] as $name) $originals[$name] = hash_file('sha256',$site . '/' . $name);
@@ -308,7 +325,7 @@ try {
             [$s,$state]=request('wp_restore_state'); check($state['run']===$previous && oracle($pdo)===$permanent && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'later mismatch preserves exact historical checkpoint and tampered data without repair');
         }
         foreach ($originals as $name=>$hash) check(hash_file('sha256',$site.'/'.$name)===$hash,'original bytes preserved '.$name);
-        check($case==='replacement-complete' ? (file_get_contents($site.'/index.php')==='<?php die("must not execute");' && !file_exists($site.'/.htaccess') && !file_exists($base.'/BACKUP_EXECUTED'))
+        check($case==='replacement-complete' ? (is_file($site.'/index.php') && !file_exists($site.'/.htaccess') && !file_exists($base.'/BACKUP_EXECUTED'))
             : (!file_exists($site.'/index.php') && !file_exists($base.'/BACKUP_EXECUTED')),'only confirmed promotion placed files; held .htaccess stays aside; no backup PHP execution');
     }
 } catch (Throwable $error) {

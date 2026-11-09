@@ -228,6 +228,11 @@ $GLOBALS['__I18N'] = [
         'Database archive' => 'Archivo de la base de datos',
         'Confirm destination URL' => 'Confirmar URL del destino',
         'Prepare restoration' => 'Preparar restauración',
+        'I confirm re-enabling the plugins that were active in the backup, one at a time, keeping each only if the site stays healthy.' => 'Confirmo reactivar uno a uno los plugins que estaban activos en el backup, conservando cada uno solo si el sitio sigue sano.',
+        'Checking the restored site over HTTP and re-enabling plugins one by one.' => 'Comprobando el sitio restaurado por HTTP y reactivando los plugins uno a uno.',
+        'Restored site checked: the home page and login respond correctly and {count} plugin(s) were re-enabled without breaking the site. These are bounded smoke checks, not a full compatibility test. Next: update image URLs and regenerate .htaccess.' => 'Sitio restaurado comprobado: la portada y el login responden correctamente y se reactivaron {count} plugin(s) sin romper el sitio. Son comprobaciones básicas acotadas, no una prueba completa de compatibilidad. Siguiente: actualizar las URLs de imágenes y regenerar el .htaccess.',
+        'The restored site responds, but these plugins stay disabled because they broke the site or are missing: {list}. {count} plugin(s) were re-enabled. Next: update image URLs, regenerate .htaccess and review the disabled plugins.' => 'El sitio restaurado responde, pero estos plugins quedan desactivados porque rompían el sitio o faltan: {list}. Se reactivaron {count} plugin(s). Siguiente: actualizar las URLs de imágenes, regenerar el .htaccess y revisar los plugins desactivados.',
+        'The restored site did not respond correctly over HTTP. Plugins remain disabled and the backup .htaccess stays aside. Check the web server, PHP version and wp-config.php.' => 'El sitio restaurado no respondió correctamente por HTTP. Los plugins siguen desactivados y el .htaccess del backup queda aparte. Revisá el servidor web, la versión de PHP y wp-config.php.',
         'The backup tables use prefix {backup} but wp-config.php declares {config}. Tables and prefix-bound keys (roles, capabilities) are renamed to {config}; wp-config.php is not changed.' => 'Las tablas del backup usan el prefijo {backup} pero wp-config.php declara {config}. Las tablas y las claves ligadas al prefijo (roles, capacidades) se renombran a {config}; wp-config.php no se modifica.',
         'Restoration progress' => 'Progreso de la restauración',
         'Continue restoration' => 'Continuar la restauración',
@@ -243,7 +248,6 @@ $GLOBALS['__I18N'] = [
         'Copying files into a trial folder. Nothing reaches the site root yet.' => 'Copiando los archivos a una carpeta de prueba. Todavía no se toca la raíz del sitio.',
         'Files are in the trial folder. Inspect it, then confirm moving them into the site root. Existing files are never overwritten.' => 'Los archivos están en la carpeta de prueba. Revisala y confirmá moverlos a la raíz del sitio. Los archivos existentes nunca se sobrescriben.',
         'I confirm moving the trial files into the site root.' => 'Confirmo mover los archivos de la carpeta de prueba a la raíz del sitio.',
-        'Restoration finished, but site functionality is NOT verified. Plugins are disabled where possible and the backup .htaccess stays aside. Next: update image URLs, regenerate .htaccess and re-enable plugins one by one.' => 'La restauración terminó, pero el funcionamiento del sitio NO está verificado. Los plugins quedan desactivados cuando es posible y el .htaccess del backup queda aparte. Siguiente: actualizar las URLs de imágenes, regenerar el .htaccess y reactivar los plugins uno a uno.',
         'Stopped. Do not repeat database steps; keep the recovery copy and recover manually.' => 'Detenido. No repitas pasos de base de datos; conservá la copia de recuperación y recuperá manualmente.',
         'Restore step failed. No automatic retry was made.' => 'El paso de restauración falló. No se reintentó automáticamente.',
         'Preparation recorded. No files or tables have been replaced yet.' => 'Preparación registrada. Todavía no se reemplazó ningún archivo ni tabla.',
@@ -1646,10 +1650,13 @@ function wp_restore_public(array $run) {
     if ($run['sql']['ready'] ?? false) {
         try { $preflight['prefix'] = wp_restore_prefix_plan($run); } catch (\Throwable $e) { $preflight['prefix'] = ['status'=>'unknown','config'=>null,'backup'=>null]; }
     }
-    if (isset($run['placement'])) $preflight['placement'] = array_intersect_key($run['placement'], array_flip(['status','index','total','held','plugins_disabled']));
+    if (isset($run['runtime'])) $preflight['runtime'] = ['status'=>$run['runtime']['status'], 'index'=>$run['runtime']['index'],
+        'total'=>count($run['placement']['original_plugins'] ?? []), 'baseline'=>$run['runtime']['baseline'],
+        'good'=>$run['runtime']['good'], 'failed'=>array_column($run['runtime']['failed'], 'plugin'), 'skipped'=>$run['runtime']['skipped']];
+    if (isset($run['placement'])) $preflight['placement'] = array_intersect_key($run['placement'], array_flip(['status','index','total','held','plugins_disabled','trial_sha256']));
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
-        'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
+        'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>($run['runtime']['status'] ?? null) === 'verified','replacement_enabled'=>false,'preflight'=>$preflight];
 }
 // Future independent preflight adapters live here; no backup code is executed.
 // WP_RESTORE_FILES_ADAPTER
@@ -2162,7 +2169,7 @@ function wp_restore_values_row(array $frame,array &$meta,array $source,WordPress
         if($row['option_name']['type']!=='bytes'||$row['option_value']['type']!=='bytes')throw new \RuntimeException('Core option text must be explicit strings.');$key=base64_decode($row['option_name']['base64'],true);
         if(str_starts_with($key,'_transient_')||str_starts_with($key,'_site_transient_')){$meta['omitted_rows']++;return null;}
         $destination=wp_restore_values_name($key,'options',$source);wp_restore_values_key($meta['seen_options'],$destination,$key);
-        if($key==='active_plugins'){if(++$meta['plugins']!==1)throw new \RuntimeException('Duplicate active_plugins option.');$row['option_value']=['type'=>'bytes','base64'=>base64_encode('a:0:{}')];wp_restore_values_fit('a:0:{}',$columns['option_value']);}
+        if($key==='active_plugins'){if(++$meta['plugins']!==1)throw new \RuntimeException('Duplicate active_plugins option.');$meta['original_plugins']=wp_restore_plugin_list(base64_decode($row['option_value']['base64'],true)?:null)??[];$row['option_value']=['type'=>'bytes','base64'=>base64_encode('a:0:{}')];wp_restore_values_fit('a:0:{}',$columns['option_value']);}
         if($destination!==$key){wp_restore_values_fit($destination,$columns['option_name']);$row['option_name']['base64']=base64_encode($destination);}
     }
     if($name===$prefix.'usermeta'){
@@ -2878,7 +2885,7 @@ function wp_restore_placement_entries(array $run): array {
     return $entries;
 }
 function wp_restore_placement_guard(array $run, array $statuses): void {
-    $allowed = ['csrf','run_id','stage','operation','revision','promote_confirmed','scope_confirmed','artifact_sha256'];
+    $allowed = ['csrf','run_id','stage','operation','revision','promote_confirmed','scope_confirmed','artifact_sha256','trial_sha256'];
     if (($run['replacement']['status'] ?? null) !== 'complete' || !in_array($run['placement']['status'] ?? 'none', $statuses, true)
         || array_diff(array_keys($_POST), $allowed) || !($run['files']['ready'] ?? false)) throw new \RuntimeException('Placement precondition failed.');
 }
@@ -2914,7 +2921,7 @@ function wp_restore_placement_trial(array &$run): void {
         if (!hash_equals($entry['sha256'], hash_file('sha256', $dst))) throw new \RuntimeException('Trial copy differs from staged bytes.');
         $bytes += $entry['size']; $p['index']++;
     }
-    if ($p['index'] === $p['total']) $p['status'] = 'trial_ready';
+    if ($p['index'] === $p['total']) { $p['status'] = 'trial_ready'; $p['trial_sha256'] = wp_restore_trial_digest($entries); }
     $run['placement'] = $p;
 }
 // The importer maps the backup's table prefix onto the prefix declared in wp-config.php.
@@ -2925,14 +2932,60 @@ function wp_restore_prefix_plan(array $run): array {
     if (!is_string($from) || !is_string($to)) return ['status'=>'unknown','config'=>null,'backup'=>null];
     return ['status'=>$from === $to ? 'match' : 'remap', 'config'=>$to, 'backup'=>$from];
 }
-function wp_restore_placement_disable_plugins(array $run): bool {
+// Restored WordPress option tables (single site, plus the network table when present).
+function wp_restore_options_tables(array $run): array {
     $tables = array_map(static fn($t)=>$t['schema']['table'], wp_restore_values_metadata($run)['tables']);
     $options = array_values(array_filter($tables, static fn($n)=>str_ends_with($n, 'options')
         && in_array(substr($n, 0, -7) . 'posts', $tables, true) && in_array(substr($n, 0, -7) . 'users', $tables, true)));
-    if (count($options) !== 1) return false;
-    $stmt = wp_restore_backup_pdo()->prepare('UPDATE ' . wp_restore_backup_quote($options[0]) . " SET option_value='a:0:{}' WHERE option_name='active_plugins'");
-    $stmt->execute();
+    if (count($options) !== 1) return [];
+    $network = substr($options[0], 0, -7) . 'sitemeta';
+    return ['options'=>$options[0], 'sitemeta'=>in_array($network, $tables, true) ? $network : null];
+}
+function wp_restore_plugin_list(?string $serialized): ?array {
+    if ($serialized === null) return [];
+    $list = @unserialize($serialized, ['allowed_classes'=>false]);
+    if (!is_array($list) || count($list) > 200) return null;
+    $out = [];
+    foreach ($list as $value) {
+        if (!is_string($value) || !preg_match('#^[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*\.php$#D', $value) || str_contains($value, '..')) return null;
+        $out[] = $value;
+    }
+    return array_values(array_unique($out));
+}
+function wp_restore_plugins_read(PDO $pdo, string $table, string $keyColumn, string $valueColumn, string $key): ?string {
+    $stmt = $pdo->prepare('SELECT ' . wp_restore_backup_quote($valueColumn) . ' FROM ' . wp_restore_backup_quote($table)
+        . ' WHERE ' . wp_restore_backup_quote($keyColumn) . '=?');
+    $stmt->execute([$key]); $rows = $stmt->fetchAll(PDO::FETCH_COLUMN); $stmt->closeCursor();
+    return count($rows) === 1 ? $rows[0] : null;
+}
+function wp_restore_plugins_write(PDO $pdo, string $table, string $keyColumn, string $valueColumn, string $key, array $list): void {
+    $stmt = $pdo->prepare('UPDATE ' . wp_restore_backup_quote($table) . ' SET ' . wp_restore_backup_quote($valueColumn)
+        . '=? WHERE ' . wp_restore_backup_quote($keyColumn) . '=?');
+    $stmt->execute([serialize(array_values($list)), $key]);
+}
+// Records which plugins were active in the backup, then disables them all (site and network).
+function wp_restore_placement_disable_plugins(array &$run): bool {
+    $t = wp_restore_options_tables($run);
+    if (!$t) return false;
+    $pdo = wp_restore_backup_pdo(); $p = $run['placement'];
+    if (!isset($p['original_plugins'])) {
+        // The values plan already emptied active_plugins during import; the backup's list was captured there.
+        $site = wp_restore_values_metadata($run)['original_plugins'] ?? [];
+        $p['original_plugins'] = $site; $p['original_network_plugins'] = [];
+        $run['placement'] = $p; $run['revision']++; wp_restore_save($run); // durable before the first disabling write
+    }
+    wp_restore_plugins_write($pdo, $t['options'], 'option_name', 'option_value', 'active_plugins', []);
+    if ($t['sitemeta']) $pdo->exec('UPDATE ' . wp_restore_backup_quote($t['sitemeta']) . " SET meta_value='a:0:{}' WHERE meta_key='active_sitewide_plugins'");
     return true;
+}
+// No-clobber move: link() fails if the destination exists, closing the check-then-rename race.
+function wp_restore_noclobber_move(string $src, string $dst): void {
+    if (@link($src, $dst)) { if (!unlink($src)) throw new \RuntimeException('Promotion cleanup failed.'); return; }
+    if (@lstat($dst) !== false) throw new \RuntimeException('Promotion refused.');
+    if (!rename($src, $dst)) throw new \RuntimeException('Promotion move failed.'); // hosts without hard links
+}
+function wp_restore_trial_digest(array $entries): string {
+    return hash('sha256', json_encode(array_map(static fn($e)=>[$e['path'], $e['sha256']], $entries), JSON_THROW_ON_ERROR));
 }
 function wp_restore_placement_promote(array &$run): void {
     wp_restore_placement_guard($run, ['trial_ready','promoting']);
@@ -2940,6 +2993,9 @@ function wp_restore_placement_promote(array &$run): void {
         || !is_string($_POST['artifact_sha256'] ?? null) || !hash_equals($run['backup']['sha256'] ?? '', $_POST['artifact_sha256']))
         throw new \RuntimeException('Explicit trial promotion confirmation required.');
     $entries = wp_restore_placement_entries($run); $trial = wp_restore_placement_trial_dir($run); $p = $run['placement'];
+    // The confirmation is bound to the exact inspected trial content, not just the backup.
+    if (!is_string($_POST['trial_sha256'] ?? null) || !hash_equals(wp_restore_trial_digest($entries), $_POST['trial_sha256'])
+        || !hash_equals($p['trial_sha256'] ?? '', $_POST['trial_sha256'])) throw new \RuntimeException('Trial content confirmation required.');
     if ($p['status'] === 'trial_ready') {
         foreach ($entries as $e) {
             $dst = $run['root'] . '/' . $e['path'];
@@ -2955,14 +3011,22 @@ function wp_restore_placement_promote(array &$run): void {
             // Resume after an interrupted batch: the move already happened and must match exactly.
             if (@lstat($dst) === false || !hash_equals($e['sha256'], hash_file('sha256', $dst))) throw new \RuntimeException('Promotion state unknown.');
         } else {
-            if (@lstat($dst) !== false || !hash_equals($e['sha256'], hash_file('sha256', $src))) throw new \RuntimeException('Promotion refused.');
-            wp_restore_placement_mkdirs($run['root'], $e['path']);
-            if (!rename($src, $dst)) throw new \RuntimeException('Promotion move failed.');
+            if (!hash_equals($e['sha256'], hash_file('sha256', $src))) throw new \RuntimeException('Promotion refused.');
+            if (@lstat($dst) !== false) {
+                // Interrupted between link() and unlink(): the same inode at both names is a finished move.
+                $a = lstat($src); $b = lstat($dst);
+                if ($a['ino'] !== $b['ino'] || $a['dev'] !== $b['dev'] || !unlink($src)) throw new \RuntimeException('Promotion refused.');
+            } else {
+                wp_restore_placement_mkdirs($run['root'], $e['path']);
+                wp_restore_noclobber_move($src, $dst);
+            }
         }
         $bytes += $e['size']; $p['index']++;
     }
     if ($p['index'] === $p['total']) {
+        $run['placement'] = $p;
         $p['plugins_disabled'] = wp_restore_placement_disable_plugins($run);
+        $p = array_merge($run['placement'], ['plugins_disabled'=>$p['plugins_disabled']]);
         $p['status'] = 'promoted';
         // Best-effort removal of now-empty trial directories; leftovers are reported, not forced.
         @unlink($trial . '/.htaccess');
@@ -2971,6 +3035,63 @@ function wp_restore_placement_promote(array &$run): void {
         @rmdir($trial);
     }
     $run['placement'] = $p;
+}
+// Bounded post-restore smoke checks: HTTP health first, then each plugin that was active in the
+// backup is re-enabled one at a time and kept only if the site stays healthy.
+function wp_restore_runtime_get(string $url): array {
+    $status = 0; $body = '';
+    if (ini_get('allow_url_fopen')) {
+        $ctx = stream_context_create(['http'=>['method'=>'GET','timeout'=>10,'follow_location'=>1,'max_redirects'=>3,'ignore_errors'=>true,
+            'header'=>"User-Agent: CMS-Tools-Restore-Check\r\n"]]);
+        $raw = @file_get_contents($url, false, $ctx, 0, 524288);
+        foreach ($http_response_header ?? [] as $h) if (preg_match('#^HTTP/\S+ ([0-9]{3})#', $h, $m)) $status = (int)$m[1];
+        $body = $raw === false ? '' : $raw;
+    } elseif (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_FOLLOWLOCATION=>true, CURLOPT_MAXREDIRS=>3, CURLOPT_TIMEOUT=>10]);
+        $raw = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); unset($ch);
+        $body = is_string($raw) ? substr($raw, 0, 524288) : '';
+    }
+    return [$status, $body];
+}
+function wp_restore_runtime_health(string $base): array {
+    $checks = [];
+    foreach (['/'=>null, '/wp-login.php'=>'user_login'] as $path=>$marker) {
+        [$status, $body] = wp_restore_runtime_get($base . $path);
+        $ok = $status === 200 && stripos($body, '<html') !== false
+            && !preg_match('/There has been a critical error|Fatal error|Parse error|Uncaught |Error establishing a database connection/i', $body)
+            && ($marker === null || str_contains($body, $marker));
+        $checks[] = ['path'=>$path, 'status'=>$status, 'ok'=>$ok];
+    }
+    return ['ok'=>!in_array(false, array_column($checks, 'ok'), true), 'checks'=>$checks];
+}
+function wp_restore_runtime_step(array &$run): void {
+    $allowed = ['csrf','run_id','stage','operation','revision','verify_confirmed'];
+    $r = $run['runtime'] ?? null; $p = $run['placement'] ?? [];
+    if (($p['status'] ?? null) !== 'promoted' || array_diff(array_keys($_POST), $allowed) || ($_POST['verify_confirmed'] ?? null) !== '1'
+        || ($r && !in_array($r['status'], ['running'], true))) throw new \RuntimeException('Runtime verification precondition failed.');
+    $base = $run['target_url'];
+    if (!$r) {
+        $h = wp_restore_runtime_health($base);
+        $run['runtime'] = ['status'=>$h['ok'] ? 'running' : 'failed', 'baseline'=>$h['checks'], 'index'=>0, 'good'=>[], 'failed'=>[], 'skipped'=>[]];
+        return;
+    }
+    $plugins = $p['original_plugins'] ?? []; $t = wp_restore_options_tables($run);
+    if ($r['index'] >= count($plugins) || !$t || ($p['plugins_disabled'] ?? false) !== true) {
+        $r['status'] = $r['failed'] || $r['skipped'] || ($plugins && !$t) ? 'partial' : 'verified';
+        $run['runtime'] = $r; return;
+    }
+    $plugin = $plugins[$r['index']]; $file = $run['root'] . '/wp-content/plugins/' . $plugin;
+    $pdo = wp_restore_backup_pdo(); $write = static fn(array $list) =>
+        wp_restore_plugins_write($pdo, $t['options'], 'option_name', 'option_value', 'active_plugins', $list);
+    if (!is_file($file) || is_link($file)) { $r['skipped'][] = $plugin; }
+    else {
+        $ok = false; $checks = [];
+        try { $write(array_merge($r['good'], [$plugin])); $h = wp_restore_runtime_health($base); $ok = $h['ok']; $checks = $h['checks']; }
+        finally { $write($ok ? array_merge($r['good'], [$plugin]) : $r['good']); }
+        if ($ok) $r['good'][] = $plugin; else $r['failed'][] = ['plugin'=>$plugin, 'checks'=>$checks];
+    }
+    $r['index']++; $run['runtime'] = $r;
 }
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
@@ -3290,23 +3411,29 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare','replacement','placement_trial','placement_promote'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare','replacement','placement_trial','placement_promote','verify_runtime'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
     // A durable mutation intent, retirement or unknown phase is terminal. Never
     // let an older adapter reset/replay it; authenticated state/download remain separate.
-    $placement = in_array($operation, ['placement_trial','placement_promote'], true);
+    $placement = in_array($operation, ['placement_trial','placement_promote','verify_runtime'], true);
     if (!$placement && isset($run['replacement']) && ($run['replacement']['status'] ?? null) !== 'prepared') {
         if (($run['replacement']['status'] ?? null) === 'complete') site_report_api_reply(409, ['error'=>'Table replacement already completed. No database step was executed.','code'=>'replacement_complete']);
         site_report_api_reply(409, ['error'=>'Table replacement is terminal or uncertain. Do not replay SQL; retain the verified backup and recover manually.','code'=>'replacement_recovery_required']);
     }
     if ($operation === 'replacement' && !wp_restore_replacement_available()) site_report_api_reply(503, ['error'=>'Final table replacement is not available. No database step was executed.','code'=>'replacement_unavailable']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare','replacement'=>'\\wp_restore_replacement_step','placement_trial'=>'\\wp_restore_placement_trial','placement_promote'=>'\\wp_restore_placement_promote'][$operation];
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare','replacement'=>'\\wp_restore_replacement_step','placement_trial'=>'\\wp_restore_placement_trial','placement_promote'=>'\\wp_restore_placement_promote','verify_runtime'=>'\\wp_restore_runtime_step'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        // Replacement is durable and complete; only the post-completion cleanup of the comparison window failed.
+        if ($operation === 'replacement' && ($run['replacement']['status'] ?? null) === 'complete') {
+            try { $run['revision']++; wp_restore_save($run); } catch (\Throwable $saveError) { site_report_api_reply(400, ['error'=>'Table replacement completed but its checkpoint could not be saved. Retain the verified backup.','code'=>'replacement_failed']); }
+            site_report_api_reply(200, ['run'=>wp_restore_public($run),'warning'=>'Table replacement completed; releasing the comparison window reported a problem.']);
+        }
+        if ($operation === 'verify_runtime') site_report_api_reply(400, ['error'=>'Runtime verification could not complete. The site was left with the last plugin set that passed.','code'=>'runtime_verification_failed']);
         if ($placement) site_report_api_reply(400, ['error'=>'File placement refused or interrupted. Nothing was overwritten; the trial folder and verified backup are retained.','code'=>'placement_failed']);
         if ($operation === 'replacement') site_report_api_reply(400, ['error'=>'Table replacement refused or interrupted. Do not replay SQL; retain the verified backup and inspect state for manual recovery.','code'=>'replacement_failed']);
         if ($operation === 'replacement_prepare') site_report_api_reply(400, ['error'=>'Replacement preparation failed. No table replacement was performed.','code'=>'replacement_prepare_failed']);
@@ -10408,7 +10535,11 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
         'trial'=>t('Copying files into a trial folder. Nothing reaches the site root yet.'),
         'trial_ready'=>t('Files are in the trial folder. Inspect it, then confirm moving them into the site root. Existing files are never overwritten.'),
         'ack_promote'=>t('I confirm moving the trial files into the site root.'),
-        'done'=>t('Restoration finished, but site functionality is NOT verified. Plugins are disabled where possible and the backup .htaccess stays aside. Next: update image URLs, regenerate .htaccess and re-enable plugins one by one.'),
+        'ack_verify'=>t('I confirm re-enabling the plugins that were active in the backup, one at a time, keeping each only if the site stays healthy.'),
+        'verify'=>t('Checking the restored site over HTTP and re-enabling plugins one by one.'),
+        'verified'=>t('Restored site checked: the home page and login respond correctly and {count} plugin(s) were re-enabled without breaking the site. These are bounded smoke checks, not a full compatibility test. Next: update image URLs and regenerate .htaccess.'),
+        'partial'=>t('The restored site responds, but these plugins stay disabled because they broke the site or are missing: {list}. {count} plugin(s) were re-enabled. Next: update image URLs, regenerate .htaccess and review the disabled plugins.'),
+        'unhealthy'=>t('The restored site did not respond correctly over HTTP. Plugins remain disabled and the backup .htaccess stays aside. Check the web server, PHP version and wp-config.php.'),
         'terminal'=>t('Stopped. Do not repeat database steps; keep the recovery copy and recover manually.'),
         'failed'=>t('Restore step failed. No automatic retry was made.'),
         'prefix_remap'=>t('The backup tables use prefix {backup} but wp-config.php declares {config}. Tables and prefix-bound keys (roles, capabilities) are renamed to {config}; wp-config.php is not changed.'),
@@ -10443,8 +10574,12 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
         const pl = p.placement && p.placement.status;
         if (!pl || pl === 'trial') return {op: 'placement_trial', note: text.trial, extra: {}};
         if (pl === 'trial_ready' || pl === 'promoting') return {op: 'placement_promote', gate: 'ack_promote', note: text.trial_ready,
-            extra: {promote_confirmed: '1', scope_confirmed: 'trial_to_root', artifact_sha256: art}};
-        return {stop: text.done, finished: true};
+            extra: {promote_confirmed: '1', scope_confirmed: 'trial_to_root', artifact_sha256: art, trial_sha256: p.placement.trial_sha256}};
+        const rt = p.runtime;
+        if (!rt || rt.status === 'running') return {op: 'verify_runtime', gate: 'ack_verify', note: text.verify, extra: {verify_confirmed: '1'}};
+        if (rt.status === 'failed') return {stop: text.unhealthy, finished: true};
+        const list = rt.failed.concat(rt.skipped).join(', ');
+        return {stop: (rt.status === 'verified' ? text.verified : text.partial).replaceAll('{count}', String(rt.good.length)).replaceAll('{list}', list), finished: true};
     }
     async function refresh() {
         const state = await api('wp_restore_state');

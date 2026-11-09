@@ -31,7 +31,7 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
         check($status===200 && hash('sha256',$download)===$proof['artifact_sha256'],'completed replacement retains authenticated prior recovery download');
         global $site, $originals; check(($run['preflight']['prefix']['status']??null)==='remap' && $run['preflight']['prefix']['config']==='wp_' && $run['preflight']['prefix']['backup']==='old_','public preflight reports the backup prefix and its mapping to the wp-config prefix before any change');
         $trial=$site.'/wpr-trial-'.substr($run['run_id'],0,16); $place=['artifact_sha256'=>$proof['artifact_sha256']];
-        [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root']);
+        [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root','trial_sha256'=>str_repeat('0',64)]);
         check($status===400 && $body['code']==='placement_failed' && !file_exists($site.'/wp-load.php'),'promotion before any trial is refused without writing');
         for ($i=0;$i<20;$i++) {
             [$status,$body]=step('placement_trial',$place); check($status===200,'trial placement batch accepted'); $run=$body['run'];
@@ -41,14 +41,28 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
         check(is_file($trial.'/wp-load.php') && str_contains(file_get_contents($trial.'/.htaccess'),'denied') && !file_exists($trial.'/wp-includes/.htaccess') && !file_exists($site.'/wp-load.php') && !file_exists($site.'/index.php'),'files exist only in the trial folder; nothing reached the app root');
         [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1']);
         check($status===400 && !file_exists($site.'/wp-load.php'),'promotion without the exact scope confirmation is refused');
+        $digest=$run['preflight']['placement']['trial_sha256'];
+        [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root','trial_sha256'=>str_repeat('0',64)]);
+        check($status===400 && !file_exists($site.'/wp-load.php'),'promotion with a different trial digest than the inspected content is refused');
+        $place['trial_sha256']=$digest;
         for ($i=0;$i<20;$i++) {
             [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root']); check($status===200,'promotion batch accepted'); $run=$body['run'];
             if ($run['preflight']['placement']['status']==='promoted') break;
         }
         check($run['preflight']['placement']['status']==='promoted' && is_file($site.'/wp-load.php') && is_file($site.'/wp-includes/version.php') && !file_exists($trial),
             'confirmed promotion moved verified files to the root and removed the trial folder');
-        check(!$run['runtime_verified'],'placement still makes no runtime verification claim');
-        check($pdo->query("SELECT COUNT(*) FROM wp_options WHERE option_name='active_plugins' AND option_value<>'a:0:{}'")->fetchColumn()==='0','plugins deactivated in the restored options table');
+        check(!$run['runtime_verified'] && !isset($run['preflight']['runtime']),'placement itself makes no runtime verification claim');
+        $verify=['verify_confirmed'=>'1'];
+        [$status,$body]=step('verify_runtime',[]);
+        check($status===400 && $body['code']==='runtime_verification_failed' && !isset($body['run']),'runtime verification needs its own confirmation');
+        for ($i=0;$i<12;$i++) {
+            [$status,$body]=step('verify_runtime',$verify); check($status===200,'runtime verification step accepted'); $run=$body['run'];
+            if ($run['preflight']['runtime']['status']!=='running') break;
+        }
+        $rt=$run['preflight']['runtime'];
+        check($rt['status']==='partial' && $rt['good']===['good/good.php'] && $rt['failed']===['bad/bad.php'] && $rt['skipped']===['missing/missing.php'] && !$run['runtime_verified'],
+            'HTTP baseline passed; the good plugin stays, the plugin that broke the site was rolled back and the missing one skipped');
+        check($pdo->query("SELECT option_value FROM wp_options WHERE option_name='active_plugins'")->fetchColumn()==='a:1:{i:0;s:13:"good/good.php";}','only the healthy plugin remains active in the restored database');
         check(hash_file('sha256',$site.'/wp-config.php')===$originals['wp-config.php'],'wp-config.php is never modified by placement');
         [$status,$state]=request('wp_restore_state');
         check($status===200 && $state['run']['preflight']['placement']['status']==='promoted','run remains loadable after the authorized configuration update');

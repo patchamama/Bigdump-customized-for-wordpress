@@ -23,8 +23,9 @@ const advance = {
   assurance: () => { run.preflight.assurance = {status: 'compared_as_of'}; },
   replacement_prepare: () => { run.preflight.replacement = {status: 'prepared'}; },
   replacement: () => { run.preflight.replacement = {status: 'complete'}; },
-  placement_trial: () => { run.preflight.placement = {status: 'trial_ready'}; },
+  placement_trial: () => { run.preflight.placement = {status: 'trial_ready', trial_sha256: 'c'.repeat(64)}; },
   placement_promote: () => { run.preflight.placement = {status: 'promoted'}; },
+  verify_runtime: () => { run.preflight.runtime = {status: 'verified', good: ['a/a.php', 'b/b.php'], failed: [], skipped: []}; run.runtime_verified = true; },
 };
 const context = {
   document: {getElementById: id => elements[id], createElement: () => ({click() {}})},
@@ -80,7 +81,15 @@ const context = {
   ack.checked = true; await click();
   assert.equal(ops.at(-1), 'placement_promote');
   assert.equal(bodies.at(-1).get('scope_confirmed'), 'trial_to_root');
-  assert.match(elements['wp-restore-progress'].textContent, /NOT verified/);
+  assert.equal(bodies.at(-1).get('trial_sha256'), 'c'.repeat(64), 'promotion is bound to the inspected trial digest');
+  assert.ok(!ops.includes('verify_runtime'), 'plugin re-enabling needs its own confirmation');
+  assert.equal(ack.checked, false);
+  ack.checked = true; await click();
+  assert.equal(ops.at(-1), 'verify_runtime');
+  assert.equal(bodies.at(-1).get('verify_confirmed'), '1');
+  assert.match(elements['wp-restore-progress'].textContent, /Restored site checked/);
+  assert.match(elements['wp-restore-progress'].textContent, /2 plugin\(s\)/);
+  assert.match(elements['wp-restore-progress'].textContent, /not a full compatibility test/);
   assert.equal(next.hidden, true, 'finished wizard offers no further step');
   console.log('PASS actual-HTML restoration wizard order, confirmations, scopes and truthful final message');
 })().catch(error => { console.error(error); process.exitCode = 1; });

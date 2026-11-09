@@ -13,9 +13,13 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True)
-parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only', 'replacement-authority', 'replacement-partition', 'replacement-terminal', 'replacement-complete'], help='staging-only checks compatibility without requesting assurance; replacement-* checks exact-set preparation/terminal contracts or refusal without the real finalizer; other cases cover the dependent assurance contract')
+parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only', 'replacement-authority', 'replacement-partition', 'replacement-terminal', 'replacement-complete', 'e2e-wordpress'], help='staging-only checks compatibility without requesting assurance; replacement-* checks exact-set preparation/terminal contracts or refusal without the real finalizer; other cases cover the dependent assurance contract')
+parser.add_argument('--wordpress', help='Official WordPress tar.gz for the e2e-wordpress scenario (checksum verified by the caller)')
 parser.add_argument('--check-reader', action='store_true', help='Supplement staging-only with actual fixed runtime reader controls')
 args = parser.parse_args()
+e2e = args.scenario == 'e2e-wordpress'
+if e2e and not args.wordpress:
+    parser.error('e2e-wordpress needs --wordpress')
 if args.check_reader and args.scenario != 'staging-only':
     parser.error('--check-reader is only valid with --scenario staging-only')
 root = pathlib.Path(__file__).resolve().parents[1]
@@ -33,7 +37,7 @@ record = {'owner': owner, 'scenario': args.scenario, 'check_reader': args.check_
           'runtime_sha256': hashlib.sha256((root / 'cms_tools.php').read_bytes()).hexdigest(), 'commands': []}
 volume = 'cms-assurance-socket-' + owner
 socket_dir = '/var/run/mysqld'
-deadline = time.monotonic() + 22
+deadline = time.monotonic() + (600 if e2e else 22)
 cleanup = False
 exit_code = 1
 
@@ -41,7 +45,7 @@ def save():
     (proof / 'run.json').write_text(json.dumps(record, indent=2) + '\n')
 
 def call(label, command, data=None, check=True, private=False):
-    budget = 2 if cleanup else min(12, deadline - time.monotonic())
+    budget = 2 if cleanup else min(420 if e2e else 12, deadline - time.monotonic())
     if budget <= 0:
         raise TimeoutError('work budget exhausted')
     prefix = proof / ('%02d-' % len(record['commands']) + label)
@@ -112,9 +116,9 @@ try:
         identifier = call('create-' + role, ['create', '--pull', 'never', '--name', name,
             '--label', 'cms.restore.owner=' + owner, '--label', 'cms.restore.role=' + role,
             '--network', 'none', '--read-only', '--user', 'mysql', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-            '--memory', '1g', '--memory-swap', '1g', '--pids-limit', '256',
-            '--tmpfs', '/tmp:rw,noexec,nosuid,size=128m,mode=1777', '--tmpfs', '/var/lib/mysql:rw,noexec,nosuid,size=768m,mode=1777',
-            '--mount', mount, '--entrypoint', '/bin/sh', image, '-c', startup if role == 'server' else ('export TMPDIR=/tmp/contract/private; while [ ! -f /tmp/contract/ready ]; do sleep 0.1; done; exec php -d pdo_mysql.default_socket=/var/run/mysqld/fixture.sock -d session.save_path=/tmp/contract/private -S 127.0.0.1:18084 -t /tmp/contract/site')]).stdout.decode().strip()
+            '--memory', '2g' if e2e else '1g', '--memory-swap', '2g' if e2e else '1g', '--pids-limit', '256',
+            '--tmpfs', '/tmp:rw,noexec,nosuid,size=' + ('1000m' if e2e and role == 'client' else '128m') + ',mode=1777', '--tmpfs', '/var/lib/mysql:rw,noexec,nosuid,size=768m,mode=1777',
+            '--mount', mount, '--entrypoint', '/bin/sh', image, '-c', startup if role == 'server' else (('export PHP_CLI_SERVER_WORKERS=4; ' if args.scenario in ('replacement-complete', 'e2e-wordpress') else '') + 'export TMPDIR=/tmp/contract/private; while [ ! -f /tmp/contract/ready ]; do sleep 0.1; done; exec php -d memory_limit=512M -d mysqli.default_socket=/var/run/mysqld/fixture.sock -d pdo_mysql.default_socket=/var/run/mysqld/fixture.sock -d session.save_path=/tmp/contract/private -S 127.0.0.1:18084 -t /tmp/contract/site')]).stdout.decode().strip()
         record['containers'][role] = {'id': identifier, 'image': image, 'name': name}
         save()
         container_owned(role)
@@ -131,8 +135,22 @@ try:
         for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/values.php', 'tests/fixtures/wordpress-restore/mysql84-assurance.php', 'tests/wordpress-restore-warning-reader.php', 'tests/fixtures/wordpress-restore/replacement-authority.php']:
             archive.add(root / name, arcname=name, recursive=False)
     call('copy-inputs', ['exec', '-i', client, '/bin/sh', '-c', 'umask 077; mkdir /tmp/contract && tar -xf - -C /tmp/contract'], package.getvalue())
-    driver = ['exec', client, 'php', '/tmp/contract/tests/fixtures/wordpress-restore/mysql84-assurance.php']
-    prepared = call('prepare-api', driver + ['prepare', args.scenario, 'reader-controls' if args.check_reader else 'no-reader-controls'], check=False)
+    if e2e:
+        call('copy-wordpress', ['exec', '-i', client, '/bin/sh', '-c', 'umask 077; tar -xzf - -C /tmp/contract'], pathlib.Path(args.wordpress).read_bytes())
+        php = ['exec', client, 'php', '-d', 'memory_limit=512M', '-d', 'mysqli.default_socket=/var/run/mysqld/fixture.sock', '-d', 'pdo_mysql.default_socket=/var/run/mysqld/fixture.sock']
+        driver = php + ['/tmp/contract/tests/fixtures/wordpress-restore/e2e.php']
+        source = call('e2e-source', driver + ['source'], check=False)
+        sys.stdout.buffer.write(source.stdout); sys.stderr.buffer.write(source.stderr)
+        if source.returncode:
+            raise RuntimeError('e2e source build failed')
+        dump = call('e2e-dump', ['exec', record['containers']['server']['id'], 'mysqldump', '--no-defaults', '--socket=/var/run/mysqld/fixture.sock', '-uroot',
+                                 '--single-transaction', '--no-tablespaces', '--set-gtid-purged=OFF', '--skip-comments', '--default-character-set=utf8mb4', 'src_wp'], private=True).stdout
+        record['e2e_dump_bytes'] = len(dump)
+        call('e2e-dump-copy', ['exec', '-i', client, '/bin/sh', '-c', 'umask 077; mkdir /tmp/contract/incoming && gzip -n > /tmp/contract/incoming/db_e2e.sql.gz'], dump, private=True)
+        prepared = call('prepare-api', driver + ['prepare'], check=False)
+    else:
+        driver = ['exec', client, 'php', '/tmp/contract/tests/fixtures/wordpress-restore/mysql84-assurance.php']
+        prepared = call('prepare-api', driver + ['prepare', args.scenario, 'reader-controls' if args.check_reader else 'no-reader-controls'], check=False)
     sys.stdout.buffer.write(prepared.stdout)
     sys.stderr.buffer.write(prepared.stderr)
     if prepared.returncode:
@@ -142,7 +160,7 @@ try:
     container_owned('server')
     call('standard-recovery', ['exec', '-i', record['containers']['server']['id'], 'mysql', '--no-defaults',
          '--socket=/var/run/mysqld/fixture.sock', '-ufixture_recovery', 'recovery84'], backup, private=True)
-    result = call('public-assurance', driver + ['complete', args.scenario, 'reader-controls' if args.check_reader else 'no-reader-controls'], check=False)
+    result = call('public-assurance', driver + (['complete'] if e2e else ['complete', args.scenario, 'reader-controls' if args.check_reader else 'no-reader-controls']), check=False)
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
     exit_code = result.returncode or (1 if result.stderr else 0)
