@@ -614,3 +614,31 @@ The non-native HTTP fixtures use synthetic configuration/archives/dumps and a
 database double that refuses connections. The optional native scenarios above use
 real PDO/MariaDB only inside their owned disposable container. Neither executes
 backup PHP or a WordPress runtime.
+
+## Fixed exact-set replacement
+
+The named `operation=replacement` uses the current authenticated run/stage/revision
+and the same explicit exact-set artifact/plan confirmation fields as preparation.
+In one uninterrupted exclusion window it re-compares the original OLD set and the
+staged tables, atomically renames OLD to retired names and staged tables to their
+logical names, journals each phase, then permanently drops only the retired OLD set.
+Any uncertain phase is terminal: do not replay SQL; the verified backup download
+stays available for manual recovery. Completion does not verify plugins, HTTP or
+the WordPress runtime. If the finalizer is absent the request returns **503**
+`replacement_unavailable` without executing any database step.
+An externally declared function, adjacent file, POST executor or configured callback
+cannot satisfy the same-source guard. No backup PHP/config/plugin is loaded.
+
+The internal prerequisite continues the freshly authenticated comparison before
+its existing lock cleanup, never after that comparison returns. Pending intent,
+ownership journal and atomic retirement belong to the same known-participant window;
+retirement is not deletion or successful final replacement. Its executable path and
+positive public proof remain gated on the actual finalizer and joint integration
+verification. The current negative contract is not rename/deletion, crash, durable
+identity, runtime or hosting certification.
+
+**Español:** `replacement` devuelve el 503 anterior sin cambiar tablas ni estado
+mientras falte el finalizador real del mismo archivo. Un stub externo no habilita
+la operación. El requisito interno de retiro no constituye reemplazo completo ni
+prueba positiva de ejecución: retiro y borrado requieren verificación integrada
+dentro de una misma ventana de exclusión, sin repetir una fase incierta.

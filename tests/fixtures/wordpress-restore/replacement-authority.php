@@ -11,6 +11,26 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
         check($status===200 && $state['run']===$run && oracle($pdo)===$permanent
             && hash_file('sha256',$path)===$checkpoint,'replacement refusal preserves exact public durable and permanent state including counters');
     };
+    if ($case==='replacement-complete') {
+        [$status,$body]=step('replacement_prepare',$input);
+        check($status===200,'complete-path prerequisite has real public prepared authority'); $run=$body['run'];
+        $logical=array_column($manifest['run']['values_manifest']['tables'],'name');
+        [$status,$body]=step('replacement',$input);
+        check($status===200,'real fixed finalizer completes the exact-set replacement'); $run=$body['run'];
+        $expected=array_merge($logical,['_wpr_staging_owner']); sort($expected,SORT_STRING);
+        $actual=$pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN); sort($actual,SORT_STRING);
+        check($actual===$expected,'only the restored logical tables and the control table remain; every retired OLD table is dropped');
+        check($pdo->query("SELECT phase FROM `_wpr_staging_owner` WHERE id=1")->fetchColumn()==='complete','durable journal records completion');
+        check($run['preflight']['replacement']['status']==='complete' && $run['preflight']['replacement']['recovery_needed']===false
+            && !$run['runtime_verified'],'public state reports completion without claiming runtime verification');
+        $after=oracle($pdo); $checkpoint=hash_file('sha256',$path);
+        [$status,$body]=step('replacement',$input);
+        check($status===409 && $body['code']==='replacement_complete' && oracle($pdo)===$after && hash_file('sha256',$path)===$checkpoint,
+            'completed replacement refuses replay without SQL or state change');
+        [$status,$download]=request('wp_restore_backup_download',['csrf'=>$GLOBALS['csrf'],'run_id'=>$run['run_id']],false);
+        check($status===200 && hash('sha256',$download)===$proof['artifact_sha256'],'completed replacement retains authenticated prior recovery download');
+        return;
+    }
     if ($case==='replacement-partition') {
         check($pdo->query("SELECT COUNT(*) FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA=DATABASE() AND PARTITION_NAME IS NOT NULL")->fetchColumn()==='2','real partitioned original OLD prerequisite');
         [$status,$body]=step('replacement_prepare',$input);

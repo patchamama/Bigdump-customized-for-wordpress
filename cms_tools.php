@@ -2566,10 +2566,10 @@ function wp_restore_assurance_table(PDO $pdo, string $name, ?bool $temporary, ar
     return ['rows'=>count($hashes), 'schema_sha256'=>hash('sha256', $ddl),
         'data_sha256'=>hash('sha256', implode('', $hashes))];
 }
-function wp_restore_assurance_step(array &$run): void {
+function wp_restore_assurance_step(array &$run, bool $replacement = false): void {
     if (!wp_restore_backup_verified($run) || ($run['staging']['status'] ?? null) !== 'ready'
         || $run['staging']['processed'] !== $run['values']['plan_bytes']
-        || ($_POST['assurance_confirmed'] ?? null) !== '1'
+        || (!$replacement && ($_POST['assurance_confirmed'] ?? null) !== '1')
         || !is_string($_POST['artifact_sha256'] ?? null) || !is_string($_POST['plan_sha256'] ?? null)
         || !hash_equals($run['backup']['sha256'], $_POST['artifact_sha256'])
         || !hash_equals($run['values']['plan_sha256'], $_POST['plan_sha256']))
@@ -2636,12 +2636,12 @@ function wp_restore_assurance_step(array &$run): void {
             $actual = ['name'=>$table['name']] + wp_restore_assurance_table($pdo, $table['name'], null, $quota);
             if ($actual !== $table) throw new \RuntimeException('Locked prior content changed.');
         }
-        $compared = [];
+        $compared = []; $expectedTables = [];
         foreach ($names as $key=>$name) {
             $expected = wp_restore_assurance_table($pdo, $temporary[$key], true, $quota);
             $actual = wp_restore_assurance_table($pdo, $name, false, $quota);
             if ($actual !== $expected) throw new \RuntimeException('Locked staged content differs.');
-            $compared[] = $actual;
+            $compared[] = $actual; $expectedTables[$key] = $expected;
         }
         wp_restore_assurance_deadline($quota);
         if (wp_restore_backup_inventory($pdo) !== $inventory) throw new \RuntimeException('Comparison namespace changed.');
@@ -2649,6 +2649,7 @@ function wp_restore_assurance_step(array &$run): void {
             'position'=>$offset, 'plan_sha256'=>$run['values']['plan_sha256'], 'artifact_sha256'=>$run['backup']['sha256'],
             'old_state_sha256'=>$old['old_state_sha256'], 'new_state_sha256'=>hash('sha256', json_encode($compared, JSON_THROW_ON_ERROR)),
             'inventory_sha256'=>hash('sha256', json_encode($inventory, JSON_THROW_ON_ERROR)), 'profile'=>'mysql-8.4.13-innodb'];
+        if ($replacement) wp_restore_replacement_retire($pdo, $run, $old, $names, $expectedTables, $inventory, $quota);
     } finally {
         // Always attempt every cleanup, even if one fails. TEMPORARY is mandatory:
         // cleanup must NEVER fall through to a permanent same-name table.
@@ -2741,6 +2742,105 @@ function wp_restore_replacement_prepare(array &$run): void {
         'mapping_sha256'=>hash('sha256', json_encode($mapping, JSON_THROW_ON_ERROR)),
         'old_tables'=>count($mapping['old']), 'new_tables'=>count($mapping['new']),
         'artifact_sha256'=>$run['backup']['sha256'], 'plan_sha256'=>$run['values']['plan_sha256']];
+}
+// Fixed source-owned cutover only; an externally declared test/hosting function
+// must never make an unfinished runtime's public replacement path executable.
+function wp_restore_replacement_available(): bool {
+    $name = __NAMESPACE__ . '\\wp_restore_replacement_finalize';
+    return function_exists($name) && (new \ReflectionFunction($name))->getFileName() === __FILE__;
+}
+function wp_restore_replacement_intent(array &$run, string $status): void {
+    if (!in_array($status, ['pending_rename','retired','pending_drop','complete'], true))
+        throw new \RuntimeException('Invalid fixed replacement phase.');
+    $run['replacement']['status'] = $status; $run['revision']++;
+    wp_restore_save($run);
+    // Neither this authoritative file/session flush nor a DDL implicit COMMIT
+    // forms one transaction with the journal. Any uncertain intent is terminal.
+    if (!session_write_close() || !session_start()) throw new \RuntimeException('Cannot persist replacement authority.');
+    if (($_SESSION['migrate_auth'] ?? false) !== true || !is_string($_SESSION['wp_restore_csrf'] ?? null)
+        || !hash_equals($_SESSION['wp_restore_csrf'], $_POST['csrf'] ?? '') || wp_restore_load() !== $run)
+        throw new \RuntimeException('Replacement authority changed during intent flush.');
+}
+function wp_restore_replacement_journal(PDO $pdo, array $run, string $before, string $after): void {
+    $stmt = $pdo->prepare('UPDATE `_wpr_staging_owner` SET phase=? WHERE id=1 AND owner=? AND token=? AND plan=? AND position=? AND phase=?');
+    try {
+        $stmt->execute([$after,$run['run_id'],$run['staging']['token'],$run['values']['plan_sha256'],$run['staging']['processed'],$before]);
+        if ($stmt->rowCount() !== 1 || wp_restore_staging_warning_count($pdo) !== 0)
+            throw new \RuntimeException('Replacement journal outcome uncertain.');
+    } finally { $stmt->closeCursor(); }
+    if ($pdo->exec('COMMIT') !== 0 || wp_restore_staging_warning_count($pdo) !== 0)
+        throw new \RuntimeException('Replacement journal acknowledgement uncertain.');
+}
+function wp_restore_replacement_step(array &$run): void {
+    $allowed = ['csrf','run_id','stage','operation','revision','replacement_confirmed','scope_confirmed','artifact_sha256','plan_sha256'];
+    $p = $run['replacement'] ?? [];
+    if (!wp_restore_replacement_available() || ($p['status'] ?? null) !== 'prepared' || array_diff(array_keys($_POST), $allowed)
+        || ($_POST['replacement_confirmed'] ?? null) !== '1' || ($_POST['scope_confirmed'] ?? null) !== 'exact_original_old_set'
+        || !is_string($_POST['artifact_sha256'] ?? null) || !is_string($_POST['plan_sha256'] ?? null)
+        || !hash_equals($run['backup']['sha256'] ?? '', $_POST['artifact_sha256'])
+        || !hash_equals($run['values']['plan_sha256'] ?? '', $_POST['plan_sha256']))
+        throw new \RuntimeException('Explicit prepared exact-set replacement required.');
+    [, , $mapping] = wp_restore_replacement_context($run);
+    if (($p['scope'] ?? null) !== 'exact_original_old_set' || ($p['mapping'] ?? null) !== $mapping
+        || ($p['mapping_sha256'] ?? null) !== hash('sha256', json_encode($mapping, JSON_THROW_ON_ERROR))
+        || ($p['artifact_sha256'] ?? null) !== $run['backup']['sha256'] || ($p['plan_sha256'] ?? null) !== $run['values']['plan_sha256']
+        || ($p['old_tables'] ?? null) !== count($mapping['old']) || ($p['new_tables'] ?? null) !== count($mapping['new']))
+        throw new \RuntimeException('Prepared replacement binding changed.');
+    // A fixed internal branch, never a callback or executor supplied by POST/config.
+    wp_restore_assurance_step($run, true);
+}
+function wp_restore_replacement_retire(PDO $pdo, array &$run, array $old, array $names, array $expected, array $inventory, array &$quota): void {
+    if (!wp_restore_replacement_available()) throw new \RuntimeException('Real finalizer required before retirement.');
+    $mapping = $run['replacement']['mapping'];
+    if (array_map('strval', array_keys($mapping['old'])) !== array_column($old['tables'], 'name') || $mapping['new'] !== $names
+        || array_keys($expected) !== array_keys($names)) throw new \RuntimeException('Fresh replacement mapping changed.');
+    wp_restore_assurance_deadline($quota);
+    wp_restore_replacement_profile($pdo, $inventory); // Still inside the SAME OLD/NEW/control WRITE window.
+    $pairs = [];
+    foreach ($mapping['old'] as $source=>$target) $pairs[] = wp_restore_backup_quote($source) . ' TO ' . wp_restore_backup_quote($target);
+    foreach ($mapping['new'] as $logical=>$physical) $pairs[] = wp_restore_backup_quote($physical) . ' TO ' . wp_restore_backup_quote($logical);
+    wp_restore_replacement_intent($run, 'pending_rename');
+    wp_restore_replacement_journal($pdo, $run, 'done', 'rename');
+    if ($pdo->exec('RENAME TABLE ' . implode(',', $pairs)) !== 0 || wp_restore_staging_warning_count($pdo) !== 0)
+        throw new \RuntimeException('Replacement rename outcome uncertain.');
+    $retired = array_merge(array_values($mapping['old']), array_keys($mapping['new']), ['_wpr_staging_owner']);
+    sort($retired, SORT_STRING);
+    if (wp_restore_backup_inventory($pdo) !== $retired) throw new \RuntimeException('Retirement inventory changed.');
+    foreach ($expected as $logical=>$state) {
+        if (wp_restore_assurance_table($pdo, $logical, false, $quota) !== $state)
+            throw new \RuntimeException('Renamed content differs from captured plan.');
+    }
+    // OLD identity comes from exact pre-mutation locked equality + the fixed map
+    // + acknowledged atomic RENAME + uninterrupted exclusion, never a newly blessed
+    // retired baseline or an assumed rename-invariant SHOW CREATE/CHECK-name hash.
+    wp_restore_replacement_journal($pdo, $run, 'rename', 'retired');
+    $run['replacement']['retirement_sha256'] = hash('sha256', json_encode([
+        $old['old_state_sha256'],$mapping,$expected], JSON_THROW_ON_ERROR));
+    wp_restore_replacement_intent($run, 'retired');
+    // This receipt cannot be resumed on another connection. The fixed same-file
+    // finalizer must finish before assurance's finally releases ANY exclusion.
+    wp_restore_replacement_finalize($pdo, $run, $mapping, $expected, $quota);
+    if (($run['replacement']['status'] ?? null) !== 'complete') throw new \RuntimeException('Replacement did not complete.');
+}
+// Fixed same-window finalizer: permanently drops only the exact retired OLD set
+// after retirement, inside the exclusion that compared and renamed it. No retry.
+function wp_restore_replacement_finalize(PDO $pdo, array &$run, array $mapping, array $expected, array &$quota): void {
+    if (($run['replacement']['status'] ?? null) !== 'retired') throw new \RuntimeException('Retirement receipt required.');
+    $retired = array_values($mapping['old']);
+    wp_restore_assurance_deadline($quota);
+    wp_restore_replacement_intent($run, 'pending_drop');
+    wp_restore_replacement_journal($pdo, $run, 'retired', 'drop');
+    if ($pdo->exec('DROP TABLE ' . implode(',', array_map(static fn($name)=>wp_restore_backup_quote($name), $retired))) !== 0
+        || wp_restore_staging_warning_count($pdo) !== 0) throw new \RuntimeException('Replacement drop outcome uncertain.');
+    $final = array_merge(array_keys($mapping['new']), ['_wpr_staging_owner']);
+    sort($final, SORT_STRING);
+    if (wp_restore_backup_inventory($pdo) !== $final) throw new \RuntimeException('Final inventory changed.');
+    foreach ($expected as $logical=>$state) {
+        if (wp_restore_assurance_table($pdo, $logical, false, $quota) !== $state)
+            throw new \RuntimeException('Final content differs from captured plan.');
+    }
+    wp_restore_replacement_journal($pdo, $run, 'drop', 'complete');
+    wp_restore_replacement_intent($run, 'complete');
 }
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
@@ -3060,7 +3160,7 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare','replacement'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
     // A durable mutation intent, retirement or unknown phase is terminal. Never
     // let an older adapter reset/replay it; authenticated state/download remain separate.
@@ -3068,13 +3168,15 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
         if (($run['replacement']['status'] ?? null) === 'complete') site_report_api_reply(409, ['error'=>'Table replacement already completed. No database step was executed.','code'=>'replacement_complete']);
         site_report_api_reply(409, ['error'=>'Table replacement is terminal or uncertain. Do not replay SQL; retain the verified backup and recover manually.','code'=>'replacement_recovery_required']);
     }
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare'][$operation];
+    if ($operation === 'replacement' && !wp_restore_replacement_available()) site_report_api_reply(503, ['error'=>'Final table replacement is not available. No database step was executed.','code'=>'replacement_unavailable']);
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare','replacement'=>'\\wp_restore_replacement_step'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($operation === 'replacement') site_report_api_reply(400, ['error'=>'Table replacement refused or interrupted. Do not replay SQL; retain the verified backup and inspect state for manual recovery.','code'=>'replacement_failed']);
         if ($operation === 'replacement_prepare') site_report_api_reply(400, ['error'=>'Replacement preparation failed. No table replacement was performed.','code'=>'replacement_prepare_failed']);
         if ($operation === 'assurance') site_report_api_reply(400, ['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed']);
         if ($operation === 'staging') site_report_api_reply(400, ['error'=>'Staging refused or interrupted. Existing tables were not replaced. Inspect state; pending SQL requires recovery.','code'=>'staging_failed']);

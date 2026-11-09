@@ -57,3 +57,18 @@ six phases, normal owned cleanup). Do not rerun accepted evidence without new co
 This demonstrates **known participants only**, not namespace-wide exclusion,
 locked-negative DROP, crash/power-loss safety, durable identity, disconnect recovery,
 hosting compatibility or WordPress runtime. Neither probe loads application code.
+
+## Public exact-set replacement
+
+The application runner accepts `--scenario replacement-complete`:
+
+```sh
+python3 tests/wordpress-restore-assurance.py --endpoint "$RESTORE_TEST_DOCKER_ENDPOINT" --scenario replacement-complete
+```
+
+It performs actual public backup/recovery, staging, assurance and private-map
+preparation, then the named `replacement` request. It requires only the restored
+logical tables plus the control table to remain, every retired OLD table dropped,
+journal phase `complete`, replay refused with `replacement_complete` and no state
+change, and the authenticated recovery download retained. It makes no runtime
+(plugin/HTTP) claim.

@@ -283,7 +283,7 @@ try {
                 'original_files_unchanged'=>$files],JSON_THROW_ON_ERROR)."\n";
             $lastHttp=$failed;
         }
-        if (in_array($case,['red','valid','replacement-authority','replacement-partition','replacement-terminal'],true)) {
+        if (in_array($case,['red','valid','replacement-authority','replacement-partition','replacement-terminal','replacement-complete'],true)) {
             check($status===200,'public assurance operation accepted'); $run=$j['run'];
             $a=$run['preflight']['assurance'];
             check($a['status']==='compared_as_of' && $a['requires_locked_recheck']===true && $a['position']===$run['preflight']['staging']['processed'],'truthful plan-position-bound historical assurance');

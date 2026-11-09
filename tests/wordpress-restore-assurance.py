@@ -13,7 +13,7 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True)
-parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only', 'replacement-authority', 'replacement-partition', 'replacement-terminal'], help='staging-only checks compatibility without requesting assurance; replacement-* checks non-destructive replacement preparation/terminal contracts; other cases cover the dependent assurance contract')
+parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only', 'replacement-authority', 'replacement-partition', 'replacement-terminal', 'replacement-complete'], help='staging-only checks compatibility without requesting assurance; replacement-* checks exact-set preparation/terminal contracts or refusal without the real finalizer; other cases cover the dependent assurance contract')
 parser.add_argument('--check-reader', action='store_true', help='Supplement staging-only with actual fixed runtime reader controls')
 args = parser.parse_args()
 if args.check_reader and args.scenario != 'staging-only':

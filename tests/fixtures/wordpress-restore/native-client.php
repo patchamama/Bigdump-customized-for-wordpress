@@ -69,6 +69,11 @@ try {
     $pdo->exec("CREATE USER 'restore_fixture'@'localhost' IDENTIFIED BY " . $pdo->quote($password));
     $pdo->exec("GRANT ALL PRIVILEGES ON restore_target.* TO 'restore_fixture'@'localhost'");
     $pdo->exec('USE restore_target');
+    if (in_array($argv[1] ?? '', ['assurance-premise', 'assurance-reference-premise'], true)) {
+        require __DIR__ . '/assurance.php';
+        $exit = 0;
+        return;
+    }
     $pdo->exec('CREATE TABLE legacy_native (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, payload LONGBLOB NOT NULL, amount DECIMAL(20,6) NOT NULL, flag BIT(9) NOT NULL, stamp TIMESTAMP(6) NULL DEFAULT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=19');
     $pdo->exec("INSERT INTO legacy_native VALUES (0,UNHEX('4100FF27'),12.340000,b'111111111','2024-02-03 04:05:06.123456'),(7,UNHEX('E99BAA'),-9.000001,b'1',NULL)");
     $pdo->exec('CREATE TABLE unrelated_prefix (id INT NOT NULL PRIMARY KEY, value VARCHAR(64) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');

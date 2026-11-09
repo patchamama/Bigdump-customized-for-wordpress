@@ -237,3 +237,7 @@ nativeCheck($s === 200 && $stable['run']['preflight']['staging'] === $progress, 
 foreach ($originals as $name => $sha) nativeCheck(hash_file('sha256', $site . '/' . $name) === $sha, 'staging preserves original bytes ' . $name);
 nativeCheck(!file_exists($base . '/BACKUP_EXECUTED') && !file_exists($site . '/index.php'), 'staging executes neither stored PHP nor public placement');
 $report['old_state_unchanged'] = nativeOracle($pdo, ['legacy_native', 'unrelated_prefix']) === $before;
+if ($scenario === 'staging-assurance') {
+    nativeCheck(($progress['live_content_assured'] ?? false) === true,
+        'ready staging explicitly authenticates live NEW schema row multiset and AUTO_INCREMENT');
+}

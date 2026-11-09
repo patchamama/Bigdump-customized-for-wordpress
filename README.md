@@ -354,8 +354,10 @@ new updater nor report/API features provide a production promotion operation.
   replacement authority; final cutover must compare again under uninterrupted locks.
   A separately confirmed operation prepares the exact original-OLD-set replacement
   mapping privately, rejecting unsupported partitions; it performs no replacement.
-  Pending/uncertain replacement checkpoints block database replay. Database replacement
-  and public placement are not enabled yet; see
+  Pending/uncertain replacement checkpoints block database replay. A named replacement
+  request fails closed with 503 until the fixed same-file finalizer exists; a retirement
+  prerequisite is not completed replacement. Database replacement and public placement
+  are not enabled yet; see
   [scope and safeguards](docs/wordpress-restore.md).
 - **WordPress installer** — download and install the latest WordPress into the current
   directory when none is present, preserving an existing `wp-content`.
