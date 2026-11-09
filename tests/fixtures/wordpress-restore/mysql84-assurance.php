@@ -136,6 +136,7 @@ try {
         $pdo->exec('CREATE TABLE legacy_native (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,payload LONGBLOB,flag BIT(9)) ENGINE=InnoDB AUTO_INCREMENT=19');
         $pdo->exec("INSERT INTO legacy_native VALUES (0,UNHEX('4100FF27'),b'111111111'),(7,NULL,b'1')");
         $pdo->exec('CREATE TABLE _wpr_business (id INT PRIMARY KEY,payload VARCHAR(30)) ENGINE=InnoDB');
+        if ($case==='replacement-partition') $pdo->exec('ALTER TABLE _wpr_business PARTITION BY HASH(id) PARTITIONS 2');
         $pdo->exec("INSERT INTO _wpr_business VALUES (5,'legitimate original table')");
         $before = oracle($pdo);
         file_put_contents($site . '/.migrate_config', json_encode(['password_hash'=>hash('sha256','odc_migrate_2026_x9kFixturePassword')]));
@@ -282,7 +283,7 @@ try {
                 'original_files_unchanged'=>$files],JSON_THROW_ON_ERROR)."\n";
             $lastHttp=$failed;
         }
-        if (in_array($case,['red','valid'],true)) {
+        if (in_array($case,['red','valid','replacement-authority','replacement-partition','replacement-terminal'],true)) {
             check($status===200,'public assurance operation accepted'); $run=$j['run'];
             $a=$run['preflight']['assurance'];
             check($a['status']==='compared_as_of' && $a['requires_locked_recheck']===true && $a['position']===$run['preflight']['staging']['processed'],'truthful plan-position-bound historical assurance');
@@ -293,6 +294,10 @@ try {
             [$s,$state]=request('wp_restore_state'); check($s===200 && $state['run']===$previous && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'rejection leaves exact durable checkpoint and counters unchanged');
         }
         check(oracle($pdo)===$permanent,'assurance never mutates permanent OLD NEW control schemas rows counters');
+        if (str_starts_with($case,'replacement-')) {
+            require __DIR__.'/replacement-authority.php';
+            replacementAuthorityFixture($case,$pdo,$proof,$manifest);
+        }
         if ($case==='valid') {
             $pdo->exec('UPDATE '.$q." SET label='changed-after-release' WHERE id=7"); $permanent=oracle($pdo); $previous=$run;
             $checkpoint=hash_file('sha256',ownedWork().'/state.json');

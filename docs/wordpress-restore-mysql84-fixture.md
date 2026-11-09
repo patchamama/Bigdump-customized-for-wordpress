@@ -39,3 +39,21 @@ locked comparison, collision 1050 with unchanged state, valid locked multi-RENAM
 committed journal, transferred exclusion and external acknowledgement. Both
 normal accounts were verified; owned containers and socket volume were removed.
 This does not admit the profile into the application or implement content seals.
+
+## Exact-retired-set DROP prerequisite
+
+`--case rename` is the unchanged default. The separately authorized `--case drop`
+selects the synthetic DROP/exclusion fixture, never the application cutover:
+
+```sh
+python3 tests/wordpress-restore-mysql84.py --endpoint "$RESTORE_TEST_DOCKER_ENDPOINT" --case drop
+```
+
+The accepted one-shot profile proof used a 29-second outer / 22-second inner budget:
+unlocked missing-table multi-DROP error1051 preserved the full baseline; locked
+multi-RENAME and permanent exact-retiree multi-DROP preserved final/control WRITE
+exclusion through journal COMMIT and separate-client acknowledgement (106 checks,
+six phases, normal owned cleanup). Do not rerun accepted evidence without new consent.
+This demonstrates **known participants only**, not namespace-wide exclusion,
+locked-negative DROP, crash/power-loss safety, durable identity, disconnect recovery,
+hosting compatibility or WordPress runtime. Neither probe loads application code.

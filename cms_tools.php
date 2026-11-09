@@ -1624,6 +1624,7 @@ function wp_restore_public(array $run) {
             'total'=>$run['values']['plan_bytes'], 'rows'=>$p['rows'], 'tables'=>$p['tables'], 'frames'=>$p['frames']];
     }
     if (isset($run['assurance'])) $preflight['assurance'] = $run['assurance'];
+    if (isset($run['replacement'])) $preflight['replacement'] = wp_restore_replacement_summary($run);
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
         'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
@@ -2670,6 +2671,77 @@ function wp_restore_assurance_step(array &$run): void {
     // GET_LOCK is cooperative; object locks do not fence future namespace changes.
     $run['assurance'] = $summary;
 }
+// Non-destructive replacement preparation. Historical assurance is not a lock lease.
+function wp_restore_replacement_summary(array $run): array {
+    $p = $run['replacement'];
+    $status = in_array($p['status'] ?? null, ['prepared','pending_rename','retired','pending_drop','recovery_required','complete'], true)
+        ? $p['status'] : 'recovery_required';
+    return ['status'=>$status, 'scope'=>'exact_original_old_set', 'mapping_sha256'=>$p['mapping_sha256'] ?? null,
+        'old_tables'=>$p['old_tables'] ?? 0, 'new_tables'=>$p['new_tables'] ?? 0,
+        'requires_locked_recheck'=>true, 'recovery_needed'=>!in_array($status, ['prepared','complete'], true)];
+}
+function wp_restore_replacement_context(array $run): array {
+    if (!wp_restore_backup_verified($run) || !($run['files']['ready'] ?? false) || !($run['values']['ready'] ?? false)
+        || ($run['staging']['status'] ?? null) !== 'ready' || $run['staging']['processed'] !== $run['values']['plan_bytes']
+        || !preg_match('/^[a-f0-9]{64}$/D', $run['run_id'])) throw new \RuntimeException('Prepared staged authority required.');
+    [$artifact, $old] = wp_restore_backup_artifact($run); fclose($artifact);
+    if (!hash_equals($old['old_state_sha256'], hash('sha256', json_encode($old['tables'], JSON_THROW_ON_ERROR)))
+        || !hash_equals($old['old_state_sha256'], $run['backup']['verification']['old_state_sha256']))
+        throw new \RuntimeException('Prior state binding changed.');
+    $a = $run['assurance'] ?? [];
+    if (($a['status'] ?? null) !== 'compared_as_of' || ($a['requires_locked_recheck'] ?? null) !== true
+        || ($a['position'] ?? null) !== $run['staging']['processed'] || ($a['plan_sha256'] ?? null) !== $run['values']['plan_sha256']
+        || ($a['artifact_sha256'] ?? null) !== $run['backup']['sha256'] || ($a['old_state_sha256'] ?? null) !== $old['old_state_sha256'])
+        throw new \RuntimeException('Historical comparison binding required, not cutover authority.');
+    $meta = wp_restore_values_metadata($run);
+    $offset = 0; $quota = ['started'=>microtime(true)];
+    while ($offset < $run['values']['plan_bytes']) {
+        wp_restore_assurance_deadline($quota);
+        [, $offset] = wp_restore_staging_capture($run, $meta, $offset);
+    }
+    $mapping = ['old'=>[], 'new'=>[]]; $prefix = '_wpr_' . substr($run['run_id'], 0, 32) . '_'; $i = 0;
+    foreach ($old['tables'] as $table) {
+        wp_restore_backup_quote($table['name']);
+        if (isset($mapping['old'][$table['name']])) throw new \RuntimeException('Duplicate prior target.');
+        $mapping['old'][$table['name']] = $prefix . 'r_' . ++$i;
+    }
+    $i = 0;
+    foreach ($meta['tables'] as $table) {
+        $name = $table['schema']['table']; wp_restore_backup_quote($name);
+        if (isset($mapping['new'][$name])) throw new \RuntimeException('Duplicate logical target.');
+        $mapping['new'][$name] = $prefix . ++$i;
+    }
+    $inventory = array_merge(array_column($old['tables'], 'name'), array_values($mapping['new']), ['_wpr_staging_owner']);
+    $logical = array_keys($mapping['new']); $retired = array_values($mapping['old']);
+    if (!$logical || count($inventory) > 1000 || count($inventory) !== count(array_unique($inventory))
+        || array_intersect($retired, $inventory) || array_intersect($logical, array_merge($retired, array_values($mapping['new']), ['_wpr_staging_owner'])))
+        throw new \RuntimeException('Replacement names collide or exceed quota.');
+    sort($inventory, SORT_STRING);
+    return [$meta, $old, $mapping, $inventory];
+}
+function wp_restore_replacement_profile(PDO $pdo, array $inventory): string {
+    $profile = wp_restore_assurance_read($pdo, 'SELECT VERSION(),@@version_comment,@@innodb_table_locks,DATABASE(),@@lower_case_table_names')[0];
+    if ($profile[0] !== '8.4.13' || $profile[1] !== 'MySQL Community Server - GPL' || $profile[2] !== '1' || $profile[4] !== '0'
+        || wp_restore_backup_inventory($pdo) !== $inventory
+        || wp_restore_assurance_read($pdo, 'SELECT COUNT(*) FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA=DATABASE() AND PARTITION_NAME IS NOT NULL') !== [['0']])
+        throw new \RuntimeException('Unsupported replacement profile, inventory or partitions.');
+    return $profile[3];
+}
+function wp_restore_replacement_prepare(array &$run): void {
+    $allowed = ['csrf','run_id','stage','operation','revision','replacement_confirmed','scope_confirmed','artifact_sha256','plan_sha256'];
+    if (isset($run['replacement']) || array_diff(array_keys($_POST), $allowed)
+        || ($_POST['replacement_confirmed'] ?? null) !== '1' || ($_POST['scope_confirmed'] ?? null) !== 'exact_original_old_set'
+        || !is_string($_POST['artifact_sha256'] ?? null) || !is_string($_POST['plan_sha256'] ?? null)
+        || !hash_equals($run['backup']['sha256'] ?? '', $_POST['artifact_sha256'])
+        || !hash_equals($run['values']['plan_sha256'] ?? '', $_POST['plan_sha256']))
+        throw new \RuntimeException('Explicit exact-set artifact/plan-bound preparation required.');
+    [, , $mapping, $inventory] = wp_restore_replacement_context($run);
+    wp_restore_replacement_profile(wp_restore_backup_pdo(), $inventory); // Read-only, NOT a fresh locked comparison.
+    $run['replacement'] = ['status'=>'prepared', 'scope'=>'exact_original_old_set', 'mapping'=>$mapping,
+        'mapping_sha256'=>hash('sha256', json_encode($mapping, JSON_THROW_ON_ERROR)),
+        'old_tables'=>count($mapping['old']), 'new_tables'=>count($mapping['new']),
+        'artifact_sha256'=>$run['backup']['sha256'], 'plan_sha256'=>$run['values']['plan_sha256']];
+}
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
     return '`' . $name . '`';
@@ -2988,15 +3060,22 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step'][$operation];
+    // A durable mutation intent, retirement or unknown phase is terminal. Never
+    // let an older adapter reset/replay it; authenticated state/download remain separate.
+    if (isset($run['replacement']) && ($run['replacement']['status'] ?? null) !== 'prepared') {
+        if (($run['replacement']['status'] ?? null) === 'complete') site_report_api_reply(409, ['error'=>'Table replacement already completed. No database step was executed.','code'=>'replacement_complete']);
+        site_report_api_reply(409, ['error'=>'Table replacement is terminal or uncertain. Do not replay SQL; retain the verified backup and recover manually.','code'=>'replacement_recovery_required']);
+    }
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($operation === 'replacement_prepare') site_report_api_reply(400, ['error'=>'Replacement preparation failed. No table replacement was performed.','code'=>'replacement_prepare_failed']);
         if ($operation === 'assurance') site_report_api_reply(400, ['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed']);
         if ($operation === 'staging') site_report_api_reply(400, ['error'=>'Staging refused or interrupted. Existing tables were not replaced. Inspect state; pending SQL requires recovery.','code'=>'staging_failed']);
         if ($operation === 'backup_confirm') site_report_api_reply(400, ['error'=>'Prior recovery confirmation failed. No table replacement was performed.','code'=>'prior_confirmation_failed']);

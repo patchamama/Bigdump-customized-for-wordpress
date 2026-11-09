@@ -13,7 +13,7 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True)
-parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only'], help='staging-only checks compatibility without requesting assurance; other cases cover the dependent assurance contract')
+parser.add_argument('--scenario', required=True, choices=['red', 'valid', 'row', 'schema', 'default', 'index', 'ai', 'plan', 'backup', 'authority', 'inventory', 'concurrent', 'unsupported', 'staging-only', 'replacement-authority', 'replacement-partition', 'replacement-terminal'], help='staging-only checks compatibility without requesting assurance; replacement-* checks non-destructive replacement preparation/terminal contracts; other cases cover the dependent assurance contract')
 parser.add_argument('--check-reader', action='store_true', help='Supplement staging-only with actual fixed runtime reader controls')
 args = parser.parse_args()
 if args.check_reader and args.scenario != 'staging-only':
@@ -128,7 +128,7 @@ try:
     container_owned('client')
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as archive:
-        for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/values.php', 'tests/fixtures/wordpress-restore/mysql84-assurance.php', 'tests/wordpress-restore-warning-reader.php']:
+        for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/values.php', 'tests/fixtures/wordpress-restore/mysql84-assurance.php', 'tests/wordpress-restore-warning-reader.php', 'tests/fixtures/wordpress-restore/replacement-authority.php']:
             archive.add(root / name, arcname=name, recursive=False)
     call('copy-inputs', ['exec', '-i', client, '/bin/sh', '-c', 'umask 077; mkdir /tmp/contract && tar -xf - -C /tmp/contract'], package.getvalue())
     driver = ['exec', client, 'php', '/tmp/contract/tests/fixtures/wordpress-restore/mysql84-assurance.php']

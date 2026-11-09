@@ -442,6 +442,51 @@ propiedad persiste entre peticiones; colisiones y estados inciertos se rechazan 
 robar propiedad ni repetir SQL. «Listo» sólo significa staging, nunca reemplazo,
 publicación de archivos ni WordPress funcionando. Conservá respaldo y originales.
 
+## Replacement preparation — private intent, not cutover
+
+After verified whole-OLD backup, completed staging and historical assurance, use
+`POST ?action=wp_restore_step` with current `csrf`, `run_id`, `stage`, `revision`,
+`operation=replacement_prepare`, `replacement_confirmed=1`,
+`scope_confirmed=exact_original_old_set` and exact `artifact_sha256`/`plan_sha256`.
+No extra fields or client SQL/table/mapping/executor targets are accepted.
+
+This authenticates the complete private plan again and derives a private mapping
+for **every captured original OLD table**, including unrelated prefixes and legitimate
+`_wpr_*` business tables, plus every exact derived NEW-to-logical target. It refuses
+identifier/control collisions, changed inventory, partitions and profiles outside
+MySQL Community 8.4.13/InnoDB with `innodb_table_locks=1` and `lower_case_table_names=0`.
+These are read-only checks, **not** a new locked content comparison or lock lease.
+
+`preflight.replacement` exposes only status, exact-set scope, mapping digest, counts,
+`requires_locked_recheck=true` and `recovery_needed`; no mapping targets, rows or
+private paths. `prepared` still leaves `replacement_enabled=false` and
+`runtime_verified=false`. Preparation cannot be repeated/reset. No RENAME, permanent
+DROP, public placement or automatic recovery adapter is enabled by this unit.
+
+| Safe response | Meaning |
+|---|---|
+| 400 / `replacement_prepare_failed`: `Replacement preparation failed. No table replacement was performed.` | Admission, authenticated inputs, mapping or read-only compatibility check failed. |
+| 409 / `replacement_recovery_required`: `Table replacement is terminal or uncertain. Do not replay SQL; retain the verified backup and recover manually.` | A pending rename/drop, retirement, recovery-needed or unknown checkpoint refuses **all** database progression, including older adapters. Never replay, reset or clean up after reconnect. |
+| 409 / `replacement_complete`: `Table replacement already completed. No database step was executed.` | A future completed checkpoint refuses duplicate database steps. |
+
+Authenticated state and backup download remain separate from database progression;
+the existing expiry restriction still applies here (expiry-independent recovery is
+not implemented yet). The terminal fixture seeds authenticated future checkpoints
+to test this contract: it is **not** a crash, power-loss or durable-object-identity test.
+Final replacement still requires fresh plan-derived comparison, rename and deletion
+inside its **own uninterrupted known-participant exclusion window**. These locks do
+not exclude arbitrary external namespace CREATE/RENAME. Unknown objects are never
+adopted/deleted; renaming OLD is neither backup nor successful final removal.
+
+**Español:** `replacement_prepare` exige confirmación explícita del conjunto original
+exacto y las huellas del respaldo/plan. Sólo prepara el mapeo privado; no reemplaza
+ni certifica WordPress. Rechaza particiones y colisiones. Un estado pendiente,
+retirado o incierto bloquea todos los pasos de base: recuperación manual, nunca
+repetición automática. El conjunto capturado incluye tablas de otros prefijos;
+no se garantiza exclusión de todo el namespace. Se conserva la restricción actual
+de vencimiento para consultar/descargar; la recuperación independiente del vencimiento
+sigue pendiente. El reemplazo y la publicación de archivos todavía no están habilitados.
+
 ## Selected shared-host fallback
 
 A directory on the same hosting account is not an execution sandbox. The selected

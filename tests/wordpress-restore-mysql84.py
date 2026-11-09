@@ -11,7 +11,9 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--endpoint', required=True)
+parser.add_argument('--case', choices=['rename','drop'], default='rename', help='rename: original viability probe; drop: exact known-participant retired-table DROP/exclusion premise, not application cutover')
 args = parser.parse_args()
+fixture_name = 'mysql84-drop-premise.php' if args.case == 'drop' else 'mysql84-premise.php'
 root = pathlib.Path(__file__).resolve().parents[1]
 area = root / '.atl/wordpress-restore-mysql84-proof'
 binding = json.loads((area / 'image-binding.json').read_text())
@@ -25,7 +27,7 @@ proof = area / ('native-' + owner)
 proof.mkdir(mode=0o700)
 docker = ['docker', '--host', args.endpoint]
 record = {'owner': owner, 'containers': {}, 'volume': None, 'cleaned': False,
-          'runtime_sha256': hashlib.sha256((root / 'cms_tools.php').read_bytes()).hexdigest(), 'commands': []}
+          'runtime_sha256': hashlib.sha256((root / 'cms_tools.php').read_bytes()).hexdigest(), 'case': args.case, 'commands': []}
 volume = 'cms-mysql84-socket-' + owner
 socket_dir = '/var/run/mysqld'
 deadline = time.monotonic() + 22
@@ -126,7 +128,7 @@ try:
         time.sleep(0.15)
     container_owned('client')
     result = call('premise', ['exec', '-i', client, 'php'],
-                  (root / 'tests/fixtures/wordpress-restore/mysql84-premise.php').read_bytes(), check=False)
+                  (root / 'tests/fixtures/wordpress-restore' / fixture_name).read_bytes(), check=False)
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
     exit_code = result.returncode or (1 if result.stderr else 0)

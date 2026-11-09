@@ -352,7 +352,9 @@ new updater nor report/API features provide a production promotion operation.
   operation compares live tables against authenticated private expectations on the
   demonstrated MySQL 8.4.13 profile. Its historical as-of result grants no future
   replacement authority; final cutover must compare again under uninterrupted locks.
-  Database replacement
+  A separately confirmed operation prepares the exact original-OLD-set replacement
+  mapping privately, rejecting unsupported partitions; it performs no replacement.
+  Pending/uncertain replacement checkpoints block database replay. Database replacement
   and public placement are not enabled yet; see
   [scope and safeguards](docs/wordpress-restore.md).
 - **WordPress installer** — download and install the latest WordPress into the current

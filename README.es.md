@@ -187,8 +187,10 @@ reemplazo final ni certificación. Otra operación confirmada compara el conteni
 vivo con expectativas privadas autenticadas en el perfil MySQL 8.4.13 demostrado.
 Su resultado histórico no otorga autoridad futura: el reemplazo debe comparar de
 nuevo dentro de su propia ventana de bloqueo ininterrumpida.
-Todavía no habilita reemplazar tablas ni publicar
-archivos restaurados.
+Otra confirmación prepara en privado el mapeo del conjunto original exacto de tablas,
+rechaza particiones y bloquea la repetición de pasos ante un reemplazo incierto.
+Esa preparación no ejecuta reemplazos: todavía no habilita reemplazar tablas ni
+publicar archivos restaurados.
 Consultá los [límites y controles del flujo](docs/wordpress-restore.md).
 | Extras | Caché, mantenimiento, debug, reglas WordPress, reparación/optimización de tablas y protección HTTP Basic. |
 | Instaladores | WordPress y phpMyAdmin. El instalador histórico no es un actualizador completo de una instalación existente. |
