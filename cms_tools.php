@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.20.0');
+define('TOOL_VERSION',  '3.21.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -892,6 +892,34 @@ function http_fetch_body($url, $headers = []) {
         if ($body !== false && $body !== '') return $body;
     }
     return null;
+}
+// Rewrites references to recovered assets from the original (external) site to this site, inside one stored
+// value. Only /wp-content/ files that now exist locally ($set) are touched, plain and JSON-escaped URLs alike,
+// and serialized strings get their s:LENGTH recomputed. $n counts the rewritten references.
+function cms_assets_localize_text(string $text, array $origins, string $local, array $set, int &$n): string {
+    $ext = 'jpe?g|png|gif|webp|svg|avif|ico|bmp|tiff?|mp4|webm|ogg|mp3|wav|pdf|docx?|xlsx?|pptx?|zip|css|js|woff2?|ttf|eot|otf';
+    $rewrite = function (string $chunk) use ($origins, $local, $set, $ext, &$n): string {
+        foreach ([false, true] as $escaped) {
+            $slash = $escaped ? '\\\\/' : '/';
+            $body  = $escaped ? '[^\s"\'<>()\[\]]*?' : '[^\s"\'<>()\[\]\\\\]*?';
+            foreach ($origins as $origin) {
+                $prefix = $escaped ? str_replace('/', '\\/', $origin) : $origin;
+                $rx = '~' . preg_quote($prefix, '~') . '((?:' . $slash . ')wp-content(?:' . $slash . ')' . $body . '\.(?:' . $ext . '))(?![A-Za-z0-9_%-]|\.[A-Za-z0-9])~i';
+                $chunk = preg_replace_callback($rx, function ($m) use ($set, $local, $escaped, &$n) {
+                    $path = $escaped ? str_replace('\\/', '/', $m[1]) : $m[1];
+                    if (!isset($set[$path])) return $m[0];
+                    $n++;
+                    return ($escaped ? str_replace('/', '\\/', $local) : $local) . $m[1];
+                }, $chunk);
+            }
+        }
+        return $chunk;
+    };
+    $text = preg_replace_callback('/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s', function ($m) use ($rewrite) {
+        $new = $rewrite($m[2]);
+        return $new === $m[2] ? $m[0] : 's:' . strlen($new) . ':"' . $new . '"';
+    }, $text);
+    return $rewrite($text);
 }
 function human_size($bytes) {
     if ($bytes >= 1073741824) return number_format($bytes/1073741824, 2) . ' GB';
@@ -5500,6 +5528,9 @@ if ($authenticated && isset($_GET['action'])) {
         $filename = 'db_export_' . date('Ymd_His') . '.sql';
         $filepath = $dl_dir . '/' . $filename;
         $zipname  = $filename . '.gz';
+        // The wp-config table prefix goes into the delivered name, so several installs in one database stay distinguishable.
+        $name_prefix = trim(preg_replace('/[^A-Za-z0-9_-]/', '', (string)$export_db['prefix']), '_-');
+        $name_prefix = $name_prefix === '' ? 'wp' : substr($name_prefix, 0, 40);
         $zippath  = $dl_dir . '/' . $zipname;
 
         $exported = false;
@@ -5575,24 +5606,31 @@ if ($authenticated && isset($_GET['action'])) {
             exit;
         }
 
-        // Replace URLs in the SQL (serialized-safe)
+        // Replace URLs in the SQL (serialized-safe). WordPress keeps two options, siteurl and home, and they
+        // can differ (core in a subfolder): both are rewritten, home to the target without siteurl's extra path.
         if ($source_url && $target_url && $source_url !== $target_url) {
             $content = file_get_contents($filepath);
-
-            // 1. Replace serialized strings first (update s:LENGTH correctly)
+            $map = [rtrim($source_url, '/') => rtrim($target_url, '/')];
+            $rc = try_db_connect($export_db); $rp = $rc['ok'] ? $rc['pdo'] : null;
+            if ($rp) {
+                $home = rtrim((string)$rp->query("SELECT option_value FROM `{$export_db['prefix']}options` WHERE option_name='home' LIMIT 1")->fetchColumn(), '/');
+                $site = rtrim($source_url, '/'); $target = rtrim($target_url, '/');
+                if ($home !== '' && $home !== $site && !isset($map[$home])) {
+                    $suffix = str_starts_with($site, $home . '/') ? substr($site, strlen($home)) : '';
+                    $map[$home] = ($suffix !== '' && str_ends_with($target, $suffix)) ? substr($target, 0, -strlen($suffix)) : $target;
+                }
+            }
+            // strtr is single-pass and prefers the longest key, so overlapping origins cannot cascade.
+            $swap = fn(string $text) => strtr($text, $map);
             $content = preg_replace_callback(
                 '/s:(\d+):"((?:[^"\\\\]|\\\\.)*)"/s',
-                function($m) use ($source_url, $target_url) {
-                    if (strpos($m[2], $source_url) === false) return $m[0];
-                    $new_str = str_replace($source_url, $target_url, $m[2]);
-                    return 's:' . strlen($new_str) . ':"' . $new_str . '"';
+                function($m) use ($swap) {
+                    $new_str = $swap($m[2]);
+                    return $new_str === $m[2] ? $m[0] : 's:' . strlen($new_str) . ':"' . $new_str . '"';
                 },
                 $content
             );
-
-            // 2. Replace the rest (plain values: siteurl, home, guid, etc.)
-            $content = str_replace($source_url, $target_url, $content);
-
+            $content = $swap($content);
             file_put_contents($filepath, $content);
         }
 
@@ -5602,7 +5640,7 @@ if ($authenticated && isset($_GET['action'])) {
         $max_part_mb = (int)($_POST['max_part_size'] ?? 0);
         if ($split && $max_part_mb >= 1 && $max_part_mb <= 10) {
             $dl_token = bin2hex(random_bytes(6));
-            $base     = 'db_' . date('Ymd_His') . '_' . $dl_token;
+            $base     = 'db_' . $name_prefix . '_' . date('Ymd_His') . '_' . $dl_token;
             $res = split_sql_to_zip_parts($filepath, $dl_dir, $base, $max_part_mb * 1024 * 1024);
             @unlink($filepath); // raw .sql no longer needed
             if (!$res['ok']) { echo json_encode(['ok' => false, 'error' => 'Split failed: ' . $res['error']]); exit; }
@@ -5641,7 +5679,7 @@ if ($authenticated && isset($_GET['action'])) {
 
         // Rename with a random token within the same folder
         $dl_token   = bin2hex(random_bytes(6));
-        $final_name = 'db_' . date('Ymd_His') . '_' . $dl_token . ($gz_ok ? '.sql.gz' : '.sql');
+        $final_name = 'db_' . $name_prefix . '_' . date('Ymd_His') . '_' . $dl_token . ($gz_ok ? '.sql.gz' : '.sql');
         $final_path = $dl_dir . '/' . $final_name;
         rename($gz_ok ? $zippath : $filepath, $final_path);
         if ($gz_ok && file_exists($filepath)) unlink($filepath);
@@ -7593,6 +7631,56 @@ if ($authenticated && isset($_GET['action'])) {
         }
         $origin = $cfg_data['origin_domain'] ?? '';
         echo json_encode(['ok' => true, 'total_refs' => count($paths), 'missing' => $missing, 'missing_count' => count($missing), 'origin' => $origin]);
+        exit;
+    }
+
+    // --- LOCALIZE RECOVERED ASSETS: point DB references at the local copy ---
+    // A downloaded asset is still referenced as https://original-site/wp-content/..., so visitors keep
+    // loading it from the external site. This rewrites those references (posts, postmeta, options) to
+    // this site's URL. An .htaccess cannot do it: requests to another domain never reach this server.
+    if ($action === 'asset_localize') {
+        @set_time_limit(0);
+        $root   = rtrim($abspath, '/');
+        $origin = rtrim(trim($_POST['origin'] ?? ($cfg_data['origin_domain'] ?? '')), '/');
+        $paths  = json_decode($_POST['paths'] ?? '', true);
+        if ($origin === '' || !preg_match('#^https?://[^\s]+$#i', $origin) || !is_array($paths) || !$paths) { echo json_encode(['ok' => false, 'error' => 'Origin and recovered paths are required']); exit; }
+        $set = [];
+        foreach (array_slice($paths, 0, 5000) as $path) {
+            if (is_string($path) && strpos($path, '/wp-content/') === 0 && strpos($path, '..') === false && !preg_match('/[\s"\'<>\\\\]/', $path) && is_file($root . $path)) $set[$path] = true;
+        }
+        $a_db = [
+            'host' => $_POST['db_host'] ?? $db['host'], 'name' => $_POST['db_name'] ?? $db['name'],
+            'user' => $_POST['db_user'] ?? $db['user'], 'pass' => $_POST['db_pass'] ?? $db['pass'],
+            'prefix' => $_POST['db_prefix'] ?? $db['prefix'], 'charset' => 'utf8mb4',
+        ];
+        $r = try_db_connect($a_db);
+        if (!$r['ok']) { echo json_encode(['ok' => false, 'error' => $r['error']]); exit; }
+        $pdo = $r['pdo']; $prefix = $a_db['prefix'];
+        if (!preg_match('/^[A-Za-z0-9_]{1,40}$/D', $prefix)) { echo json_encode(['ok' => false, 'error' => 'Invalid table prefix']); exit; }
+        $local = rtrim((string)$pdo->query("SELECT option_value FROM `{$prefix}options` WHERE option_name='siteurl' LIMIT 1")->fetchColumn(), '/');
+        if ($local === '' || !$set) { echo json_encode(['ok' => true, 'rows' => 0, 'refs' => 0, 'skipped' => 'nothing to localize']); exit; }
+        $origins = array_values(array_unique([$origin, preg_match('#^https://#i', $origin) ? 'http://' . substr($origin, 8) : 'https://' . substr($origin, 7)]));
+        $origins = array_values(array_diff($origins, [$local]));
+        $host = parse_url($origin, PHP_URL_HOST) ?: '';
+        $like = '%' . str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $host) . '%wp-content%';
+        $rows = 0; $refs = 0;
+        foreach ([[$prefix.'posts', 'post_content', 'ID'], [$prefix.'postmeta', 'meta_value', 'meta_id'], [$prefix.'options', 'option_value', 'option_id']] as [$tbl, $col, $id]) {
+            $last = 0;
+            while (true) {
+                $st = $pdo->prepare("SELECT `$id` AS pk, `$col` AS val FROM `$tbl` WHERE `$id` > ? AND `$col` LIKE ? ORDER BY `$id` LIMIT 200");
+                $st->execute([$last, $like]); $batch = $st->fetchAll(PDO::FETCH_ASSOC);
+                if (!$batch) break;
+                foreach ($batch as $row) {
+                    $last = (int)$row['pk']; $n = 0;
+                    $new = cms_assets_localize_text((string)$row['val'], $origins, $local, $set, $n);
+                    if ($n > 0 && $new !== $row['val']) {
+                        $pdo->prepare("UPDATE `$tbl` SET `$col` = ? WHERE `$id` = ?")->execute([$new, $row['pk']]);
+                        $rows++; $refs += $n;
+                    }
+                }
+            }
+        }
+        echo json_encode(['ok' => true, 'rows' => $rows, 'refs' => $refs, 'local' => $local]);
         exit;
     }
 
@@ -12277,6 +12365,7 @@ async function recoverAssets(){
     const prog = document.getElementById('ar_progress'); prog.style.display = 'block';
     const bar = document.getElementById('ar_bar'); const ptxt = document.getElementById('ar_progress_txt');
     let done = 0, ok = 0, fail = 0;
+    const RECOVERED = [];
     const BATCH = 5;
     for (let i = 0; i < AR_MISSING.length && !AR_ABORT; i += BATCH){
         const slice = AR_MISSING.slice(i, i + BATCH);
@@ -12286,6 +12375,7 @@ async function recoverAssets(){
             const j = await r.json();
             if (j.ok) j.results.forEach(res => {
                 res.ok ? ok++ : fail++;
+                if (res.ok) RECOVERED.push(res.path);
                 // Mark the matching row so the user sees exactly what was recovered.
                 const idx = AR_MISSING.indexOf(res.path);
                 const row = idx >= 0 && document.getElementById('ar_miss_' + idx);
@@ -12299,6 +12389,16 @@ async function recoverAssets(){
     }
     stop.style.display = 'none';
     log('ar_log', `✓ Done. Recovered ${ok}, not found ${fail}${AR_ABORT ? ' (stopped)' : ''}. Re-scan to confirm.`, false);
+    // Recovered files are local now: stop the database from still pointing at the external site for them.
+    if (RECOVERED.length){
+        let rows = 0, refs = 0;
+        for (let i = 0; i < RECOVERED.length; i += 500){
+            const fd = new FormData(); fd.append('origin', origin); fd.append('paths', JSON.stringify(RECOVERED.slice(i, i + 500)));
+            try { const j = await (await fetch('?action=asset_localize', {method:'POST', body:fd})).json(); if (j.ok){ rows += j.rows || 0; refs += j.refs || 0; } else { log('ar_log', '✗ ' + j.error, false); } }
+            catch(e){ log('ar_log', '✗ ' + e.message, false); }
+        }
+        log('ar_log', `✓ ${refs} reference(s) to the external site now point to the local copy (${rows} database row(s) updated).`, false);
+    }
 }
 
 // --- Automatic asset recovery (.htaccess fallback) ---

@@ -199,6 +199,48 @@ try {
     check($closed['ok'] === true && !file_exists($site . '/' . $open['folder']) && is_file($site . '/wp-load.php'), 'closing removes the preview folder and leaves the live site intact');
     [$status, $unknown] = api('installs_preview_open', ['prefix'=>'nope_']);
     check(($unknown['ok'] ?? true) === false, 'an unknown prefix cannot be previewed');
+    // Export name and URL rewrite: file name carries the table prefix; both siteurl AND home are rewritten.
+    $pdo->exec("UPDATE {$snap}options SET option_value='http://old.example/wp' WHERE option_name='siteurl'");
+    $pdo->exec("UPDATE {$snap}options SET option_value='http://old.example' WHERE option_name='home'");
+    [$status, $export] = api('export_db', ['source_url'=>'http://old.example/wp', 'target_url'=>'http://new.example/wp', 'db_prefix'=>$snap]);
+    check($status === 200 && ($export['ok'] ?? false) && preg_match('/^db_' . preg_quote(rtrim($snap, '_'), '/') . '_[0-9]{8}_[0-9]{6}_[0-9a-f]{12}\.sql\.gz$/', $export['filename']),
+        'exported database name carries the table prefix before the date');
+    [$status, $dumpGz] = http('GET', '/cms_tools.php?' . parse_url($export['url'], PHP_URL_QUERY), null, $cookie);
+    $dump = (string)gzdecode($dumpGz);
+    check(str_contains($dump, "'http://new.example/wp'") && str_contains($dump, "'home', 'http://new.example'") || preg_match("/'home',\s*'http:\/\/new\.example'/", $dump) === 1,
+        'export rewrote both siteurl and home (home without the siteurl subfolder)');
+    check(!str_contains($dump, 'old.example'), 'no reference to the old site remains in the exported dump');
+
+    // Recovered assets: copied locally AND their database references re-pointed to this site.
+    $origin = $base . '/origin'; mkdir($origin . '/wp-content/uploads/2026/11', 0700, true);
+    file_put_contents($origin . '/wp-content/uploads/2026/11/e2e-asset.png', base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='));
+    $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:18085', '-t', $origin], [['file', '/dev/null', 'r'], ['file', '/dev/null', 'w'], ['file', '/dev/null', 'w']], $pipes);
+    for ($i = 0, $up = false; $i < 150 && !$up; $i++) { if ($sock = @fsockopen('127.0.0.1', 18085)) { fclose($sock); $up = true; } else usleep(20000); }
+    check($up, 'a stand-in original site is serving the assets');
+    $ext = 'http://127.0.0.1:18085/wp-content/uploads/2026/11/e2e-asset.png';
+    $gone = 'http://127.0.0.1:18085/wp-content/uploads/2026/11/e2e-gone.png';
+    $serialized = serialize(['img'=>$ext, 'other'=>'keep']);
+    $pdo->exec("UPDATE wp_posts SET post_content=" . $pdo->quote('<img src="' . $ext . '?x=1"><img src="' . $gone . '"><img src="' . $ext . '.webp">') . " WHERE ID=(SELECT m FROM (SELECT MIN(ID) m FROM wp_posts WHERE post_type='post') t)");
+    $pdo->exec("INSERT INTO wp_postmeta (post_id,meta_key,meta_value) VALUES (1,'e2e_json'," . $pdo->quote(json_encode(['u'=>$ext])) . ")");
+    $pdo->exec("INSERT INTO wp_options (option_name,option_value) VALUES ('e2e_serialized'," . $pdo->quote($serialized) . ")");
+    [$status, $o] = api('set_origin_domain', ['origin'=>'http://127.0.0.1:18085']); check($o['ok'] ?? false, 'original site recorded for asset recovery');
+    [$status, $scan] = api('assets_scan', []);
+    check(($scan['ok'] ?? false) && in_array('/wp-content/uploads/2026/11/e2e-asset.png', $scan['missing'], true) && in_array('/wp-content/uploads/2026/11/e2e-gone.png', $scan['missing'], true),
+        'scan finds the assets referenced in the database that are missing locally');
+    [$status, $rec] = api('asset_recover', ['origin'=>'http://127.0.0.1:18085', 'paths'=>json_encode(['/wp-content/uploads/2026/11/e2e-asset.png', '/wp-content/uploads/2026/11/e2e-gone.png'])]);
+    $okPaths = array_values(array_map(fn($r) => $r['path'], array_filter($rec['results'], fn($r) => $r['ok'])));
+    check($okPaths === ['/wp-content/uploads/2026/11/e2e-asset.png'] && is_file($site . '/wp-content/uploads/2026/11/e2e-asset.png'), 'the asset was downloaded to the local wp-content; the one the origin lacks was not');
+    [$status, $loc] = api('asset_localize', ['origin'=>'http://127.0.0.1:18085', 'paths'=>json_encode($okPaths)]);
+    check(($loc['ok'] ?? false) && $loc['rows'] === 3 && $loc['refs'] === 3, 'references in content, JSON metadata and a serialized option were localized ' . json_encode($loc));
+    $content = $pdo->query("SELECT post_content FROM wp_posts WHERE post_content LIKE '%e2e-asset%' LIMIT 1")->fetchColumn();
+    check(str_contains($content, 'src="' . $root . '/wp-content/uploads/2026/11/e2e-asset.png?x=1"') && str_contains($content, $gone) && str_contains($content, $ext . '.webp'),
+        'only the recovered file moved to the local URL (query kept); the missing and look-alike references are untouched');
+    check(json_decode((string)$pdo->query("SELECT meta_value FROM wp_postmeta WHERE meta_key='e2e_json'")->fetchColumn(), true)['u'] === $root . '/wp-content/uploads/2026/11/e2e-asset.png', 'JSON-escaped reference localized');
+    $un = unserialize((string)$pdo->query("SELECT option_value FROM wp_options WHERE option_name='e2e_serialized'")->fetchColumn());
+    check(is_array($un) && $un['img'] === $root . '/wp-content/uploads/2026/11/e2e-asset.png' && $un['other'] === 'keep', 'serialized reference localized with a valid recomputed length');
+    [$status, $png] = http('GET', '/wp-content/uploads/2026/11/e2e-asset.png');
+    check($status === 200 && strlen($png) > 20, 'the local site now serves the recovered asset itself');
+    proc_terminate($server);
     exit(0);
 } catch (Throwable $e) {
     fwrite(STDERR, 'E2E stopped: ' . get_class($e) . ' ' . $e->getMessage() . "\n");

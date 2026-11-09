@@ -709,3 +709,16 @@ installation's tables. *Create snapshot* copies every table of the current insta
 `<prefix>_<YYYYMMDD>_` (`_<HHMM>_` appended if it exists), never overwriting, and rewrites
 the prefix-bound `user_roles` option and usermeta keys. Files and assets are not copied.
 Proof: `e2e-wordpress` scenario and `node tests/wordpress-installs-ui.cjs <page.html>`.
+
+## Export names, home URL and recovered assets
+
+- **Export name:** `db_<table prefix>_<YYYYMMDD_HHMMSS>_<token>.sql.gz` (split parts use the same base).
+- **URL rewrite on export:** `siteurl` is replaced by the target URL; if `home` differs (WordPress core in
+  a subfolder) it is replaced too, using the target without siteurl's extra path. One single-pass
+  replacement handles plain and serialized values, so overlapping origins cannot cascade.
+- **Recovered assets:** `asset_recover` downloads missing `/wp-content/` files from the original site.
+  `asset_localize` then rewrites database references to those exact files, from the external URL to this
+  site's `siteurl`, in `posts.post_content`, `postmeta.meta_value` and `options.option_value`, covering
+  plain, JSON-escaped (`http:\/\/`) and serialized text. An `.htaccess` rule cannot replace this: a
+  request addressed to another domain never reaches this server. The existing .htaccess *automatic
+  recovery* covers the other case, a local path that is requested but missing.
