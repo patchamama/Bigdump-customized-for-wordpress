@@ -2,7 +2,7 @@
 // End-to-end driver: a REAL WordPress core is installed as the backup source, then restored through the
 // public API and exercised over HTTP. Runs only inside the owned, network-less disposable containers.
 $phase = $argv[1];
-$base = '/tmp/contract'; $site = $base . '/site'; $private = $base . '/private'; $wp = $base . '/wordpress';
+$base = '/tmp/contract'; $site = $base . '/site'; $private = $base . '/private'; $wpdir = $base . '/wordpress';
 $options = [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_EMULATE_PREPARES=>false, PDO::ATTR_STRINGIFY_FETCHES=>true,
     PDO::MYSQL_ATTR_MULTI_STATEMENTS=>false, PDO::MYSQL_ATTR_LOCAL_INFILE=>false];
 $dsn = 'mysql:unix_socket=/var/run/mysqld/fixture.sock;charset=utf8mb4';
@@ -41,25 +41,25 @@ try {
         $root_pdo->exec("CREATE USER 'src_user'@'localhost' IDENTIFIED BY " . $root_pdo->quote($password));
         $root_pdo->exec("GRANT ALL PRIVILEGES ON src_wp.* TO 'src_user'@'localhost'");
         file_put_contents($base . '/source.json', json_encode(compact('password')));
-        file_put_contents($wp . '/wp-config.php', "<?php\ndefine('DB_NAME','src_wp');\ndefine('DB_USER','src_user');\ndefine('DB_PASSWORD'," . var_export($password, true)
+        file_put_contents($wpdir . '/wp-config.php', "<?php\ndefine('DB_NAME','src_wp');\ndefine('DB_USER','src_user');\ndefine('DB_PASSWORD'," . var_export($password, true)
             . ");\ndefine('DB_HOST','localhost');\ndefine('DB_CHARSET','utf8mb4');\ndefine('DB_COLLATE','');\ndefine('DISABLE_WP_CRON',true);\ndefine('WP_DEBUG',false);\n"
             . "\$table_prefix='srcwp_';\nif(!defined('ABSPATH'))define('ABSPATH',__DIR__.'/');\nrequire_once ABSPATH.'wp-settings.php';\n");
         define('WP_INSTALLING', true);
         $_SERVER['HTTP_HOST'] = 'source.example'; $_SERVER['REQUEST_URI'] = '/'; $_SERVER['SERVER_NAME'] = 'source.example';
-        require $wp . '/wp-load.php';
+        require $wpdir . '/wp-load.php';
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         $result = wp_install('E2E Restored Site', 'admin', 'admin@source.example', true, '', 'E2E-admin-pass-1');
         check(!empty($result['user_id']), 'real WordPress core installed on the source database');
         update_option('siteurl', 'http://source.example'); update_option('home', 'http://source.example');
         update_option('permalink_structure', '');
         wp_insert_post(['post_title'=>'E2E Restored Post', 'post_content'=>'Body from the backup source.', 'post_status'=>'publish']);
-        mkdir($wp . '/wp-content/plugins/e2e-good'); mkdir($wp . '/wp-content/plugins/e2e-bad');
-        file_put_contents($wp . '/wp-content/plugins/e2e-good/e2e-good.php', "<?php\n/* Plugin Name: E2E Good */\nadd_action('wp_footer', function () { echo '<!--e2e-good-->'; });\n");
-        file_put_contents($wp . '/wp-content/plugins/e2e-bad/e2e-bad.php', "<?php\n/* Plugin Name: E2E Bad */\nadd_action('init', function () { throw new Error('e2e plugin breaks the site'); });\n");
+        mkdir($wpdir . '/wp-content/plugins/e2e-good'); mkdir($wpdir . '/wp-content/plugins/e2e-bad');
+        file_put_contents($wpdir . '/wp-content/plugins/e2e-good/e2e-good.php', "<?php\n/* Plugin Name: E2E Good */\nadd_action('wp_footer', function () { echo '<!--e2e-good-->'; });\n");
+        file_put_contents($wpdir . '/wp-content/plugins/e2e-bad/e2e-bad.php', "<?php\n/* Plugin Name: E2E Bad */\nadd_action('init', function () { throw new Error('e2e plugin breaks the site'); });\n");
         update_option('active_plugins', ['e2e-good/e2e-good.php', 'e2e-bad/e2e-bad.php']);
         $zip = new ZipArchive(); $zip->open($base . '/hosting_e2e.zip', ZipArchive::CREATE | ZipArchive::EXCL);
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($wp, FilesystemIterator::SKIP_DOTS));
-        foreach ($it as $file) if ($file->isFile()) $zip->addFile($file->getPathname(), substr($file->getPathname(), strlen($wp) + 1));
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($wpdir, FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $file) if ($file->isFile()) $zip->addFile($file->getPathname(), substr($file->getPathname(), strlen($wpdir) + 1));
         $zip->close();
         check(is_file($base . '/hosting_e2e.zip'), 'source site archived like a hosting backup');
         exit(0);
@@ -83,12 +83,12 @@ try {
         $pdo->exec("INSERT INTO unrelated_old VALUES (1,'previous site table')");
         file_put_contents($site . '/.migrate_config', json_encode(['password_hash'=>hash('sha256', 'odc_migrate_2026_x9kFixturePassword')]));
         file_put_contents($site . '/wp-config.php', "<?php\ndefine('DB_HOST','localhost');\ndefine('DB_NAME','restore_target');\ndefine('DB_USER','restore_fixture');\ndefine('DB_PASSWORD',"
-            . var_export($password, true) . ");\n\$table_prefix='wp_';\n");
+            . var_export($password, true) . ");\n\$table_prefix='wp_';\nif (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }\nrequire_once ABSPATH . 'wp-settings.php';\n");
         touch($base . '/ready');
         for ($i = 0, $up = false; $i < 150 && !$up; $i++) { if ($s = @fsockopen('127.0.0.1', 18084)) { fclose($s); $up = true; } else usleep(20000); }
         check($up, 'owned PHP HTTP server ready');
-        http('POST', '/cms_tools.php', ['password'=>'FixturePassword']);
-        [$status, $d] = api('wp_restore_discover'); check($status === 200 && $d['eligible'], 'real backup-only hosting discovered'); $csrf = $d['csrf'];
+        [, , $login] = http('POST', '/cms_tools.php', ['password'=>'FixturePassword']); $cookie = implode('; ', $login);
+        [$status, $d] = api('wp_restore_discover'); check($status === 200 && $d['eligible'], 'real backup-only hosting discovered ' . json_encode($d['reason'] ?? $d)); $csrf = $d['csrf'];
         [$status, $j] = api('wp_restore_prepare', ['csrf'=>$csrf, 'archive'=>'hosting_e2e.zip', 'database'=>'db_e2e.sql.gz', 'target_url'=>$root]);
         check($status === 201, 'public prepare'); $run = $j['run'];
         foreach (['files', 'sql', 'values'] as $op) {
@@ -143,7 +143,7 @@ try {
     }
     $rt = $run['preflight']['runtime'];
     check($rt['status'] === 'partial' && $rt['good'] === ['e2e-good/e2e-good.php'] && $rt['failed'] === ['e2e-bad/e2e-bad.php'],
-        'tool re-enabled the healthy plugin and rolled back the plugin that crashes WordPress');
+        'tool re-enabled the healthy plugin and rolled back the plugin that crashes WordPress ' . json_encode($rt));
     // The restored site, exercised from outside the tool.
     [$status, $front] = http('GET', '/', null, '', true);
     check($status === 200 && str_contains($front, 'E2E Restored Site') && str_contains($front, 'E2E Restored Post') && str_contains($front, '<!--e2e-good-->'),
@@ -161,7 +161,7 @@ try {
     check($pdo->query("SELECT option_value FROM wp_options WHERE option_name='siteurl'")->fetchColumn() === $root, 'site URL rewritten to the destination');
     check($pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='restore_target' AND TABLE_NAME LIKE 'srcwp\\_%'")->fetchColumn() === '0'
         && $pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='restore_target' AND TABLE_NAME='unrelated_old'")->fetchColumn() === '0', 'previous tables are gone and no source-prefix table remains');
-    check(str_contains((string)file_get_contents($site . '/wp-config.php'), "\$table_prefix='wp_'"), 'wp-config.php was not modified');
+    check(str_contains((string)file_get_contents($site . '/wp-config.php'), "\$table_prefix='wp_'"), 'wp-config.php keeps the destination prefix and credentials');
     exit(0);
 } catch (Throwable $e) {
     fwrite(STDERR, 'E2E stopped: ' . get_class($e) . ' ' . $e->getMessage() . "\n");

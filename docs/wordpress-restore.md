@@ -680,3 +680,16 @@ backup's WordPress table prefix equals the prefix declared in `wp-config.php`
 (`match`) or differs (`remap`). On `remap`, tables and prefix-bound keys (the roles
 option and usermeta capability/level keys) are renamed to the wp-config prefix.
 `wp-config.php` itself is never modified.
+
+## Runtime verification
+
+After promotion, `operation=verify_runtime` (with `verify_confirmed=1`) checks the
+destination URL's home page and `wp-login.php` over HTTP (status 200, HTML, no fatal
+error text, login form present). It then re-enables the plugins that were active in the
+backup one per request and keeps each only if both pages stay healthy; a plugin that
+breaks the site is rolled back and reported. Result: `verified`, `partial` (lists the
+plugins left disabled or missing) or `failed` (baseline not healthy; plugins stay
+disabled). `runtime_verified` is true only for `verified`. These are bounded smoke
+checks, not a compatibility test. The end-to-end proof installs an official WordPress
+core in the isolated containers: `python3 tests/wordpress-restore-assurance.py
+--endpoint <local docker socket> --scenario e2e-wordpress --wordpress <wordpress.tar.gz>`.

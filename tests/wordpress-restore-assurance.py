@@ -132,7 +132,7 @@ try:
     container_owned('client')
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as archive:
-        for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/values.php', 'tests/fixtures/wordpress-restore/mysql84-assurance.php', 'tests/wordpress-restore-warning-reader.php', 'tests/fixtures/wordpress-restore/replacement-authority.php']:
+        for name in ['cms_tools.php', 'tests/fixtures/wordpress-restore/values.php', 'tests/fixtures/wordpress-restore/mysql84-assurance.php', 'tests/wordpress-restore-warning-reader.php', 'tests/fixtures/wordpress-restore/replacement-authority.php'] + (['tests/fixtures/wordpress-restore/e2e.php'] if e2e else []):
             archive.add(root / name, arcname=name, recursive=False)
     call('copy-inputs', ['exec', '-i', client, '/bin/sh', '-c', 'umask 077; mkdir /tmp/contract && tar -xf - -C /tmp/contract'], package.getvalue())
     if e2e:

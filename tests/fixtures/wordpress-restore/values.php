@@ -50,6 +50,7 @@ function valuesFixture(string $case,string $target,string $marker):array {
     $add('options',[1,'siteurl',$source],[1,'siteurl',$target]);$add('options',[2,'home',$source],[2,'home',$target]);
     if($case!=='missing-plugins')$add('options',[3,'active_plugins',serialize(['example/plugin.php'])],[3,'active_plugins','a:0:{}']);
     if($case==='duplicate-plugins')$add('options',[33,'active_plugins',serialize(['second/plugin.php'])]);
+    $add('options',[91,'time_format','g:i a']); // real WordPress default: letter+colon text is not serialized data
     $add('options',[4,'old_user_roles',serialize(['administrator'=>['capabilities'=>['manage_options'=>true]]])],[4,'wp_user_roles',serialize(['administrator'=>['capabilities'=>['manage_options'=>true]]])]);
     $add('options',[5,'_transient_widget','stale'],false);$add('options',[6,'_site_transient_timeout_update_plugins','stale'],false);
     $add('options',[7,'business_secret','keep user@old.example https://other.example/root '.$source.'-neighbor'],null);

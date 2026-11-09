@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.18.1');
+define('TOOL_VERSION',  '3.19.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -2026,7 +2026,9 @@ class WordPressRestoreValues {
     }
     public function text(string $text,int $depth=0):string{
         $this->bytes+=strlen($text);if($depth>32||strlen($text)>8388608||$this->bytes>33554432)throw new \RuntimeException('Value recursion or aggregate byte limit.');
-        if(!preg_match('/^(?:[A-Za-z]:|N;)/',$text))return $this->urls($text);
+        // Only text that starts like a serialized token is parsed fail-closed. Plain strings such as the default
+        // time format 'g:i a' or 'd:m:Y' merely contain a letter and a colon and are ordinary text.
+        if(!preg_match('/^(?:N;|[A-Za-z]:(?:[0-9+.\\-"]|INF|NAN))/',$text))return $this->urls($text);
         $outerReferences=$this->references;$this->references=[];$offset=0;
         try{
             $out=$this->token($text,$offset,$depth);
