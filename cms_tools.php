@@ -7700,12 +7700,17 @@ if ($authenticated && isset($_GET['action'])) {
         $cfg .= "\$cmspv = " . var_export($token, true) . ";\n";
         $cfg .= "if (!isset(\$_COOKIE['cmspv']) || !hash_equals(\$cmspv, (string)\$_COOKIE['cmspv'])) {\n"
               . "    if (!isset(\$_GET['cmspv']) || !hash_equals(\$cmspv, (string)\$_GET['cmspv'])) { http_response_code(403); exit('Preview token required.'); }\n"
-              . "    setcookie('cmspv', \$cmspv, ['path' => " . var_export($path, true) . ", 'httponly' => true, 'samesite' => 'Lax']); \$_COOKIE['cmspv'] = \$cmspv;\n}\n";
+              . "    setcookie('cmspv', \$cmspv, ['path' => " . var_export($path, true) . ", 'httponly' => true, 'samesite' => 'Lax', 'secure' => !empty(\$_SERVER['HTTPS']) && \$_SERVER['HTTPS'] !== 'off']); \$_COOKIE['cmspv'] = \$cmspv;\n}\n";
         foreach (['DB_NAME' => 'name', 'DB_USER' => 'user', 'DB_PASSWORD' => 'pass', 'DB_HOST' => 'host'] as $const => $key) $cfg .= "define('$const', " . var_export($c_db[$key], true) . ");\n";
         $cfg .= "define('DB_CHARSET', 'utf8mb4');\n\$table_prefix = " . var_export($prefix, true) . ";\n";
         $cfg .= "define('WP_HOME', " . var_export($url, true) . ");\ndefine('WP_SITEURL', " . var_export($url, true) . ");\n";
         $cfg .= "define('DISABLE_WP_CRON', true);\ndefine('AUTOMATIC_UPDATER_DISABLED', true);\ndefine('DISALLOW_FILE_MODS', true);\ndefine('WP_DEBUG', false);\n";
         return $cfg . "if (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');\nrequire_once ABSPATH . 'wp-settings.php';\n";
+    };
+    // Atomic replace: a concurrent request must never see an empty or partial gate.
+    $write_config = function (string $dir, string $cfg): void {
+        $tmp = $dir . '/wp-config.php.new';
+        if (file_put_contents($tmp, $cfg, LOCK_EX) !== strlen($cfg) || !chmod($tmp, 0600) || !rename($tmp, $dir . '/wp-config.php')) throw new RuntimeException('Could not write the preview configuration.');
     };
     $preview_dir = function (string $folder) use ($abspath): ?string {
         $dir = rtrim($abspath, '/') . '/' . $folder;
@@ -7729,6 +7734,8 @@ if ($authenticated && isset($_GET['action'])) {
             };
             $new = (string)($_POST['new_prefix'] ?? '');
             $snap_ok = preg_match('/^' . preg_quote(rtrim($live, '_'), '/') . '_[0-9]{8}(?:_[0-9]{4})?_$/D', $new) === 1;
+            foreach (glob(rtrim($abspath, '/') . '/wpr_preview_*', GLOB_ONLYDIR) ?: [] as $stale) // abandoned previews hold DB credentials
+                if (!is_link($stale) && preg_match('/wpr_preview_[0-9a-f]{16}$/D', $stale) && filemtime($stale) < time() - 7200) $preview_remove($stale);
             if ($action === 'installs_list') {
                 echo json_encode(['ok' => true, 'live' => $live, 'installs' => $installs]); exit;
             }
@@ -7752,15 +7759,21 @@ if ($authenticated && isset($_GET['action'])) {
                 if (strlen($target) > 64 || $pdo->query("SHOW TABLES LIKE " . $pdo->quote(str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $target)))->fetchColumn())
                     throw new RuntimeException('Snapshot table already exists or its name is too long.');
                 $pdo->exec("CREATE TABLE `$target` LIKE `$t`");
-                $pdo->exec("INSERT INTO `$target` SELECT * FROM `$t`");
+                try { $pdo->exec("INSERT INTO `$target` SELECT * FROM `$t`"); }
+                catch (Throwable $copyError) { $pdo->exec("DROP TABLE `$target`"); throw $copyError; } // we created it a moment ago
                 echo json_encode(['ok' => true, 'table' => $t, 'into' => $target, 'rows' => (int)$pdo->query("SELECT COUNT(*) FROM `$target`")->fetchColumn()]); exit;
             }
             if ($action === 'installs_snapshot_finish') {
                 // Prefix-bound data inside the copy must follow the new prefix, or roles/capabilities are lost.
-                $like = str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $live) . '%';
+                // Not idempotent by nature (new prefix starts with the live prefix): run once, on a fresh copy only.
+                $done = $pdo->prepare("SELECT COUNT(*) FROM `{$new}options` WHERE option_name = ?"); $done->execute([$new . 'user_roles']);
+                if ((int)$done->fetchColumn() !== 0) throw new RuntimeException('This snapshot was already finalized.');
+                $esc = fn(string $x) => str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $x);
+                $like = $esc($live) . '%';
+ str_replace(['\\', '_', '%'], ['\\\\', '\\_', '\\%'], $live) . '%';
                 $pdo->prepare("UPDATE `{$new}options` SET option_name = ? WHERE option_name = ?")->execute([$new . 'user_roles', $live . 'user_roles']);
-                $st = $pdo->prepare("UPDATE `{$new}usermeta` SET meta_key = CONCAT(?, SUBSTRING(meta_key, ?)) WHERE meta_key LIKE ?");
-                $st->execute([$new, strlen($live) + 1, $like]);
+                $st = $pdo->prepare("UPDATE `{$new}usermeta` SET meta_key = CONCAT(?, SUBSTRING(meta_key, ?)) WHERE meta_key LIKE ? AND meta_key NOT LIKE ?");
+                $st->execute([$new, strlen($live) + 1, $like, $esc($new) . '%']);
                 [$after] = $installs_scan($pdo, $live);
                 echo json_encode(['ok' => in_array($new, array_column($after, 'prefix'), true), 'new_prefix' => $new, 'usermeta_rewritten' => $st->rowCount()]); exit;
             }
@@ -7783,7 +7796,7 @@ if ($authenticated && isset($_GET['action'])) {
                 @mkdir($dir . '/wp-content', 0755); @mkdir($dir . '/wp-admin', 0755);
                 foreach (['plugins', 'themes', 'mu-plugins', 'uploads'] as $d) if (is_dir($root . '/wp-content/' . $d)) $links[] = 'wp-content/' . $d;
                 $copies = [];
-                foreach (glob($root . '/*.php') ?: [] as $f) if (!in_array(basename($f), ['wp-config.php', basename(__FILE__)], true)) $copies[] = basename($f);
+                foreach (glob($root . '/*.php') ?: [] as $f) if (preg_match('/^(?:index|wp-[a-z-]+)\.php$/D', basename($f)) && basename($f) !== 'wp-config.php') $copies[] = basename($f);
                 if (is_file($root . '/wp-admin/admin-ajax.php')) $copies[] = 'wp-admin/admin-ajax.php';
                 foreach ($links as $name) {
                     if (!@symlink($root . '/' . $name, $dir . '/' . $name)) { $preview_remove($dir); throw new RuntimeException('Symlinks are required for installation previews on this host.'); }
@@ -7792,7 +7805,7 @@ if ($authenticated && isset($_GET['action'])) {
                     if (!@copy($root . '/' . $name, $dir . '/' . $name)) { $preview_remove($dir); throw new RuntimeException('Could not copy WordPress entry scripts for the preview.'); }
                 }
                 $url = $base_url() . '/' . $folder;
-                file_put_contents($dir . '/wp-config.php', $preview_config($c_db, $prefix, $url, $token)); @chmod($dir . '/wp-config.php', 0600);
+                $write_config($dir, $preview_config($c_db, $prefix, $url, $token));
                 echo json_encode(['ok' => true, 'folder' => $folder, 'token' => $token, 'url' => $url . '/?cmspv=' . $token, 'prefix' => $prefix]); exit;
             }
             $dir = $preview_dir((string)($_POST['folder'] ?? ''));
@@ -7802,7 +7815,7 @@ if ($authenticated && isset($_GET['action'])) {
             if ($action === 'installs_preview_switch') {
                 if (!in_array($prefix, $known, true)) throw new RuntimeException('Unknown installation prefix.');
                 $url = $base_url() . '/' . basename($dir);
-                file_put_contents($dir . '/wp-config.php', $preview_config($c_db, $prefix, $url, $m[1]));
+                $write_config($dir, $preview_config($c_db, $prefix, $url, $m[1]));
                 echo json_encode(['ok' => true, 'url' => $url . '/?cmspv=' . $m[1], 'prefix' => $prefix]); exit;
             }
             $preview_remove($dir); // installs_preview_close

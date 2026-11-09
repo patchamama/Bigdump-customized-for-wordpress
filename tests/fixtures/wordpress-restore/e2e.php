@@ -172,6 +172,9 @@ try {
     foreach ($start['tables'] as $t) { [$status, $copy] = api('installs_snapshot_table', ['new_prefix'=>$snap, 'table'=>$t['name']]); if (!($copy['ok'] ?? false)) throw new RuntimeException('snapshot table failed: ' . json_encode($copy)); }
     [$status, $fin] = api('installs_snapshot_finish', ['new_prefix'=>$snap]);
     check($fin['ok'] === true && $fin['usermeta_rewritten'] >= 2, 'snapshot completed and prefix-bound keys were rewritten');
+    [$status, $again] = api('installs_snapshot_finish', ['new_prefix'=>$snap]);
+    check(($again['ok'] ?? true) === false && $pdo->query("SELECT COUNT(*) FROM {$snap}usermeta WHERE meta_key='{$snap}capabilities'")->fetchColumn() === '1',
+        'replaying the snapshot finalization is refused and cannot corrupt the copy');
     check($pdo->query("SELECT COUNT(*) FROM {$snap}usermeta WHERE meta_key='{$snap}capabilities'")->fetchColumn() === '1'
         && $pdo->query("SELECT COUNT(*) FROM {$snap}options WHERE option_name='{$snap}user_roles'")->fetchColumn() === '1'
         && $pdo->query("SELECT COUNT(*) FROM wp_options WHERE option_name='wp_user_roles'")->fetchColumn() === '1', 'snapshot owns its roles and capabilities; the live installation is untouched');
