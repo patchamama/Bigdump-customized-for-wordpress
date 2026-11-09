@@ -672,3 +672,11 @@ read-only comparison), (3) replace all current tables, (4) move the trial files 
 the site root. Between (3) and (4) files are only copied into the trial folder. The
 final message states that site functionality is not verified and lists next steps
 (image URLs, `.htaccess`, plugins). Test: `node tests/wordpress-restore-wizard-ui.cjs <page.html>`.
+
+## Table prefix
+
+The importer reports, as soon as the SQL is ready (`preflight.prefix`), whether the
+backup's WordPress table prefix equals the prefix declared in `wp-config.php`
+(`match`) or differs (`remap`). On `remap`, tables and prefix-bound keys (the roles
+option and usermeta capability/level keys) are renamed to the wp-config prefix.
+`wp-config.php` itself is never modified.

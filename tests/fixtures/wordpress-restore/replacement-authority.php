@@ -29,7 +29,7 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
             'completed replacement refuses replay without SQL or state change');
         [$status,$download]=request('wp_restore_backup_download',['csrf'=>$GLOBALS['csrf'],'run_id'=>$run['run_id']],false);
         check($status===200 && hash('sha256',$download)===$proof['artifact_sha256'],'completed replacement retains authenticated prior recovery download');
-        global $site;
+        global $site, $originals; check(($run['preflight']['prefix']['status']??null)==='remap' && $run['preflight']['prefix']['config']==='wp_' && $run['preflight']['prefix']['backup']==='old_','public preflight reports the backup prefix and its mapping to the wp-config prefix before any change');
         $trial=$site.'/wpr-trial-'.substr($run['run_id'],0,16); $place=['artifact_sha256'=>$proof['artifact_sha256']];
         [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root']);
         check($status===400 && $body['code']==='placement_failed' && !file_exists($site.'/wp-load.php'),'promotion before any trial is refused without writing');
@@ -48,6 +48,10 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
         check($run['preflight']['placement']['status']==='promoted' && is_file($site.'/wp-load.php') && is_file($site.'/wp-includes/version.php') && !file_exists($trial),
             'confirmed promotion moved verified files to the root and removed the trial folder');
         check(!$run['runtime_verified'],'placement still makes no runtime verification claim');
+        check($pdo->query("SELECT COUNT(*) FROM wp_options WHERE option_name='active_plugins' AND option_value<>'a:0:{}'")->fetchColumn()==='0','plugins deactivated in the restored options table');
+        check(hash_file('sha256',$site.'/wp-config.php')===$originals['wp-config.php'],'wp-config.php is never modified by placement');
+        [$status,$state]=request('wp_restore_state');
+        check($status===200 && $state['run']['preflight']['placement']['status']==='promoted','run remains loadable after the authorized configuration update');
         return;
     }
     if ($case==='replacement-partition') {

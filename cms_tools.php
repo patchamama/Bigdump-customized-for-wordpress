@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.18.0');
+define('TOOL_VERSION',  '3.18.1');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -228,6 +228,7 @@ $GLOBALS['__I18N'] = [
         'Database archive' => 'Archivo de la base de datos',
         'Confirm destination URL' => 'Confirmar URL del destino',
         'Prepare restoration' => 'Preparar restauración',
+        'The backup tables use prefix {backup} but wp-config.php declares {config}. Tables and prefix-bound keys (roles, capabilities) are renamed to {config}; wp-config.php is not changed.' => 'Las tablas del backup usan el prefijo {backup} pero wp-config.php declara {config}. Las tablas y las claves ligadas al prefijo (roles, capacidades) se renombran a {config}; wp-config.php no se modifica.',
         'Restoration progress' => 'Progreso de la restauración',
         'Continue restoration' => 'Continuar la restauración',
         'Working…' => 'Trabajando…',
@@ -1642,6 +1643,9 @@ function wp_restore_public(array $run) {
     }
     if (isset($run['assurance'])) $preflight['assurance'] = $run['assurance'];
     if (isset($run['replacement'])) $preflight['replacement'] = wp_restore_replacement_summary($run);
+    if ($run['sql']['ready'] ?? false) {
+        try { $preflight['prefix'] = wp_restore_prefix_plan($run); } catch (\Throwable $e) { $preflight['prefix'] = ['status'=>'unknown','config'=>null,'backup'=>null]; }
+    }
     if (isset($run['placement'])) $preflight['placement'] = array_intersect_key($run['placement'], array_flip(['status','index','total','held','plugins_disabled']));
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
@@ -2912,6 +2916,14 @@ function wp_restore_placement_trial(array &$run): void {
     }
     if ($p['index'] === $p['total']) $p['status'] = 'trial_ready';
     $run['placement'] = $p;
+}
+// The importer maps the backup's table prefix onto the prefix declared in wp-config.php.
+// This only reports that comparison; wp-config.php is never modified.
+function wp_restore_prefix_plan(array $run): array {
+    $meta = wp_restore_sql_metadata($run);
+    $from = $meta['source_prefix'] ?? null; $to = $meta['target_prefix'] ?? null;
+    if (!is_string($from) || !is_string($to)) return ['status'=>'unknown','config'=>null,'backup'=>null];
+    return ['status'=>$from === $to ? 'match' : 'remap', 'config'=>$to, 'backup'=>$from];
 }
 function wp_restore_placement_disable_plugins(array $run): bool {
     $tables = array_map(static fn($t)=>$t['schema']['table'], wp_restore_values_metadata($run)['tables']);
@@ -10399,6 +10411,7 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
         'done'=>t('Restoration finished, but site functionality is NOT verified. Plugins are disabled where possible and the backup .htaccess stays aside. Next: update image URLs, regenerate .htaccess and re-enable plugins one by one.'),
         'terminal'=>t('Stopped. Do not repeat database steps; keep the recovery copy and recover manually.'),
         'failed'=>t('Restore step failed. No automatic retry was made.'),
+        'prefix_remap'=>t('The backup tables use prefix {backup} but wp-config.php declares {config}. Tables and prefix-bound keys (roles, capabilities) are renamed to {config}; wp-config.php is not changed.'),
     ], JSON_UNESCAPED_UNICODE) ?>;
     let csrf = null, run = null, busy = false, ackedGate = null; // the confirmation the user's tick covers
     async function api(action, body) {
@@ -10443,7 +10456,10 @@ h1{font-size:22px;font-weight:700;color:var(--heading);margin-bottom:4px}
     }
     function render(step) {
         el('wp-restore-wizard').hidden = false;
-        el('wp-restore-progress').textContent = step.stop || step.note || '';
+        let note = step.stop || step.note || '';
+        const pf = run && run.preflight.prefix;
+        if (pf && pf.status === 'remap') note += ' ' + text.prefix_remap.replaceAll('{config}', pf.config).replaceAll('{backup}', pf.backup);
+        el('wp-restore-progress').textContent = note;
         el('wp-restore-download').hidden = !step.download;
         el('wp-restore-ack-row').hidden = !step.gate;
         if (step.gate) el('wp-restore-ack-text').textContent = text[step.gate];

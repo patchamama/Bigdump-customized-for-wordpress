@@ -16,7 +16,7 @@ let failTrialOnce = true;
 const advance = {
   files: () => { run.preflight.files.ready = true; },
   sql: () => { run.preflight.sql.ready = true; },
-  values: () => { run.preflight.values = {ready: true}; },
+  values: () => { run.preflight.values = {ready: true}; run.preflight.prefix = {status: 'remap', config: 'wp_', backup: 'old_'}; },
   backup: () => { run.preflight.backup = {ready: true, sha256: 'a'.repeat(64)}; },
   backup_confirm: () => { run.backup_verified = true; },
   staging: () => { run.preflight.staging = {status: 'ready'}; },
@@ -52,6 +52,7 @@ const context = {
   const click = async () => { await next.listeners.click(); await new Promise(setImmediate); };
   await click();
   assert.deepEqual(ops, ['files', 'sql', 'values', 'backup'], 'private preparation and recovery capture run automatically');
+  assert.match(elements['wp-restore-progress'].textContent, /backup tables use prefix old_ but wp-config\.php declares wp_/, 'prefix mismatch is announced before any change');
   assert.equal(elements['wp-restore-download'].hidden, false, 'recovery copy download is offered at the backup gate');
   await click();
   assert.equal(ops.length, 4, 'no confirmation step without the explicit tick');
