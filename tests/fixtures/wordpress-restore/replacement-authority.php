@@ -29,6 +29,25 @@ function replacementAuthorityFixture(string $case, PDO $pdo, array $proof, array
             'completed replacement refuses replay without SQL or state change');
         [$status,$download]=request('wp_restore_backup_download',['csrf'=>$GLOBALS['csrf'],'run_id'=>$run['run_id']],false);
         check($status===200 && hash('sha256',$download)===$proof['artifact_sha256'],'completed replacement retains authenticated prior recovery download');
+        global $site;
+        $trial=$site.'/wpr-trial-'.substr($run['run_id'],0,16); $place=['artifact_sha256'=>$proof['artifact_sha256']];
+        [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root']);
+        check($status===400 && $body['code']==='placement_failed' && !file_exists($site.'/wp-load.php'),'promotion before any trial is refused without writing');
+        for ($i=0;$i<20;$i++) {
+            [$status,$body]=step('placement_trial',$place); check($status===200,'trial placement batch accepted'); $run=$body['run'];
+            if ($run['preflight']['placement']['status']==='trial_ready') break;
+        }
+        check($run['preflight']['placement']['status']==='trial_ready' && $run['preflight']['placement']['held']===1,'trial ready with the held .htaccess counted');
+        check(is_file($trial.'/wp-load.php') && !file_exists($trial.'/.htaccess') && !file_exists($site.'/wp-load.php') && !file_exists($site.'/index.php'),'files exist only in the trial folder; nothing reached the app root');
+        [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1']);
+        check($status===400 && !file_exists($site.'/wp-load.php'),'promotion without the exact scope confirmation is refused');
+        for ($i=0;$i<20;$i++) {
+            [$status,$body]=step('placement_promote',$place+['promote_confirmed'=>'1','scope_confirmed'=>'trial_to_root']); check($status===200,'promotion batch accepted'); $run=$body['run'];
+            if ($run['preflight']['placement']['status']==='promoted') break;
+        }
+        check($run['preflight']['placement']['status']==='promoted' && is_file($site.'/wp-load.php') && is_file($site.'/wp-includes/version.php') && !file_exists($trial),
+            'confirmed promotion moved verified files to the root and removed the trial folder');
+        check(!$run['runtime_verified'],'placement still makes no runtime verification claim');
         return;
     }
     if ($case==='replacement-partition') {

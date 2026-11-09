@@ -642,3 +642,22 @@ mientras falte el finalizador real del mismo archivo. Un stub externo no habilit
 la operación. El requisito interno de retiro no constituye reemplazo completo ni
 prueba positiva de ejecución: retiro y borrado requieren verificación integrada
 dentro de una misma ventana de exclusión, sin repetir una fase incierta.
+
+## File placement: trial folder, then confirmed promotion
+
+After the table replacement is `complete`, two further operations place the files
+staged from the hosting archive (only `deploy` entries; `.htaccess`, hidden files,
+cache and `mu-plugins` stay held privately and are never placed).
+
+- `operation=placement_trial` (repeat until `preflight.placement.status` is
+  `trial_ready`): copies each staged file, re-hashing it, into
+  `wpr-trial-<run id prefix>/` beside the app. Nothing reaches the app root.
+- `operation=placement_promote` with `promote_confirmed=1`,
+  `scope_confirmed=trial_to_root` and the backup `artifact_sha256` (repeat until
+  `promoted`): refuses if any destination already exists (never overwrites),
+  verifies each trial file again, moves it into the root, removes the trial folder
+  and sets WordPress `active_plugins` to empty so plugins stay disabled.
+
+An interrupted promotion resumes safely: an already moved file must match its
+recorded hash. Placement makes no runtime claim: plugins, HTTP behaviour and image
+URLs are unverified; update image URLs and re-create `.htaccess` as next steps.

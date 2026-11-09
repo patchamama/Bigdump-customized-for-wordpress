@@ -149,6 +149,7 @@ try {
         file_put_contents($site . '/db_fixture.sql.gz',gzencode($sql));
         $zip = new ZipArchive(); $zip->open($site . '/hosting_fixture.zip',ZipArchive::CREATE|ZipArchive::EXCL);
         foreach (['index.php'=>'<?php die("must not execute");','wp-settings.php'=>'Inert core','wp-load.php'=>'Inert core','wp-includes/version.php'=>"<?php \$wp_version='6.8.3';"] as $path=>$bytes) $zip->addFromString($path,$bytes);
+        if ($case==='replacement-complete') $zip->addFromString('.htaccess','RewriteEngine Off');
         $zip->close();
         $originals = [];
         foreach (['cms_tools.php','wp-config.php','hosting_fixture.zip','db_fixture.sql.gz'] as $name) $originals[$name] = hash_file('sha256',$site . '/' . $name);
@@ -307,7 +308,8 @@ try {
             [$s,$state]=request('wp_restore_state'); check($state['run']===$previous && oracle($pdo)===$permanent && hash_file('sha256',ownedWork().'/state.json')===$checkpoint,'later mismatch preserves exact historical checkpoint and tampered data without repair');
         }
         foreach ($originals as $name=>$hash) check(hash_file('sha256',$site.'/'.$name)===$hash,'original bytes preserved '.$name);
-        check(!file_exists($site.'/index.php') && !file_exists($base.'/BACKUP_EXECUTED'),'no public placement or backup PHP execution');
+        check($case==='replacement-complete' ? (file_get_contents($site.'/index.php')==='<?php die("must not execute");' && !file_exists($site.'/.htaccess') && !file_exists($base.'/BACKUP_EXECUTED'))
+            : (!file_exists($site.'/index.php') && !file_exists($base.'/BACKUP_EXECUTED')),'only confirmed promotion placed files; held .htaccess stays aside; no backup PHP execution');
     }
 } catch (Throwable $error) {
     if (isset($lastHttp)) fwrite(STDERR,'FAILED_API '.json_encode($lastHttp,JSON_THROW_ON_ERROR)."\n");

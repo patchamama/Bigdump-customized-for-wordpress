@@ -1625,6 +1625,7 @@ function wp_restore_public(array $run) {
     }
     if (isset($run['assurance'])) $preflight['assurance'] = $run['assurance'];
     if (isset($run['replacement'])) $preflight['replacement'] = wp_restore_replacement_summary($run);
+    if (isset($run['placement'])) $preflight['placement'] = array_intersect_key($run['placement'], array_flip(['status','index','total','held','plugins_disabled']));
     return ['run_id'=>$run['run_id'],'stage'=>$run['stage'],'revision'=>$run['revision'],'created_at'=>$run['created_at'],'expires_at'=>$run['expires_at'],
         'archive'=>$run['archive']['name'],'database'=>$run['database']['name'],'target_url'=>$run['target_url'],
         'backup_verified'=>wp_restore_backup_verified($run),'runtime_verified'=>false,'replacement_enabled'=>false,'preflight'=>$preflight];
@@ -2842,6 +2843,102 @@ function wp_restore_replacement_finalize(PDO $pdo, array &$run, array $mapping, 
     wp_restore_replacement_journal($pdo, $run, 'drop', 'complete');
     wp_restore_replacement_intent($run, 'complete');
 }
+// Guarded file placement after completed table replacement: copy into a trial
+// folder first, then promote only on a second explicit confirmation. Never overwrites.
+function wp_restore_placement_trial_dir(array $run): string {
+    return $run['root'] . '/wpr-trial-' . substr($run['run_id'], 0, 16);
+}
+function wp_restore_placement_entries(array $run): array {
+    $entries = array_values(array_filter(wp_restore_files_manifest($run), static fn($e)=>($e['disposition'] ?? null) === 'deploy'));
+    foreach ($entries as $e) {
+        if (wp_restore_zip_path($e['path']) !== $e['path'] || !preg_match('/^[a-f0-9]{64}$/D', $e['sha256'] ?? ''))
+            throw new \RuntimeException('Unsafe placement manifest.');
+    }
+    return $entries;
+}
+function wp_restore_placement_guard(array $run, array $statuses): void {
+    $allowed = ['csrf','run_id','stage','operation','revision','promote_confirmed','scope_confirmed','artifact_sha256'];
+    if (($run['replacement']['status'] ?? null) !== 'complete' || !in_array($run['placement']['status'] ?? 'none', $statuses, true)
+        || array_diff(array_keys($_POST), $allowed) || !($run['files']['ready'] ?? false)) throw new \RuntimeException('Placement precondition failed.');
+}
+function wp_restore_placement_mkdirs(string $base, string $relative): void {
+    $dir = $base;
+    foreach (array_slice(explode('/', $relative), 0, -1) as $part) {
+        $dir .= '/' . $part;
+        $s = @lstat($dir);
+        if ($s === false) { if (!mkdir($dir, 0755)) throw new \RuntimeException('Cannot create placement directory.'); }
+        elseif (($s['mode'] & 0170000) !== 0040000) throw new \RuntimeException('Placement parent is not a real directory.');
+    }
+}
+function wp_restore_placement_trial(array &$run): void {
+    wp_restore_placement_guard($run, ['none','trial']);
+    $entries = wp_restore_placement_entries($run); $trial = wp_restore_placement_trial_dir($run);
+    $p = $run['placement'] ?? ['status'=>'trial','index'=>0,'total'=>count($entries),'held'=>count(wp_restore_files_manifest($run)) - count($entries)];
+    if (!isset($run['placement'])) {
+        if (file_exists($trial) || is_link($trial) || !mkdir($trial, 0755)) throw new \RuntimeException('Trial folder unavailable.');
+        $run['placement'] = $p; $run['revision']++; wp_restore_save($run);
+    }
+    $bytes = 0;
+    while ($p['index'] < $p['total'] && $bytes < 8388608) {
+        $entry = $entries[$p['index']]; $src = $run['work'] . '/files/' . hash('sha256', $entry['path']) . '.data';
+        $dst = $trial . '/' . $entry['path'];
+        if (!hash_equals($entry['sha256'], hash_file('sha256', $src))) throw new \RuntimeException('Private staged file changed.');
+        if (@lstat($dst) === false) {
+            wp_restore_placement_mkdirs($trial, $entry['path']);
+            if (!copy($src, $dst . '.part') || !rename($dst . '.part', $dst)) throw new \RuntimeException('Trial copy failed.');
+        }
+        if (!hash_equals($entry['sha256'], hash_file('sha256', $dst))) throw new \RuntimeException('Trial copy differs from staged bytes.');
+        $bytes += $entry['size']; $p['index']++;
+    }
+    if ($p['index'] === $p['total']) $p['status'] = 'trial_ready';
+    $run['placement'] = $p;
+}
+function wp_restore_placement_disable_plugins(array $run): bool {
+    $tables = array_map(static fn($t)=>$t['schema']['table'], wp_restore_values_metadata($run)['tables']);
+    $options = array_values(array_filter($tables, static fn($n)=>str_ends_with($n, 'options')
+        && in_array(substr($n, 0, -7) . 'posts', $tables, true) && in_array(substr($n, 0, -7) . 'users', $tables, true)));
+    if (count($options) !== 1) return false;
+    $stmt = wp_restore_backup_pdo()->prepare('UPDATE ' . wp_restore_backup_quote($options[0]) . " SET option_value='a:0:{}' WHERE option_name='active_plugins'");
+    $stmt->execute();
+    return true;
+}
+function wp_restore_placement_promote(array &$run): void {
+    wp_restore_placement_guard($run, ['trial_ready','promoting']);
+    if (($_POST['promote_confirmed'] ?? null) !== '1' || ($_POST['scope_confirmed'] ?? null) !== 'trial_to_root'
+        || !is_string($_POST['artifact_sha256'] ?? null) || !hash_equals($run['backup']['sha256'] ?? '', $_POST['artifact_sha256']))
+        throw new \RuntimeException('Explicit trial promotion confirmation required.');
+    $entries = wp_restore_placement_entries($run); $trial = wp_restore_placement_trial_dir($run); $p = $run['placement'];
+    if ($p['status'] === 'trial_ready') {
+        foreach ($entries as $e) {
+            $dst = $run['root'] . '/' . $e['path'];
+            if (@lstat($dst) !== false) throw new \RuntimeException('Destination already exists; nothing was moved.');
+            if (!hash_equals($e['sha256'], hash_file('sha256', $trial . '/' . $e['path']))) throw new \RuntimeException('Trial file changed.');
+        }
+        $p['status'] = 'promoting'; $p['index'] = 0; $run['placement'] = $p; $run['revision']++; wp_restore_save($run);
+    }
+    $bytes = 0;
+    while ($p['index'] < $p['total'] && $bytes < 8388608) {
+        $e = $entries[$p['index']]; $src = $trial . '/' . $e['path']; $dst = $run['root'] . '/' . $e['path'];
+        if (@lstat($src) === false) {
+            // Resume after an interrupted batch: the move already happened and must match exactly.
+            if (@lstat($dst) === false || !hash_equals($e['sha256'], hash_file('sha256', $dst))) throw new \RuntimeException('Promotion state unknown.');
+        } else {
+            if (@lstat($dst) !== false || !hash_equals($e['sha256'], hash_file('sha256', $src))) throw new \RuntimeException('Promotion refused.');
+            wp_restore_placement_mkdirs($run['root'], $e['path']);
+            if (!rename($src, $dst)) throw new \RuntimeException('Promotion move failed.');
+        }
+        $bytes += $e['size']; $p['index']++;
+    }
+    if ($p['index'] === $p['total']) {
+        $p['plugins_disabled'] = wp_restore_placement_disable_plugins($run);
+        $p['status'] = 'promoted';
+        // Best-effort removal of now-empty trial directories; leftovers are reported, not forced.
+        $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($trial, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($it as $node) if ($node->isDir() && !$node->isLink()) @rmdir($node->getPathname());
+        @rmdir($trial);
+    }
+    $run['placement'] = $p;
+}
 function wp_restore_backup_quote(string $name): string {
     if (!preg_match('/^[A-Za-z0-9_]{1,64}$/D', $name)) throw new \RuntimeException('Unsupported prior identifier.');
     return '`' . $name . '`';
@@ -3160,22 +3257,24 @@ if (in_array($restore_action, ['wp_restore_discover','wp_restore_prepare','wp_re
     if ($_POST['stage'] !== $run['stage']) site_report_api_reply(409, ['error'=>'Stale restore stage.']);
     $operation = $_POST['operation'] ?? null;
     $revision = $_POST['revision'] ?? null;
-    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare','replacement'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
+    if (!in_array($operation, ['files','sql','values','backup','backup_confirm','staging','assurance','replacement_prepare','replacement','placement_trial','placement_promote'], true) || !is_string($revision) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $revision)) site_report_api_reply(400, ['error'=>'A named preflight operation and revision are required.']);
     if ($revision !== (string)$run['revision']) site_report_api_reply(409, ['error'=>'Stale restore revision.']);
     // A durable mutation intent, retirement or unknown phase is terminal. Never
     // let an older adapter reset/replay it; authenticated state/download remain separate.
-    if (isset($run['replacement']) && ($run['replacement']['status'] ?? null) !== 'prepared') {
+    $placement = in_array($operation, ['placement_trial','placement_promote'], true);
+    if (!$placement && isset($run['replacement']) && ($run['replacement']['status'] ?? null) !== 'prepared') {
         if (($run['replacement']['status'] ?? null) === 'complete') site_report_api_reply(409, ['error'=>'Table replacement already completed. No database step was executed.','code'=>'replacement_complete']);
         site_report_api_reply(409, ['error'=>'Table replacement is terminal or uncertain. Do not replay SQL; retain the verified backup and recover manually.','code'=>'replacement_recovery_required']);
     }
     if ($operation === 'replacement' && !wp_restore_replacement_available()) site_report_api_reply(503, ['error'=>'Final table replacement is not available. No database step was executed.','code'=>'replacement_unavailable']);
-    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare','replacement'=>'\\wp_restore_replacement_step'][$operation];
+    $handler = __NAMESPACE__ . ['files'=>'\\wp_restore_files_step','sql'=>'\\wp_restore_sql_step','values'=>'\\wp_restore_values_step','backup'=>'\\wp_restore_backup_step','backup_confirm'=>'\\wp_restore_backup_confirm','staging'=>'\\wp_restore_staging_step','assurance'=>'\\wp_restore_assurance_step','replacement_prepare'=>'\\wp_restore_replacement_prepare','replacement'=>'\\wp_restore_replacement_step','placement_trial'=>'\\wp_restore_placement_trial','placement_promote'=>'\\wp_restore_placement_promote'][$operation];
     if (!function_exists($handler)) site_report_api_reply(503, ['error'=>'Restore adapters are not installed. Run unchanged.','code'=>'restore_adapter_unavailable']);
     try {
         $handler($run);
         $run['revision']++;
         wp_restore_save($run);
     } catch (\Throwable $e) {
+        if ($placement) site_report_api_reply(400, ['error'=>'File placement refused or interrupted. Nothing was overwritten; the trial folder and verified backup are retained.','code'=>'placement_failed']);
         if ($operation === 'replacement') site_report_api_reply(400, ['error'=>'Table replacement refused or interrupted. Do not replay SQL; retain the verified backup and inspect state for manual recovery.','code'=>'replacement_failed']);
         if ($operation === 'replacement_prepare') site_report_api_reply(400, ['error'=>'Replacement preparation failed. No table replacement was performed.','code'=>'replacement_prepare_failed']);
         if ($operation === 'assurance') site_report_api_reply(400, ['error'=>'Staged content assurance failed. No permanent table was changed.','code'=>'assurance_failed']);
