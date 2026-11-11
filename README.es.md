@@ -14,7 +14,6 @@ obtener reportes de su estado. No requieren Composer, framework ni compilación.
 | Archivo | Para qué sirve | Alcance |
 | --- | --- | --- |
 | `cms_tools.php` | Panel autenticado de migración, mantenimiento y reportes | Puede modificar el sitio y su base de datos. Es la implementación principal. |
-| `cms_tool.php` | URL compatible, en singular, para consultar el reporte con token | Solo expone el reporte JSON. Necesita `cms_tools.php` en la misma carpeta. |
 | `bigdump.php` | Importador escalonado SQL/CSV, con extensiones para WordPress | Distribuye la importación entre peticiones para trabajar con límites de PHP; puede reemplazar tablas. |
 | `bigdump_original.php` | Referencia histórica modificada de BigDump 0.36b, con detección de configuración | No es el panel actual ni una alternativa endurecida. No lo publiques como respaldo de seguridad. |
 
@@ -35,7 +34,7 @@ una descarga desde `main` puede no contener todavía las funciones de esta rama.
 3. Abrí `cms_tools.php` por **HTTPS** y restringí el acceso administrativo en el servidor.
 4. Por defecto, el panel pide `DB_PASSWORD`. Si está vacía, exige crear una contraseña
    propia. Una contraseña propia configurada después tiene prioridad.
-5. Para habilitar la API, copiá también `cms_tool.php` a esa misma carpeta.
+5. La API la sirve el propio `cms_tools.php`; no hace falta copiar otro archivo.
 
 La contraseña propia se guarda como **hash con salt**, no como texto cifrado recuperable.
 La autenticación del panel no es la autenticación de WordPress. El script descubre
@@ -115,7 +114,7 @@ Solo su hash SHA-256 se conserva en `.migrate_config`.
 Ejemplo de URL, con un marcador que debés reemplazar:
 
 ```text
-https://sitio.example/herramientas/cms_tool.php?action=site_report_api&token=TU_TOKEN_API
+https://sitio.example/herramientas/cms_tools.php?action=site_report_api&token=TU_TOKEN_API
 ```
 
 Preferí la cabecera Bearer para evitar colocar el token en la URL:
@@ -123,7 +122,7 @@ Preferí la cabecera Bearer para evitar colocar el token en la URL:
 ```bash
 curl --fail --silent --show-error \
   -H 'Authorization: Bearer TU_TOKEN_API' \
-  'https://sitio.example/herramientas/cms_tool.php?action=site_report_api'
+  'https://sitio.example/herramientas/cms_tools.php?action=site_report_api'
 ```
 
 Cada GET válido genera un reporte **nuevo**, sin login interactivo ni cookies de sesión.
@@ -248,7 +247,6 @@ implementación dejando el alias roto. No subas configuraciones reales al contro
 
 ```bash
 php -l cms_tools.php
-php -l cms_tool.php
 php tests/site-report.php
 SITE_REPORT_TEST_CURL=1 php tests/site-report.php
 php tests/site-report-api.php

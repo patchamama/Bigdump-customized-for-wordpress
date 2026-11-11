@@ -36,7 +36,6 @@ administration. No Composer, no framework, no build step — drop a file next to
 | File | Purpose | Boundary |
 | --- | --- | --- |
 | `cms_tools.php` | Authenticated migration, maintenance, reports and token management | Can modify live files, tables and accounts. |
-| `cms_tool.php` | Restricted compatibility URL for external report JSON | Requires `cms_tools.php` beside it; report tokens grant no administrative access. |
 | `bigdump.php` | Extended staggered SQL/CSV importer and WordPress migration tools | Import can drop/replace tables; use a separate backup and access restrictions. |
 | `bigdump_original.php` | Historical modified BigDump 0.36b reference with config discovery | Not the maintained panel or a hardened alternative; do not deploy merely because its name says original. |
 
@@ -86,9 +85,8 @@ operation over PDO/mysqli.
 
 ### External read-only report API
 
-Deploy `cms_tool.php` **beside** `cms_tools.php` to enable the singular compatibility
-URL. The alias serves only external report JSON; keep using `cms_tools.php` for
-administration. Both files are required, including when the tools live in a subdirectory.
+The external report route is served by `cms_tools.php` itself (`?action=site_report_api`);
+no extra file is needed, including when the tool lives in a subdirectory.
 
 1. Open the canonical tool over **HTTPS**, log in, and open **Report**.
 2. Click **Create / rotate API token** and **Copy URL once**. The URL is shown only
@@ -96,13 +94,13 @@ administration. Both files are required, including when the tools live in a subd
 3. Use the URL from a trusted HTTP client, or preferably send the token in a header:
 
 ```text
-https://example.test/tools/cms_tool.php?action=site_report_api&token=YOUR_API_TOKEN
+https://example.test/tools/cms_tools.php?action=site_report_api&token=YOUR_API_TOKEN
 ```
 
 ```bash
 curl --fail --silent --show-error \
   -H 'Authorization: Bearer YOUR_API_TOKEN' \
-  'https://example.test/tools/cms_tool.php?action=site_report_api'
+  'https://example.test/tools/cms_tools.php?action=site_report_api'
 ```
 
 **URL tokens can leak in server/proxy access logs and browser history.** Prefer
@@ -509,7 +507,6 @@ GitHub transports, not a real deployment:
 
 ```bash
 php -l cms_tools.php
-php -l cms_tool.php
 php tests/site-report.php
 SITE_REPORT_TEST_CURL=1 php tests/site-report.php
 php tests/site-report-api.php
@@ -528,7 +525,6 @@ full database behavior, Apache rules, all legacy actions or WordPress-upgrade co
 
 ```
 cms_tools.php            WordPress maintenance panel and report implementation
-cms_tool.php             Restricted report alias; requires cms_tools.php
 bigdump.php              Extended staggered MySQL importer
 bigdump_original.php     Historical modified BigDump reference
 README.es.md             Detailed Spanish usage and scope
@@ -548,6 +544,7 @@ bigdump.config.json      bigdump.php config — FTP credentials (git-ignored)
 | Unreleased feature work | Optional secret-excluding JSON report; private GitHub export with editable branch; restricted report API; independent hash-only tokens with verified atomic saves; English internal comments; bilingual documentation and explicit pending-work boundaries. Separate-staging/optional offline Docker upgrade smoke workflow passed bounded independent technical review; local integration and final delivery remain separate. Production promotion and full progressive installation/recovery are not delivered. |
 | `cms 3.21.0` | Database export file names now carry the `wp-config.php` table prefix (`db_<prefix>_<date>_<token>`); the export URL rewrite changes **both `siteurl` and `home`** (they can differ). **Asset recovery** now also re-points database references: after a missing `/wp-content/` file is downloaded from the original site, every reference to it (post content, post meta, options, including JSON-escaped and serialized values) is rewritten from the external URL to this site, so visitors stop loading it externally. Only recovered files are touched; look-alike names and files the origin lacks are left alone. |
 | `cms 3.21.1` | Fix: opening `cms_tools.php` returned `{"error":"Unauthorized."}` on sites whose `.htaccess` has the WordPress rule `E=HTTP_AUTHORIZATION:%{HTTP:Authorization}`; it sets the variable to an empty string when no header is sent, and the tool took that for an API call. Only a non-empty `Authorization` header now selects the machine API. |
+| `cms 3.22.0` | The compatibility alias `cms_tool.php` is **removed**. The external report API is served by `cms_tools.php` (`?action=site_report_api`, Bearer header or token), and **Create / rotate API token** now generates `cms_tools.php` URLs. Report URLs already issued with `cms_tool.php` stop working and must be regenerated. |
 | `cms 3.20.0` | **Installations in one database**: the tool lists every WordPress installation (table prefix) with its blog title, URL, posts, plugins and tables; opens any of them in a modal preview with a live prefix selector (a throwaway, token-protected folder that reuses the current core, plugins and uploads and is removed on close); and creates a **snapshot** of the current site in the same database under `<prefix>_<YYYYMMDD>_`, rewriting roles and capabilities for the new prefix. Previews run real WordPress with the current files, so they may write to that installation's tables. |
 | `cms 3.19.0` | Restored WordPress sites are now **verified**: HTTP checks of the home page and login, then each plugin that was active in the backup is re-enabled one at a time and kept only if the site stays healthy. Promotion of files is bound to the inspected trial content and uses a no-clobber move. **Fix:** plain text such as the default `time_format` (`g:i a`) was mistaken for serialized data, which made every real WordPress backup fail at the values step. Proven end to end with an official WordPress core in isolated containers. |
 | `cms 3.18.1` | WordPress restoration reports the backup table prefix against `wp-config.php` (`match`/`remap`) in the wizard before any change; `wp-config.php` is never modified. |

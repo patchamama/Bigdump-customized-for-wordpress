@@ -10,7 +10,7 @@ elements.report_api_csrf.value = 'csrf-binding';
 let listener, request, copied, fail = false;
 const context = vm.createContext({URLSearchParams, document: {getElementById: id => elements[id]}, window: {addEventListener: (_, fn) => {listener = fn;}}, navigator: {clipboard: {writeText: async value => {copied = value;}}}, fetch: async (url, options) => {
     request = {url, options};
-    return {ok: !fail, json: async () => ({url: 'https://example.test/nested/cms_tool.php?action=site_report_api&token=PLACEHOLDER'})};
+    return {ok: !fail, json: async () => ({url: 'https://example.test/nested/cms_tools.php?action=site_report_api&token=PLACEHOLDER'})};
 }});
 vm.runInContext(controller, context);
 (async () => {

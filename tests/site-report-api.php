@@ -5,7 +5,6 @@ mkdir($root, 0700); mkdir($root.'/nested', 0700); $site = $root.'/nested';
 $source = file_get_contents(__DIR__.'/../cms_tools.php');
 $source = preg_replace('/^<\?php/', '<?php namespace SiteReportFixture; use \\DirectoryIterator; use \\RecursiveIteratorIterator; use \\RecursiveDirectoryIterator; use \\FilesystemIterator; use \\Throwable; use \\Exception;', $source, 1);
 file_put_contents($site.'/cms_tools.php', $source);
-if (is_file(__DIR__.'/../cms_tool.php')) copy(__DIR__.'/../cms_tool.php', $site.'/cms_tool.php');
 copy(__DIR__.'/fixtures/site-report-api/prepend.php', $site.'/prepend.php');
 $original = ['password_hash'=>hash('sha256', 'odc_migrate_2026_x9kSyntheticLogin123'), 'unrelated'=>'KEEP'];
 file_put_contents($site.'/.migrate_config', json_encode($original));
@@ -62,39 +61,39 @@ try {
     check($code===405 && $body==='{"error":"Explicit POST required."}','management GET rejected');
     $manage = function($op) use ($csrf,$auth) { return req('cms_tools.php?action=site_report_token',['operation'=>$op,'csrf'=>$csrf],$auth); };
     [$code,$body] = $manage('create'); $url=json_decode($body,true)['url'] ?? '';
-    check($code===200 && str_starts_with($url,'https://127.0.0.1:'.$GLOBALS['port'].'/nested/cms_tool.php?action=site_report_api&token='), 'one-time current-directory HTTPS URL');
+    check($code===200 && str_starts_with($url,'https://127.0.0.1:'.$GLOBALS['port'].'/nested/cms_tools.php?action=site_report_api&token='), 'one-time current-directory HTTPS URL');
     parse_str(parse_url($url,PHP_URL_QUERY),$q); $token=$q['token'] ?? '';
     check(strlen($token)===64 && ctype_xdigit($token), '256-bit token');
     $config=json_decode(file_get_contents($site.'/.migrate_config'),true);
     check($config['password_hash']===$original['password_hash'] && $config['unrelated']==='KEEP' && $config['site_report_api_hash']===hash('sha256',$token) && !str_contains(json_encode($config),$token), 'hash-only merge persistence');
     [$code,$body] = req('cms_tools.php',null,$auth); check(!str_contains($body,$token), 'URL never restored on reload');
-    foreach (['cms_tool.php?action=site_report_api&token='.$token,'cms_tools.php?action=site_report_api'] as $path) {
+    foreach (['cms_tools.php?action=site_report_api&token='.$token,'cms_tools.php?action=site_report_api'] as $path) {
         [$code,$body,$headers]=req($path,null,['Authorization: Bearer '.$token]);
         check($code===200 && (json_decode($body,true)['schema']??'')==='cms-tools-site-report','fresh public JSON without cookies');
         check(!preg_grep('/^Set-Cookie:/i',$headers) && in_array('Cache-Control: no-store',$headers) && in_array('X-Content-Type-Options: nosniff',$headers),'machine security headers');
         foreach ([$token,$config['site_report_api_hash'],$original['password_hash'],'CONFIG_SECRET','SYNTHETIC_DB_SECRET'] as $secret) check(!str_contains($body,$secret),'report excludes secrets');
     }
     file_put_contents($site.'/wp-includes/version.php', "<?php \$wp_version = '6.9.9';");
-    [$code,$body]=req('cms_tool.php?action=site_report_api&token='.$token);
+    [$code,$body]=req('cms_tools.php?action=site_report_api&token='.$token);
     check((json_decode($body,true)['wordpress']['version']??'')==='6.9.9','report collected anew');
-    foreach (['','&token=bad','&token[]=bad','&token=bad&lang=es'] as $suffix) denied('cms_tool.php?action=site_report_api'.$suffix);
+    foreach (['','&token=bad','&token[]=bad','&token=bad&lang=es'] as $suffix) denied('cms_tools.php?action=site_report_api'.$suffix);
     denied('cms_tools.php?action=site_report_api&token[]=bad');
-    denied('cms_tool.php?action[]=site_report_api&token='.$token);
-    denied('cms_tool.php?action=site_report_api', null, ['Authorization: Bearer bad']);
+    denied('cms_tools.php?action[]=site_report_api&token='.$token);
+    denied('cms_tools.php?action=site_report_api', null, ['Authorization: Bearer bad']);
     [$code,$body]=req('cms_tools.php?empty_auth=1');
     check($code===200 && !str_contains($body,'"error":"Unauthorized."'), 'empty HTTP_AUTHORIZATION from a rewrite rule is a normal visit');
     denied('cms_tools.php?empty_auth=1&action=site_report_api');
     denied('cms_tools.php?action=get_wpconfig&token='.$token, ['set_password'=>1], $auth);
     denied('cms_tools.php?action=site_report_github', [], ['Authorization: Bearer '.$token]);
-    [$code,$body,$headers]=req('cms_tool.php?action=site_report_api&token='.$token.'&lang=es');
+    [$code,$body,$headers]=req('cms_tools.php?action=site_report_api&token='.$token.'&lang=es');
     check($code===200 && !preg_grep('/^Set-Cookie:/i',$headers),'machine language parameter cannot write cookies');
-    foreach (['get_wpconfig','site_report_github','diag_maintenance','bigdump','site_report','test_db','wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'] as $action) denied('cms_tool.php?action='.$action.'&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
+    foreach (['get_wpconfig','site_report_github','diag_maintenance','bigdump','site_report','test_db','wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'] as $action) denied('cms_tools.php?action='.$action.'&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
     foreach (['wp_restore_discover','wp_restore_prepare','wp_restore_state','wp_restore_step'] as $action) denied('cms_tools.php?action='.$action, ['csrf'=>'invalid','run_id'=>'invalid','stage'=>'preflight'], array_merge($auth,['Authorization: Bearer '.$token]));
     denied('cms_tools.php?action=site_report_api&token='.$token,['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123'],$auth);
     $beforeOptions=file_get_contents($site.'/.migrate_config');
-    [$code,$body,$headers]=req('cms_tool.php?action=site_report_api',null,[],'OPTIONS');
+    [$code,$body,$headers]=req('cms_tools.php?action=site_report_api',null,[],'OPTIONS');
     check($code===204 && $body==='' && !preg_grep('/^Set-Cookie:/i',$headers) && $beforeOptions===file_get_contents($site.'/.migrate_config'),'OPTIONS has no report or auth writes');
-    [$code,$body]=req('cms_tool.php?action=site_report_api&token='.$token.'&http=1');
+    [$code,$body]=req('cms_tools.php?action=site_report_api&token='.$token.'&http=1');
     check($code===400 && $body==='{"error":"HTTPS required."}','HTTP refuses token use');
     foreach (['write','short','permissions','rename'] as $failure) {
         foreach (['create','rotate','revoke'] as $operation) {
@@ -103,20 +102,20 @@ try {
             check($code === 503 && $body === '{"error":"API token could not be saved. Check configuration permissions and try again."}',
                 'persistence '.$failure.' never claims '.$operation.' success');
             check(file_get_contents($site.'/.migrate_config') === $beforeFailure, 'failed '.$operation.' preserves exact existing credentials and settings');
-            [$activeCode,$activeBody] = req('cms_tool.php?action=site_report_api&token='.$token);
+            [$activeCode,$activeBody] = req('cms_tools.php?action=site_report_api&token='.$token);
             check($activeCode === 200 && (json_decode($activeBody,true)['schema'] ?? '') === 'cms-tools-site-report', 'failed '.$operation.' honestly leaves old token active');
             check(count(glob($site.'/.migrate_config-*')) === 0, 'failed persistence cleans private temporary files');
         }
     }
     [$code,$body]=$manage('rotate'); parse_str(parse_url(json_decode($body,true)['url'],PHP_URL_QUERY),$new);
-    check($new['token']!==$token,'independent rotation'); denied('cms_tool.php?action=site_report_api&token='.$token);
+    check($new['token']!==$token,'independent rotation'); denied('cms_tools.php?action=site_report_api&token='.$token);
     [$code,$body]=$manage('revoke'); check($code===200 && $body==='{"ok":true}','explicit revoke');
-    denied('cms_tool.php?action=site_report_api&token='.$new['token']);
+    denied('cms_tools.php?action=site_report_api&token='.$new['token']);
     $finalConfig=json_decode(file_get_contents($site.'/.migrate_config'),true);
     check($finalConfig['password_hash']===$original['password_hash'] && $finalConfig['unrelated']==='KEEP' && $finalConfig['site_report_api_hash']===null,'rotation and revocation preserve every unrelated config key');
     // A missing config must not reopen password bootstrap through the alias.
     file_put_contents($site.'/.migrate_config', '{}');
-    denied('cms_tool.php?action=site_report_api', ['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123']);
+    denied('cms_tools.php?action=site_report_api', ['set_password'=>1,'new_password'=>'Attacker123','new_password2'=>'Attacker123']);
     foreach (glob($root.'/sess_*') as $session) check(!str_contains(file_get_contents($session),$token) && !str_contains(file_get_contents($session),$new['token']),'no token session persistence');
 } catch (Throwable $e) { fwrite(STDERR,'FAIL '.$e->getMessage()."\nArtifacts: $root\n"); $exit=1; }
 finally { proc_terminate($process); proc_close($process); }

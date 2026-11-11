@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.21.1');
+define('TOOL_VERSION',  '3.22.0');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -3580,7 +3580,7 @@ if (($_GET['action'] ?? null) === 'site_report_token') {
     $directory = rtrim(str_replace('\\', '/', dirname($script)), '/');
     $token = bin2hex(random_bytes(32));
     site_report_api_store_hash(hash('sha256', $token));
-    site_report_api_reply(200, ['url'=>'https://' . $host . $directory . '/cms_tool.php?action=site_report_api&token=' . $token]);
+    site_report_api_reply(200, ['url'=>'https://' . $host . $directory . '/cms_tools.php?action=site_report_api&token=' . $token]);
 }
 
 $auth_error = '';
