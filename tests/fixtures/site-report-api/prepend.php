@@ -2,6 +2,8 @@
 namespace SiteReportFixture;
 // No real database or TLS connection is ever made by these fixtures.
 $_SERVER['HTTPS'] = isset($_GET['http']) ? '' : 'on';
+// Mimic the rewrite rule E=HTTP_AUTHORIZATION:%{HTTP:Authorization}, which sets an empty value when no header was sent.
+if (isset($_GET['empty_auth'])) $_SERVER['HTTP_AUTHORIZATION'] = '';
 // Fail only synthetic configuration writes, including atomic temporary files.
 function config_path($path) { return str_starts_with(basename($path), '.migrate_config'); }
 function file_put_contents($path, $data, $flags = 0, $context = null) {

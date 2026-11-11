@@ -81,6 +81,9 @@ try {
     denied('cms_tools.php?action=site_report_api&token[]=bad');
     denied('cms_tool.php?action[]=site_report_api&token='.$token);
     denied('cms_tool.php?action=site_report_api', null, ['Authorization: Bearer bad']);
+    [$code,$body]=req('cms_tools.php?empty_auth=1');
+    check($code===200 && !str_contains($body,'"error":"Unauthorized."'), 'empty HTTP_AUTHORIZATION from a rewrite rule is a normal visit');
+    denied('cms_tools.php?empty_auth=1&action=site_report_api');
     denied('cms_tools.php?action=get_wpconfig&token='.$token, ['set_password'=>1], $auth);
     denied('cms_tools.php?action=site_report_github', [], ['Authorization: Bearer '.$token]);
     [$code,$body,$headers]=req('cms_tool.php?action=site_report_api&token='.$token.'&lang=es');

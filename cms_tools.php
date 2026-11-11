@@ -12,7 +12,7 @@
 // To change the password, run:
 //   php -r "echo hash('sha256', 'TU_SALT_AQUI' . 'TU_PASSWORD');"
 // and replace PASSWORD_HASH below.
-define('TOOL_VERSION',  '3.21.0');
+define('TOOL_VERSION',  '3.21.1');
 define('AUTH_SALT',     'odc_migrate_2026_x9k');
 define('PASSWORD_HASH', ''); // empty = first run; the user will be prompted to create a password
 
@@ -1193,7 +1193,7 @@ function site_report_api_request() {
     // Existing file-download links have their own token contract, not API privileges.
     $action = $_GET['action'] ?? null;
     return defined('SITE_REPORT_API_ONLY') || $action === 'site_report_api'
-        || isset($_SERVER['HTTP_AUTHORIZATION'])
+        || (isset($_SERVER['HTTP_AUTHORIZATION']) && $_SERVER['HTTP_AUTHORIZATION'] !== '') // a rewrite rule sets it empty when no header was sent
         || (array_key_exists('token', $_GET) && $action !== 'download');
 }
 $machine_report = site_report_api_request();
